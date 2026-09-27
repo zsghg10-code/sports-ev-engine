@@ -11,8 +11,8 @@ from sports_ev_engine.market import consensus, clean_odds
 from sports_ev_engine.auto_soccer import analyze_event
 from sports_ev_engine.core.parlay import optimize_parlays
 
-st.set_page_config(page_title="Sports EV Engine v2.1",layout="wide")
-st.title("Sports EV Engine v2.1")
+st.set_page_config(page_title="Sports EV Engine v2.1.1.1",layout="wide")
+st.title("Sports EV Engine v2.1.1.1")
 st.caption("종목 선택 → 배당 수집 → 축구 최근폼 모델 → BE/Edge/EV → 2~6폴 자동 생성")
 
 def secret(name):

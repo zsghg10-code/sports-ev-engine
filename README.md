@@ -1,3 +1,7 @@
+# Sports EV Engine v2.1.1
+
+Patch: API-Football Free plan compatibility. The app no longer uses the `last` parameter. It retrieves fixtures with date ranges and selects the latest completed matches locally.
+
 
 # Sports EV Engine v2.1
 
