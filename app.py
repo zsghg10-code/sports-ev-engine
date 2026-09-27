@@ -1,6 +1,7 @@
 
 import os
-from datetime import date
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 import pandas as pd
 import streamlit as st
 
@@ -11,8 +12,8 @@ from sports_ev_engine.market import consensus, clean_odds
 from sports_ev_engine.auto_soccer import analyze_event
 from sports_ev_engine.core.parlay import optimize_parlays
 
-st.set_page_config(page_title="Sports EV Engine v2.1.1.1",layout="wide")
-st.title("Sports EV Engine v2.1.1.1")
+st.set_page_config(page_title="Sports EV Engine v2.1.2.1",layout="wide")
+st.title("Sports EV Engine v2.1.2.1")
 st.caption("종목 선택 → 배당 수집 → 축구 최근폼 모델 → BE/Edge/EV → 2~6폴 자동 생성")
 
 def secret(name):
@@ -33,6 +34,7 @@ tabs=st.tabs(["⚡ 완전자동 축구","실시간 배당","시장 가격","MLB"
 with tabs[0]:
     st.subheader("완전자동 축구 분석")
     st.write("배당과 팀 최근 경기 데이터를 자동으로 불러와 승무패·핸디·O/U의 모델확률과 EV를 계산합니다.")
+    st.caption("API-Football 무료 플랜은 100요청/일이므로 기본값은 오늘 경기만 분석합니다. 한 경기 실패가 전체 분석을 중단하지 않도록 변경했습니다.")
     if not ODDS_KEY:
         st.warning("THE_ODDS_API_KEY가 필요합니다.")
     if not FOOTBALL_KEY:
@@ -53,6 +55,13 @@ with tabs[0]:
     region=c2.selectbox("배당 지역",["eu","uk","us","au"],index=0)
     recent_n=c3.selectbox("최근 경기 반영", [4,5,6,8,10], index=2)
 
+    date_scope=st.selectbox(
+        "경기 범위",
+        ["오늘(KST)","앞으로 3일","앞으로 7일","전체"],
+        index=0,
+        help="API가 반환하는 미래 전체 경기를 전부 분석하지 않고 원하는 날짜 범위만 분석합니다."
+    )
+
     markets=st.multiselect("분석 마켓",["h2h","spreads","totals"],default=["h2h","spreads","totals"])
     min_books=st.slider("컨센서스 최소 북메이커 수",2,6,3)
     run=st.button("🚀 선택 종목 전체 자동분석",type="primary",disabled=not(ODDS_KEY and FOOTBALL_KEY))
@@ -63,6 +72,27 @@ with tabs[0]:
                 odds_api=TheOddsAPI(ODDS_KEY)
                 events,headers=odds_api.odds(sport_key,region,",".join(markets))
                 raw=clean_odds(odds_api.flatten(events))
+                # Limit to requested KST date window before any API-Football calls.
+                if not raw.empty and date_scope != "전체":
+                    kst=ZoneInfo("Asia/Seoul")
+                    now_kst=datetime.now(kst)
+                    ts=pd.to_datetime(raw["commence_time"],utc=True,errors="coerce").dt.tz_convert(kst)
+                    if date_scope=="오늘(KST)":
+                        mask=ts.dt.date==now_kst.date()
+                    elif date_scope=="앞으로 3일":
+                        end=(now_kst+timedelta(days=3))
+                        mask=(ts>=now_kst)&(ts<=end)
+                    else:
+                        end=(now_kst+timedelta(days=7))
+                        mask=(ts>=now_kst)&(ts<=end)
+                    raw=raw[mask].copy()
+                if raw.empty:
+                    st.warning("선택한 날짜 범위에 배당이 있는 경기가 없습니다.")
+                    st.session_state["raw_odds"]=raw
+                    st.session_state["market"]=pd.DataFrame()
+                    st.session_state["ranked"]=pd.DataFrame()
+                    status.update(label="선택 범위 경기 없음",state="complete")
+                    st.stop()
                 st.session_state["raw_odds"]=raw
                 market=consensus(raw,min_books=min_books)
                 st.session_state["market"]=market
@@ -72,13 +102,22 @@ with tabs[0]:
                 all_rows=[]
                 event_meta=[]
                 total_events=market["event_id"].nunique() if not market.empty else 0
+                failures=[]
                 for idx,(eid,g) in enumerate(market.groupby("event_id"),start=1):
-                    st.write(f"[{idx}/{total_events}] {g.iloc[0]['home_team']} - {g.iloc[0]['away_team']}")
-                    analyzed,meta=analyze_event(g,foot,st.session_state["team_cache"],recent_n=recent_n)
-                    if not analyzed.empty:
-                        analyzed["sport_key"]=sport_key
-                        all_rows.append(analyzed)
-                    event_meta.append(meta)
+                    home=g.iloc[0]["home_team"]; away=g.iloc[0]["away_team"]
+                    st.write(f"[{idx}/{total_events}] {home} - {away}")
+                    try:
+                        analyzed,meta=analyze_event(g,foot,st.session_state["team_cache"],recent_n=recent_n)
+                        if not analyzed.empty:
+                            analyzed["sport_key"]=sport_key
+                            all_rows.append(analyzed)
+                        else:
+                            failures.append({"경기":f"{home} - {away}","이유":meta.get("reason",meta.get("status","데이터 없음"))})
+                        event_meta.append(meta)
+                    except Exception as e:
+                        failures.append({"경기":f"{home} - {away}","이유":str(e)})
+                        event_meta.append({"status":"exception","home":home,"away":away,"reason":str(e)})
+                st.session_state["failures"]=failures
                 ranked=pd.concat(all_rows,ignore_index=True) if all_rows else pd.DataFrame()
                 if not ranked.empty:
                     ranked=ranked.sort_values(["conservative_ev_roi","edge_pp"],ascending=False)
@@ -108,6 +147,10 @@ with tabs[0]:
         st.caption("A/B/C는 모델 EV와 불확실성 보정을 반영한 등급입니다. PASS는 조합에서 제외됩니다.")
     elif "ranked" in st.session_state:
         st.info("현재 필터와 데이터에서 +EV 후보가 없습니다.")
+
+    if st.session_state.get("failures"):
+        with st.expander(f"분석하지 못한 경기 {len(st.session_state['failures'])}개 보기"):
+            st.dataframe(pd.DataFrame(st.session_state["failures"]),use_container_width=True,hide_index=True)
 
 with tabs[1]:
     st.subheader("실시간 배당 원본")
@@ -175,7 +218,10 @@ THE_ODDS_API_KEY = "..."
 API_FOOTBALL_KEY = "..."
 ```
 
-**v2.1에서 달라진 점**
+**v2.1.2에서 달라진 점**
+- API-Football `season` 필수 오류 수정
+- 오늘/3일/7일 경기 범위 필터 추가
+- 한 경기 API 오류가 전체 분석을 중단하지 않도록 격리
 - 수동 Elo/xG 입력 제거
 - 팀 최근 경기 자동 수집
 - 최근 득점/실점 기반 독립 Poisson 모델 자동 생성

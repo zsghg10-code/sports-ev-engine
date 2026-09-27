@@ -1,6 +1,6 @@
 
 import requests
-from datetime import date, timedelta
+from datetime import date
 
 BASE="https://v3.football.api-sports.io"
 
@@ -24,40 +24,38 @@ class APIFootball:
 
     def recent_fixtures(self,team_id,last=6):
         """
-        Free-plan compatible recent fixtures.
-        API-Football Free plan can reject the `last` parameter, so we query
-        a date window and take the most recent completed matches locally.
+        Free-plan compatible.
+        API-Football requires `season` for team fixture queries on some plans/endpoints.
+        We query current season first, then prior season if needed, and select the
+        latest completed matches locally. No `last` parameter is used.
         """
         today=date.today()
-
-        # National teams can have sparse schedules, so try progressively wider windows.
-        windows=(120, 240, 420, 730)
+        wanted=int(last)
         collected=[]
         seen=set()
 
-        for days in windows:
-            start=today-timedelta(days=days)
+        # Current and previous season are enough for recent national-team form in normal use.
+        # Include next year defensively for competitions whose season label is the ending year.
+        seasons=[today.year, today.year-1, today.year+1]
+
+        for season in seasons:
             try:
                 rows=self._get("fixtures",{
                     "team":int(team_id),
-                    "from":start.isoformat(),
-                    "to":today.isoformat(),
+                    "season":int(season),
                 })
             except RuntimeError as e:
-                # If a provider plan rejects a date window, try a smaller/fallback query.
-                if not collected:
-                    try:
-                        rows=self._get("fixtures",{"team":int(team_id)})
-                    except Exception:
-                        raise e
-                else:
-                    rows=[]
+                # Free data may not include a season; skip unavailable season instead of killing batch.
+                msg=str(e).lower()
+                if "season" in msg or "plan" in msg or "access" in msg or "coverage" in msg:
+                    continue
+                raise
 
             for fx in rows:
                 fid=fx.get("fixture",{}).get("id")
                 status=fx.get("fixture",{}).get("status",{}).get("short")
                 goals=fx.get("goals",{})
-                # Completed fixtures only; require score.
+                ts=fx.get("fixture",{}).get("timestamp",0)
                 if fid in seen:
                     continue
                 if status not in {"FT","AET","PEN"}:
@@ -67,14 +65,11 @@ class APIFootball:
                 seen.add(fid)
                 collected.append(fx)
 
-            if len(collected) >= int(last):
+            if len(collected)>=wanted:
                 break
 
-        collected.sort(
-            key=lambda fx: fx.get("fixture",{}).get("timestamp",0),
-            reverse=True
-        )
-        return collected[:int(last)]
+        collected.sort(key=lambda fx:fx.get("fixture",{}).get("timestamp",0),reverse=True)
+        return collected[:wanted]
 
     def fixtures_by_date(self,date_str):
         return self._get("fixtures",{"date":date_str})

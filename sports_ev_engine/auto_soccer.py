@@ -29,18 +29,27 @@ def analyze_event(event_rows, api_football, cache, recent_n=6):
     def team_info(name):
         key=norm_name(name)
         if key not in cache:
-            search=api_football.search_team(name)
-            team=choose_team(search,name)
-            if not team:
-                cache[key]=None
-            else:
-                fixtures=api_football.recent_fixtures(team["id"],recent_n)
-                cache[key]={"team":team,"fixtures":fixtures,"form":recent_form(fixtures,team["id"])}
+            try:
+                search=api_football.search_team(name)
+                team=choose_team(search,name)
+                if not team:
+                    cache[key]={"error":f"team mapping failed: {name}"}
+                else:
+                    fixtures=api_football.recent_fixtures(team["id"],recent_n)
+                    if not fixtures:
+                        cache[key]={"error":f"no completed fixtures available: {name}"}
+                    else:
+                        cache[key]={"team":team,"fixtures":fixtures,"form":recent_form(fixtures,team["id"])}
+            except Exception as e:
+                cache[key]={"error":str(e)}
         return cache[key]
 
     hi=team_info(home); ai=team_info(away)
-    if not hi or not ai:
-        return pd.DataFrame(), {"status":"mapping_failed","home":home,"away":away}
+    if not hi or not ai or hi.get("error") or ai.get("error"):
+        return pd.DataFrame(), {
+            "status":"data_failed","home":home,"away":away,
+            "reason": (hi or {}).get("error") or (ai or {}).get("error") or "unknown"
+        }
 
     hf=hi["form"]; af=ai["form"]
     hl,al=build_lambdas(hf,af)
