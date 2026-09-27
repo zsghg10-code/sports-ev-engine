@@ -1,19 +1,17 @@
 
 from __future__ import annotations
-from datetime import datetime, timezone
 import pandas as pd
 
-from sports_ev_engine.models.soccer_auto import (
-    choose_team, recent_form, build_lambdas, score_matrix, price_from_matrix, norm_name
-)
+from sports_ev_engine.models.soccer_auto import build_lambdas, score_matrix, price_from_matrix, norm_name
+from sports_ev_engine.competition_form import team_recent_form_from_pool
 from sports_ev_engine.core.ev import analyze_bet
 
 def _side_for_row(r):
     home=norm_name(r["home_team"]); away=norm_name(r["away_team"]); sel=norm_name(r["selection"])
     if r["market"]=="h2h":
-        if sel==home: return "home"
-        if sel==away: return "away"
-        if "draw" in sel: return "draw"
+        if sel==home:return "home"
+        if sel==away:return "away"
+        if "draw" in sel:return "draw"
     elif r["market"]=="totals":
         return "over" if "over" in sel else "under"
     elif r["market"]=="spreads":
@@ -21,42 +19,30 @@ def _side_for_row(r):
         if sel==away:return "away"
     return None
 
-def analyze_event(event_rows, api_football, cache, recent_n=6):
+def analyze_event(event_rows, competition_pool, recent_n=6):
     first=event_rows.iloc[0]
     home=first["home_team"]; away=first["away_team"]
-    notes=[]
+    cutoff=first.get("commence_time")
+    fixtures=competition_pool.get("fixtures",[])
 
-    def team_info(name):
-        key=norm_name(name)
-        if key not in cache:
-            try:
-                search=api_football.search_team(name)
-                team=choose_team(search,name)
-                if not team:
-                    cache[key]={"error":f"team mapping failed: {name}"}
-                else:
-                    fixtures=api_football.recent_fixtures(team["id"],recent_n)
-                    if not fixtures:
-                        cache[key]={"error":f"no completed fixtures available: {name}"}
-                    else:
-                        cache[key]={"team":team,"fixtures":fixtures,"form":recent_form(fixtures,team["id"])}
-            except Exception as e:
-                cache[key]={"error":str(e)}
-        return cache[key]
+    hf=team_recent_form_from_pool(fixtures,home,cutoff,recent_n=recent_n)
+    af=team_recent_form_from_pool(fixtures,away,cutoff,recent_n=recent_n)
 
-    hi=team_info(home); ai=team_info(away)
-    if not hi or not ai or hi.get("error") or ai.get("error"):
+    if not hf or not af:
+        missing=[]
+        if not hf: missing.append(home)
+        if not af: missing.append(away)
         return pd.DataFrame(), {
-            "status":"data_failed","home":home,"away":away,
-            "reason": (hi or {}).get("error") or (ai or {}).get("error") or "unknown"
+            "status":"data_failed",
+            "home":home,"away":away,
+            "reason":"same-competition completed fixtures unavailable: " + ", ".join(missing)
         }
 
-    hf=hi["form"]; af=ai["form"]
     hl,al=build_lambdas(hf,af)
     matrix=score_matrix(hl,al)
 
     sample=min(hf["matches"],af["matches"])
-    base_unc=4.0 + (2.0 if sample<5 else 0.0)
+    base_unc=4.0 + (2.0 if sample<5 else 0.0) + (1.0 if sample<3 else 0.0)
 
     rows=[]
     for _,r in event_rows.iterrows():
@@ -68,12 +54,9 @@ def analyze_event(event_rows, api_football, cache, recent_n=6):
             if pd.isna(r.get("point")):
                 continue
             line=float(r["point"])
-            # Odds API point is from selected team's perspective for spreads.
-            # For away side, settlement function expects the selected team's own handicap,
-            # so line is used directly after swapping score order inside price_from_matrix.
         w,p,l=price_from_matrix(matrix,r["market"],side,line)
         ev=analyze_bet(float(r["best_odds"]),w,p,base_unc)
-        display = f'{r["home_team"]}-{r["away_team"]} | {r["selection"]}'
+        display=f'{r["home_team"]}-{r["away_team"]} | {r["selection"]}'
         if line is not None:
             display += f' {line:+g}' if r["market"]=="spreads" else f' {line:g}'
         d=r.to_dict()
@@ -88,6 +71,8 @@ def analyze_event(event_rows, api_football, cache, recent_n=6):
             "home_recent_ga":hf["ga"],
             "away_recent_gf":af["gf"],
             "away_recent_ga":af["ga"],
+            "home_form_matches":hf["matches"],
+            "away_form_matches":af["matches"],
             "uncertainty_pp":base_unc,
             "break_even":ev.break_even,
             "edge_pp":ev.edge_pp,
@@ -97,8 +82,9 @@ def analyze_event(event_rows, api_football, cache, recent_n=6):
             "grade":ev.grade,
         })
         rows.append(d)
+
     return pd.DataFrame(rows), {
         "status":"ok","home":home,"away":away,
-        "home_team_id":hi["team"]["id"],"away_team_id":ai["team"]["id"],
-        "home_form":hf,"away_form":af,"home_lambda":hl,"away_lambda":al,
+        "home_form":hf,"away_form":af,
+        "home_lambda":hl,"away_lambda":al,
     }

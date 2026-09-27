@@ -1,14 +1,17 @@
-# Sports EV Engine v2.1.2
+# Sports EV Engine v2.1.3
 
-Patch release for API-Football Free-plan compatibility.
+This patch replaces per-team recent-fixture calls with a competition-centric data pipeline.
 
-## Fixes
-- Adds required `season` parameter to team fixture queries.
-- Never uses the paid/free-restricted `last` parameter.
-- Filters to today's KST games by default before calling API-Football.
-- Offers today / next 3 days / next 7 days / all date scopes.
-- One failed team/game no longer stops the entire batch.
-- Shows a failure table with the exact provider reason.
-- Keeps API-Football usage lower for the 100 requests/day Free plan.
+## Why
+API-Football Free plan returned no completed fixtures for the team+season lookup used in v2.1.2.
 
-API keys remain in Streamlit Secrets only.
+## New flow
+- Resolve selected competition through `/leagues?search=...`
+- Fetch current and previous available season using `/fixtures?league=ID&season=YEAR`
+- Build one cached competition fixture pool
+- Derive each team's recent completed matches locally from that pool
+- Analyze every current event from the same pool
+
+For UEFA Nations League the API-Football competition ID is 5 (resolved automatically).
+
+This reduces API-Football calls substantially and avoids the Free-plan `last`/team-season problems.

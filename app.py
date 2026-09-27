@@ -10,10 +10,11 @@ from sports_ev_engine.providers.api_football import APIFootball
 from sports_ev_engine.providers.mlb_statsapi import schedule as mlb_schedule
 from sports_ev_engine.market import consensus, clean_odds
 from sports_ev_engine.auto_soccer import analyze_event
+from sports_ev_engine.competition_form import build_competition_pool
 from sports_ev_engine.core.parlay import optimize_parlays
 
-st.set_page_config(page_title="Sports EV Engine v2.1.2.1",layout="wide")
-st.title("Sports EV Engine v2.1.2.1")
+st.set_page_config(page_title="Sports EV Engine v2.1.3",layout="wide")
+st.title("Sports EV Engine v2.1.3")
 st.caption("종목 선택 → 배당 수집 → 축구 최근폼 모델 → BE/Edge/EV → 2~6폴 자동 생성")
 
 def secret(name):
@@ -26,15 +27,13 @@ def secret(name):
 ODDS_KEY=secret("THE_ODDS_API_KEY")
 FOOTBALL_KEY=secret("API_FOOTBALL_KEY")
 
-if "team_cache" not in st.session_state:
-    st.session_state["team_cache"]={}
 
 tabs=st.tabs(["⚡ 완전자동 축구","실시간 배당","시장 가격","MLB","다폴","설정"])
 
 with tabs[0]:
     st.subheader("완전자동 축구 분석")
     st.write("배당과 팀 최근 경기 데이터를 자동으로 불러와 승무패·핸디·O/U의 모델확률과 EV를 계산합니다.")
-    st.caption("API-Football 무료 플랜은 100요청/일이므로 기본값은 오늘 경기만 분석합니다. 한 경기 실패가 전체 분석을 중단하지 않도록 변경했습니다.")
+    st.caption("무료 플랜 호환: 팀별 API 호출 대신 선택한 대회의 경기목록을 한 번 불러와 최근 같은 대회 성적을 자동 계산합니다.")
     if not ODDS_KEY:
         st.warning("THE_ODDS_API_KEY가 필요합니다.")
     if not FOOTBALL_KEY:
@@ -99,6 +98,17 @@ with tabs[0]:
                 st.write(f"배당: {len(events)}경기 / {len(raw)}개 항목")
 
                 foot=APIFootball(FOOTBALL_KEY)
+
+                # Resolve the selected competition once and fetch its current/previous fixture history.
+                # The Odds API label is usually "Title — Description"; use the title part.
+                competition_name=label.split(" — ")[0].strip()
+                target_year=datetime.now(ZoneInfo("Asia/Seoul")).year
+                pool=build_competition_pool(foot,competition_name,target_year)
+                st.write(
+                    f"모델 데이터: API-Football {pool['league_name']} "
+                    f"(league_id={pool['league_id']}, seasons={pool['seasons']}, fixtures={len(pool['fixtures'])})"
+                )
+
                 all_rows=[]
                 event_meta=[]
                 total_events=market["event_id"].nunique() if not market.empty else 0
@@ -107,7 +117,7 @@ with tabs[0]:
                     home=g.iloc[0]["home_team"]; away=g.iloc[0]["away_team"]
                     st.write(f"[{idx}/{total_events}] {home} - {away}")
                     try:
-                        analyzed,meta=analyze_event(g,foot,st.session_state["team_cache"],recent_n=recent_n)
+                        analyzed,meta=analyze_event(g,pool,recent_n=recent_n)
                         if not analyzed.empty:
                             analyzed["sport_key"]=sport_key
                             all_rows.append(analyzed)
@@ -134,7 +144,7 @@ with tabs[0]:
         view=ranked[ranked["grade"]!="PASS"].copy()
         cols=["grade","display_pick","best_book","best_odds","books","consensus_prob",
               "model_win_prob","push_prob","break_even","edge_pp","ev_roi",
-              "conservative_ev_roi","uncertainty_pp","home_lambda","away_lambda"]
+              "conservative_ev_roi","uncertainty_pp","home_form_matches","away_form_matches","home_lambda","away_lambda"]
         view=view[cols]
         for c in ["consensus_prob","model_win_prob","push_prob","break_even"]:
             view[c]=(view[c]*100).round(1)
@@ -218,8 +228,12 @@ THE_ODDS_API_KEY = "..."
 API_FOOTBALL_KEY = "..."
 ```
 
-**v2.1.2에서 달라진 점**
-- API-Football `season` 필수 오류 수정
+**v2.1.3에서 달라진 점**
+- 팀별 최근경기 API 호출 제거
+- 대회 전체 경기목록 1~2회 호출로 최근폼 계산
+- UEFA Nations League는 API-Football league_id 5로 자동 매칭
+- API 무료 플랜 요청량 대폭 절약
+- API-Football `season` 필수 오류 우회
 - 오늘/3일/7일 경기 범위 필터 추가
 - 한 경기 API 오류가 전체 분석을 중단하지 않도록 격리
 - 수동 Elo/xG 입력 제거

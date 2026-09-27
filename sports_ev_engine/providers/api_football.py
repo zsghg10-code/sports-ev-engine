@@ -19,57 +19,17 @@ class APIFootball:
             raise RuntimeError(str(errors))
         return body.get("response",[])
 
+    def search_leagues(self, name):
+        return self._get("leagues", {"search": name})
+
+    def league_fixtures(self, league_id, season):
+        return self._get("fixtures", {
+            "league": int(league_id),
+            "season": int(season),
+        })
+
     def search_team(self,name):
         return self._get("teams",{"search":name})
-
-    def recent_fixtures(self,team_id,last=6):
-        """
-        Free-plan compatible.
-        API-Football requires `season` for team fixture queries on some plans/endpoints.
-        We query current season first, then prior season if needed, and select the
-        latest completed matches locally. No `last` parameter is used.
-        """
-        today=date.today()
-        wanted=int(last)
-        collected=[]
-        seen=set()
-
-        # Current and previous season are enough for recent national-team form in normal use.
-        # Include next year defensively for competitions whose season label is the ending year.
-        seasons=[today.year, today.year-1, today.year+1]
-
-        for season in seasons:
-            try:
-                rows=self._get("fixtures",{
-                    "team":int(team_id),
-                    "season":int(season),
-                })
-            except RuntimeError as e:
-                # Free data may not include a season; skip unavailable season instead of killing batch.
-                msg=str(e).lower()
-                if "season" in msg or "plan" in msg or "access" in msg or "coverage" in msg:
-                    continue
-                raise
-
-            for fx in rows:
-                fid=fx.get("fixture",{}).get("id")
-                status=fx.get("fixture",{}).get("status",{}).get("short")
-                goals=fx.get("goals",{})
-                ts=fx.get("fixture",{}).get("timestamp",0)
-                if fid in seen:
-                    continue
-                if status not in {"FT","AET","PEN"}:
-                    continue
-                if goals.get("home") is None or goals.get("away") is None:
-                    continue
-                seen.add(fid)
-                collected.append(fx)
-
-            if len(collected)>=wanted:
-                break
-
-        collected.sort(key=lambda fx:fx.get("fixture",{}).get("timestamp",0),reverse=True)
-        return collected[:wanted]
 
     def fixtures_by_date(self,date_str):
         return self._get("fixtures",{"date":date_str})
