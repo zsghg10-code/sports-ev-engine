@@ -1,0 +1,5 @@
+event_id,selection,odds,model_win_prob,push_prob,uncertainty_pp,group
+soc_demo_1,Under 2,1.94,0.46,0.27,3,soccer
+nfl_demo_1,Carolina ML,1.77,0.60,0,4,nfl
+mlb_demo_1,Houston ML,1.62,0.65,0,5,mlb
+soc_demo_2,Germany -1,1.58,0.49,0.25,4,soccer
