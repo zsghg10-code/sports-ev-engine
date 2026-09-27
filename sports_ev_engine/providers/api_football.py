@@ -1,33 +1,34 @@
 
-from __future__ import annotations
-import os, requests, pandas as pd
+import requests
 
 BASE="https://v3.football.api-sports.io"
 
 class APIFootball:
-    def __init__(self, api_key: str|None=None):
-        self.key=api_key or os.getenv("API_FOOTBALL_KEY")
-        if not self.key:
-            raise RuntimeError("API_FOOTBALL_KEY is not set")
-        self.headers={"x-apisports-key":self.key}
+    def __init__(self, api_key):
+        if not api_key:
+            raise RuntimeError("API_FOOTBALL_KEY가 없습니다.")
+        self.headers={"x-apisports-key":api_key}
 
-    def fixtures(self, date: str):
-        r=requests.get(f"{BASE}/fixtures",headers=self.headers,params={"date":date},timeout=30)
+    def _get(self,path,params):
+        r=requests.get(f"{BASE}/{path}",headers=self.headers,params=params,timeout=45)
         r.raise_for_status()
-        return r.json()["response"]
+        body=r.json()
+        errors=body.get("errors")
+        if errors:
+            raise RuntimeError(str(errors))
+        return body.get("response",[])
 
-    def injuries(self, fixture_id: int):
-        r=requests.get(f"{BASE}/injuries",headers=self.headers,params={"fixture":fixture_id},timeout=30)
-        r.raise_for_status()
-        return r.json()["response"]
+    def search_team(self,name):
+        return self._get("teams",{"search":name})
 
-    def lineups(self, fixture_id: int):
-        r=requests.get(f"{BASE}/fixtures/lineups",headers=self.headers,params={"fixture":fixture_id},timeout=30)
-        r.raise_for_status()
-        return r.json()["response"]
+    def recent_fixtures(self,team_id,last=6):
+        return self._get("fixtures",{"team":int(team_id),"last":int(last)})
 
-    def team_statistics(self, league: int, season: int, team: int):
-        r=requests.get(f"{BASE}/teams/statistics",headers=self.headers,
-                       params={"league":league,"season":season,"team":team},timeout=30)
-        r.raise_for_status()
-        return r.json()["response"]
+    def fixtures_by_date(self,date_str):
+        return self._get("fixtures",{"date":date_str})
+
+    def lineups(self,fixture_id):
+        return self._get("fixtures/lineups",{"fixture":int(fixture_id)})
+
+    def injuries(self,fixture_id):
+        return self._get("injuries",{"fixture":int(fixture_id)})

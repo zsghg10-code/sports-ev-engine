@@ -1,83 +1,31 @@
 
-from __future__ import annotations
-import itertools
-import math
-from dataclasses import dataclass
-from typing import Iterable, Sequence
-import numpy as np
+import itertools, math
 
-@dataclass
-class Leg:
-    event_id: str
-    selection: str
-    odds: float
-    win_prob: float
-    push_prob: float = 0.0
-    conservative_ev: float = 0.0
-    uncertainty_pp: float = 0.0
-    group: str = ""  # same event/game group
-
-@dataclass
-class Parlay:
-    legs: tuple[Leg,...]
-    nominal_odds: float
-    approx_hit_prob: float
-    approx_ev: float
-    score: float
-
-def _pair_penalty(a: Leg, b: Leg) -> float:
-    """
-    Conservative penalty for unmodeled correlation.
-    Same-event legs are penalized heavily and excluded by default in optimizer.
-    """
-    if a.event_id == b.event_id:
-        return 0.80
-    if a.group and a.group == b.group:
-        return 0.95
-    return 1.0
-
-def optimize_parlays(
-    legs: Sequence[Leg],
-    n_legs: int = 2,
-    top_n: int = 10,
-    min_leg_ev: float = 0.0,
-    allow_same_event: bool = False,
-) -> list[Parlay]:
-    usable=[x for x in legs if x.conservative_ev >= min_leg_ev]
-    out=[]
-    for combo in itertools.combinations(usable,n_legs):
-        if not allow_same_event and len({x.event_id for x in combo})<len(combo):
-            continue
-        odds=math.prod(x.odds for x in combo)
-        p=math.prod(x.win_prob for x in combo)
-        penalty=1.0
-        for a,b in itertools.combinations(combo,2):
-            penalty *= _pair_penalty(a,b)
-        p *= penalty
-        ev=p*odds-1
-        avg_unc=sum(x.uncertainty_pp for x in combo)/len(combo)
-        # favors positive EV, moderate hit probability, and lower uncertainty
-        score=ev + 0.20*p - 0.005*avg_unc
-        out.append(Parlay(combo,odds,p,ev,score))
-    out.sort(key=lambda x:x.score, reverse=True)
-    return out[:top_n]
-
-def monte_carlo_correlated_binary(probs, corr, n=100000, seed=42):
-    """
-    Gaussian-copula approximation for joint binary events.
-    Useful when user supplies/learns a correlation matrix.
-    """
-    probs=np.asarray(probs,float)
-    corr=np.asarray(corr,float)
-    rng=np.random.default_rng(seed)
-    z=rng.multivariate_normal(np.zeros(len(probs)),corr,size=n)
-    try:
-        from scipy.stats import norm
-        thresh=norm.ppf(probs)
-    except Exception:
-        # approximate inverse-normal fallback using stdlib NormalDist
-        from statistics import NormalDist
-        nd=NormalDist()
-        thresh=np.array([nd.inv_cdf(float(p)) for p in probs])
-    hits=(z<=thresh).all(axis=1)
-    return float(hits.mean())
+def optimize_parlays(df, sizes=(2,3,4,5,6), top_n=10):
+    results = {}
+    usable = df[(df["grade"].isin(["A","B","C"])) & (df["conservative_ev_roi"] > 0)].copy()
+    records = usable.to_dict("records")
+    for n in sizes:
+        rows = []
+        for combo in itertools.combinations(records, n):
+            if len({x["event_id"] for x in combo}) < n:
+                continue
+            odds = math.prod(float(x["best_odds"]) for x in combo)
+            hit = math.prod(float(x["model_win_prob"]) for x in combo)
+            # cross-event correlation haircut for same competition
+            same_comp = len({x.get("sport_key","") for x in combo}) == 1
+            if same_comp and n >= 4:
+                hit *= 0.98 ** (n-3)
+            ev = hit*odds - 1
+            avg_unc = sum(float(x["uncertainty_pp"]) for x in combo)/n
+            score = ev + 0.20*hit - 0.005*avg_unc
+            rows.append({
+                "조합": " + ".join(x["display_pick"] for x in combo),
+                "배당": odds,
+                "근사 적중확률": hit,
+                "근사 EV": ev,
+                "점수": score,
+            })
+        rows.sort(key=lambda x: x["점수"], reverse=True)
+        results[n] = rows[:top_n]
+    return results
