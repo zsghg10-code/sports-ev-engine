@@ -425,3 +425,28 @@ The old MLB tab was schedule-only. v3.0.3 connects MLB to the same v3 decision p
 - Immutable prediction snapshots + supported post-game settlement remain enabled.
 
 Automatic parlays remain stricter than single-game display: MLB defaults to FINAL/high-quality events only.
+
+## v3.1.0 — MLB deep Statcast / pitch-level context
+
+MLB now adds a fail-soft high-detail context layer on top of the v3 FINAL Decision Layer.
+All signals are used only when a real source returns usable data. Missing inputs remain `MISSING` and widen uncertainty.
+
+New MLB signal slots:
+- recent Whiff%, Chase%, Zone%, Contact% from MLB pitch-by-pitch
+- Baseball Savant xwOBA / Barrel% / HardHit%
+- GB/FB, HR/FB and BABIP regression checks
+- pitch-type arsenal, usage changes, Savant RV/100/Whiff/xwOBA-based `stuff_proxy` (not proprietary Stuff+)
+- starter recent pitch counts, days rest, current vs prior-season workload
+- exact reliever pitch counts over the prior 3 calendar days, back-to-back usage and bullpen fatigue
+- confirmed-lineup batter-by-batter OPS versus the opposing starter's handedness
+- lineup pitch-type matchup versus the opposing starter's arsenal
+- official MLB transactions plus a near-game injury/rest news alert scan
+- persisted lineup-change detection
+- persisted The Odds API consensus movement detection
+- roof state / venue structure and home-plate umpire assignment; recent verified plate-game tendency is descriptive only
+- travel distance, time-zone change and rest hours
+- three-season Statcast BvP; directional use requires at least 30 combined PA
+- recent bullpen-manager/reuse pattern
+
+The deep layer is bounded so it cannot overwhelm the independent run model. Low-sample BvP, news headlines,
+and umpire tendency do not receive aggressive directional coefficients.

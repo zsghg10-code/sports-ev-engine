@@ -52,14 +52,14 @@ from sports_ev_engine.prediction_store import record_frame, auto_settle, evaluat
 from sports_ev_engine.final_view import split_events, compact_table, event_summary
 from sports_ev_engine.kst_schedule import format_kst
 
-st.set_page_config(page_title="Sports EV Engine v3.0.3",layout="wide")
-st.title("Sports EV Engine v3.0.3")
-st.caption("BUILD v3.0.3-mlb-full-analysis · 2026-09-28")
+st.set_page_config(page_title="Sports EV Engine v3.1.0",layout="wide")
+st.title("Sports EV Engine v3.1.0")
+st.caption("BUILD v3.1.0-mlb-deep-statcast · 2026-09-28")
 if any(getattr(module,"PROVIDER_BUILD",None)!="3.0.0" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider,deep_soccer_provider)):
     st.error("앱과 수집 파일 버전이 다릅니다. ZIP의 sports_ev_engine 폴더까지 전부 반영한 뒤 Streamlit 앱을 Reboot하세요.")
     st.stop()
 FootballAccessError=football_provider.FootballAccessError
-st.caption("분석 백엔드 v3.0.0 확인 완료 · FINAL UI v3.0.3")
+st.caption("분석 백엔드 v3.1 MLB 정밀계층 연결 완료 · FINAL UI v3.1.0")
 st.caption("독립 모델 → 정밀 컨텍스트 → 반증 검사 → 시장 캘리브레이션 → 27개 스트레스 시나리오 → EV/ROBUST 판정 → 기록·사후검증")
 
 def secret(name):
@@ -73,7 +73,7 @@ ODDS_KEY=secret("THE_ODDS_API_KEY")
 FOOTBALL_KEY=secret("API_FOOTBALL_KEY")
 BASEBALL_KEY=None
 
-_BUILD_ID = "3.0.3-mlb-full-analysis"
+_BUILD_ID = "3.1.0-mlb-deep-statcast"
 if st.session_state.get("_build_id") != _BUILD_ID:
     for _k in [
         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
@@ -849,7 +849,7 @@ with tabs[4]:
 with tabs[5]:
     st.subheader("⚾ MLB 완전자동 분석")
     st.write("The Odds API 배당 + MLB Stats API 일정/팀기록/예고선발/라인업을 결합해 승패·런라인·언더오버 확률과 EV를 계산합니다.")
-    st.caption("v3.0.3: MLB도 A매치와 동일한 FINAL Decision Layer를 사용합니다. KST 날짜로 경기를 묶고, 최근 타선·선발 최근 5경기·불펜 최근 사용량·좌우 스플릿·최근 구속·구장/날씨를 실제 수집된 경우에만 반영합니다.")
+    st.caption("v3.1.0: MLB 정밀계층은 Statcast xwOBA/Barrel/HardHit, Whiff/Chase/Zone/Contact, 구종/구사율, 선발 workload, 불펜 정확한 최근 3일 투구수, 확정 라인업 좌우 스플릿, 구종 상성, 부상·복귀/뉴스, 라인업 변화, 시장 이동, roof/심판, 이동·휴식, BvP, 불펜 운용 패턴까지 실제 수집된 경우에만 반영합니다.")
     st.info("MLB 모델도 채팅 분석 체크리스트를 최대한 자동화한 별도 정량 엔진입니다. 확보하지 못한 신호는 MISSING으로 남기며 평균값을 임의로 채우지 않습니다.")
 
     if not ODDS_KEY:
@@ -863,7 +863,7 @@ with tabs[5]:
     mlb_markets=st.multiselect("MLB 분석 마켓",["h2h","spreads","totals"],default=["h2h","spreads","totals"],key="mlb_markets")
     mlb_deep=st.checkbox(
         "🧠 MLB v3 정밀 컨텍스트 사용",value=True,key="mlb_deep",
-        help="좌우 스플릿·최근 FF/SI 구속·구장/날씨를 추가 조회합니다. 응답이 없으면 해당 신호는 MISSING 처리합니다."
+        help="Statcast/pitch-level, exact bullpen workload, lineup platoon, pitch matchup, workload, availability/news, market movement, travel/roof/umpire/BvP까지 조회합니다. 응답이 없으면 MISSING 처리합니다."
     )
     mlb_run=st.button("⚾ 선택 날짜 MLB 전체 자동분석",type="primary",disabled=not(ODDS_KEY and mlb_markets))
 
@@ -904,7 +904,7 @@ with tabs[5]:
                     sched=mlb_match_schedule(schedule_frame,home,away,kickoff)
                     if sched and sched.get("gamePk"):matched_gamepks.add(sched.get("gamePk"))
                     try:
-                        stats,ctx=provider.collect(home,away,kickoff,schedule_row=sched,recent_n=mlb_recent,deep=mlb_deep)
+                        stats,ctx=provider.collect(home,away,kickoff,schedule_row=sched,recent_n=mlb_recent,deep=mlb_deep,market_frame=g,event_id=eid)
                         adv=ctx.get("advanced") or {}; statuses=adv.get("statuses") or {}
                         if not stats or any((stats.get(t) or {}).get("runs_per_game") is None or (stats.get(t) or {}).get("runs_allowed_per_game") is None for t in (home,away)):
                             reason=ctx.get("note") or "MLB season run data unavailable"
@@ -923,20 +923,42 @@ with tabs[5]:
                             analyzed["kickoff_kst"]=format_kst(kickoff)
                             all_rows.append(analyzed)
 
-                        missing=[k for k in ["recent_form","starter_recent","bullpen","split","velocity","weather"] if not statuses.get(k)]
+                        missing=[k for k,v in statuses.items() if not v]
                         hp=(adv.get("home_starter_recent") or {}); ap=(adv.get("away_starter_recent") or {})
                         hv=(adv.get("home_velocity") or {}); av=(adv.get("away_velocity") or {})
                         hb=(adv.get("home_bullpen") or {}); ab=(adv.get("away_bullpen") or {})
+                        d31=(adv.get("deep_v31") or {})
+                        hsc=(d31.get("home_statcast") or {}); asc=(d31.get("away_statcast") or {})
+                        hdisc=(hsc.get("recent_discipline") or {}); adisc=(asc.get("recent_discipline") or {})
+                        hsea=(hsc.get("season") or {}); asea=(asc.get("season") or {})
+                        hwe=(d31.get("home_starter_workload") or {}); awe=(d31.get("away_starter_workload") or {})
+                        hbe=(d31.get("home_bullpen_exact") or {}); abe=(d31.get("away_bullpen_exact") or {})
+                        hpl=(d31.get("home_lineup_platoon") or {}); apl=(d31.get("away_lineup_platoon") or {})
+                        hpm=(d31.get("home_pitch_matchup") or {}); apm=(d31.get("away_pitch_matchup") or {})
+                        env=(d31.get("environment") or {}); mov=(d31.get("market_movement") or {})
                         status_rows.append({
                             "경기":label,"경기시간(KST)":format_kst(kickoff),"상태":ctx.get("stage","PRE-LINEUP"),
                             "원정 선발":ctx.get("away_starter") or "미확인","홈 선발":ctx.get("home_starter") or "미확인",
                             "라인업":"확정" if ctx.get("lineup_confirmed") else "미확인",
-                            "최근 타선 OPS":bool(statuses.get("recent_form")),"선발 최근5":bool(statuses.get("starter_recent")),
-                            "불펜 최근3일":bool(statuses.get("bullpen")),"좌우 스플릿":bool(statuses.get("split")),
-                            "최근 구속":bool(statuses.get("velocity")),"날씨":bool(statuses.get("weather")),
-                            "원정 선발 최근 K-BB%":ap.get("kbb_pct"),"홈 선발 최근 K-BB%":hp.get("kbb_pct"),
-                            "원정 FF/SI 구속변화(mph)":av.get("delta_mph"),"홈 FF/SI 구속변화(mph)":hv.get("delta_mph"),
-                            "원정 불펜 최근3G IP":ab.get("relief_ip_last3"),"홈 불펜 최근3G IP":hb.get("relief_ip_last3"),
+                            "Whiff/Chase/Zone/Contact":bool(statuses.get("plate_discipline")),
+                            "Statcast xwOBA/Barrel/HH":bool(statuses.get("statcast_quality")),
+                            "구종/구사율":bool(statuses.get("pitch_mix")),"선발 workload":bool(statuses.get("starter_workload")),
+                            "불펜 정확3일":bool(statuses.get("bullpen_exact")),"라인업 좌우 OPS":bool(statuses.get("lineup_platoon_exact")),
+                            "구종 상성":bool(statuses.get("pitch_matchup")),"시장 이동":bool(statuses.get("market_movement")),
+                            "Roof":bool(statuses.get("roof")),"심판":bool(statuses.get("umpire")),"이동/휴식":bool(statuses.get("travel_rest")),
+                            "BvP":bool(statuses.get("bvp")),"불펜 운용":bool(statuses.get("bullpen_manager")),"부상/복귀":bool(statuses.get("availability_news")),"뉴스 스캔":bool(statuses.get("news_scan")),
+                            "원정 Whiff%":adisc.get("whiff_pct"),"홈 Whiff%":hdisc.get("whiff_pct"),
+                            "원정 Chase%":adisc.get("chase_pct"),"홈 Chase%":hdisc.get("chase_pct"),
+                            "원정 시즌 xwOBA 허용":asea.get("xwoba"),"홈 시즌 xwOBA 허용":hsea.get("xwoba"),
+                            "원정 Stuff proxy":((asc.get("arsenal") or {}).get("stuff_proxy")),"홈 Stuff proxy":((hsc.get("arsenal") or {}).get("stuff_proxy")),
+                            "원정 구사율 quality Δ":asc.get("usage_quality_delta"),"홈 구사율 quality Δ":hsc.get("usage_quality_delta"),
+                            "원정 선발 휴식일":awe.get("rest_days"),"홈 선발 휴식일":hwe.get("rest_days"),
+                            "원정 선발 직전 투구수":awe.get("last_pitches"),"홈 선발 직전 투구수":hwe.get("last_pitches"),
+                            "원정 불펜 최근3일 투구":abe.get("total_relief_pitches"),"홈 불펜 최근3일 투구":hbe.get("total_relief_pitches"),
+                            "원정 라인업 vs손 OPS":apl.get("lineup_split_ops"),"홈 라인업 vs손 OPS":hpl.get("lineup_split_ops"),
+                            "원정 구종상성 xwOBA":apm.get("weighted_xwoba"),"홈 구종상성 xwOBA":hpm.get("weighted_xwoba"),
+                            "Roof 상태":env.get("roof_state") or env.get("roof_type"),"주심":(env.get("umpire") or {}).get("name"),
+                            "최대 시장이동(%p)":mov.get("max_abs_move_pp"),
                             "MISSING":", ".join(missing) if missing else "없음",
                         })
                     except Exception as e:
@@ -994,7 +1016,10 @@ with tabs[5]:
             "raw_independent_prob","model_win_prob","push_prob","break_even","edge_pp","ev_roi","conservative_ev_roi","uncertainty_pp",
             "home_starter","away_starter","home_starter_era","away_starter_era","home_starter_whip","away_starter_whip",
             "home_recent_rf","home_recent_ra","away_recent_rf","away_recent_ra","home_expected_runs","away_expected_runs",
-            "recent_form_used","starter_recent_used","bullpen_used","split_used","velocity_used","weather_used","missing_signals",
+            "recent_form_used","starter_recent_used","bullpen_used","split_used","velocity_used","weather_used",
+            "plate_discipline_used","statcast_quality_used","batted_ball_regression_used","pitch_mix_used","starter_workload_used",
+            "bullpen_exact_used","lineup_platoon_exact_used","pitch_matchup_used","availability_news_used","lineup_change_used",
+            "market_movement_used","market_move_pp","market_from_open_pp","roof_used","umpire_used","travel_rest_used","bvp_used","bullpen_manager_used","missing_signals",
         ] if c in mr.columns]
         shown=mr[cols].copy()
         for c in ["consensus_prob","raw_independent_prob","model_win_prob","push_prob","break_even","robust_positive_ratio","signal_coverage"]:
@@ -1083,7 +1108,7 @@ with tabs[7]:
             try:
                 from sports_ev_engine.telegram_notify import TelegramNotifier
                 TelegramNotifier(telegram_token,telegram_chat)(
-                    "✅ Sports EV Engine v3.0.3\nTelegram 알림 연결 테스트 성공"
+                    "✅ Sports EV Engine v3.1.0\nTelegram 알림 연결 테스트 성공"
                 )
                 st.success("테스트 알림을 보냈습니다.")
             except Exception as e:

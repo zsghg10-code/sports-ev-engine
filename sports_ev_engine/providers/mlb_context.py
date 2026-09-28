@@ -9,9 +9,10 @@ import pandas as pd
 import requests
 
 from sports_ev_engine.providers.mlb_statsapi import BASE, match_schedule
+from sports_ev_engine.providers.mlb_deep import MLBDeepContext
 
 KST=ZoneInfo("Asia/Seoul")
-UA="Sports-EV-Engine/3.0.3"
+UA="Sports-EV-Engine/3.1.0"
 
 
 def _num(v):
@@ -63,6 +64,9 @@ class MLBContextProvider:
         self.s=requests.Session(); self.s.headers.update({"User-Agent":UA})
         self.cache={}
         self.standings_cache={}
+        # Reuse one deep provider for the whole slate so Savant leaderboards and
+        # player lookups are downloaded once and served from cache across games.
+        self.deep_provider=MLBDeepContext(self,timeout=min(18,self.timeout))
 
     def _get(self,path,params=None):
         key=(path,tuple(sorted((params or {}).items())))
@@ -147,7 +151,8 @@ class MLBContextProvider:
                 if hs is None or ass is None:continue
                 is_home=int(hid or -1)==int(team_id)
                 rf=hs if is_home else ass; ra=ass if is_home else hs
-                rows.append({"gamePk":g.get("gamePk"),"date":g.get("gameDate"),"rf":rf,"ra":ra,"win":rf>ra})
+                rows.append({"gamePk":g.get("gamePk"),"date":g.get("gameDate"),"rf":rf,"ra":ra,"win":rf>ra,
+                             "venue_id":(g.get("venue") or {}).get("id"),"venue":(g.get("venue") or {}).get("name")})
         rows=sorted(rows,key=lambda x:str(x.get("date")))[-int(n):]
         return rows
 
@@ -199,23 +204,37 @@ class MLBContextProvider:
         if not pid:return {"available":False,"reason":"probable starter unavailable"}
         season_splits=self._stat(person_id=pid,stats="season",group="pitching",season=season)
         ss=(season_splits[0].get("stat") if season_splits else {}) or {}
-        logs=self._stat(person_id=pid,stats="gameLog",group="pitching",season=season)
-        logs=logs[-int(recent_n):] if logs else []
+        all_logs=self._stat(person_id=pid,stats="gameLog",group="pitching",season=season)
+        logs=all_logs[-int(recent_n):] if all_logs else []
         bf=sum(_num((x.get("stat") or {}).get("battersFaced")) or 0 for x in logs)
         so=sum(_num((x.get("stat") or {}).get("strikeOuts")) or 0 for x in logs)
         bb=sum(_num((x.get("stat") or {}).get("baseOnBalls")) or 0 for x in logs)
         er=sum(_num((x.get("stat") or {}).get("earnedRuns")) or 0 for x in logs)
         ip=sum(_ip((x.get("stat") or {}).get("inningsPitched")) or 0 for x in logs)
         person=self.person(pid)
+        starts=[]
+        for x in logs:
+            st=(x.get("stat") or {})
+            starts.append({
+                "gamePk":(x.get("game") or {}).get("gamePk"),"date":x.get("date") or (x.get("game") or {}).get("gameDate"),
+                "pitches":_num(st.get("numberOfPitches")) or _num(st.get("pitchesThrown")),
+                "ip":_ip(st.get("inningsPitched")),"bf":_num(st.get("battersFaced")),
+            })
         recent={
             "available":bool(logs),"games":len(logs),"bf":bf,"so":so,"bb":bb,"er":er,"ip":ip,
             "era":9*er/ip if ip else None,"k_pct":so/bf if bf else None,"bb_pct":bb/bf if bf else None,
             "kbb_pct":(so-bb)/bf if bf else None,"hand":person.get("hand"),
             "game_pks":[(x.get("game") or {}).get("gamePk") for x in logs if (x.get("game") or {}).get("gamePk")],
+            "starts":starts,
         }
+        try:
+            prior_splits=self._stat(person_id=pid,stats="season",group="pitching",season=int(season)-1)
+            prior=(prior_splits[0].get("stat") if prior_splits else {}) or {}
+        except Exception: prior={}
         season_out={
             "era":_num(ss.get("era")),"whip":_num(ss.get("whip")),
             "kbb":((_num(ss.get("strikeOuts")) or 0)/max(1,(_num(ss.get("baseOnBalls")) or 0))) if _num(ss.get("strikeOuts")) is not None else None,
+            "innings":_ip(ss.get("inningsPitched")),"prior_innings":_ip(prior.get("inningsPitched")),
             "hand":person.get("hand"),
         }
         return {"available":bool(season_splits),"name":person.get("name"),"season":season_out,"recent":recent}
@@ -325,7 +344,7 @@ class MLBContextProvider:
             return {"available":True,"stadium":name,"roof":roof,"temperature_c":temp,"precip_mm":rain,"wind_kmh":wind,"run_factor":1+temp_move,"source":"Open-Meteo + MLB venue"}
         except Exception as e:return {"available":False,"reason":str(e)}
 
-    def collect(self,home,away,kickoff,schedule_row=None,recent_n=10,deep=True):
+    def collect(self,home,away,kickoff,schedule_row=None,recent_n=10,deep=True,market_frame=None,event_id=None):
         season=int(pd.Timestamp(kickoff).year)
         schedule_row=schedule_row or {}
         hid=schedule_row.get("home_team_id") or self.team_id(home,season)
@@ -407,15 +426,36 @@ class MLBContextProvider:
         adv["statuses"]["weather"]=bool(weather.get("available"))
         if weather.get("available"):adv["components"]["weather_factor"]=weather.get("run_factor") or 1.0
 
-        used=sum(bool(adv["statuses"].get(k)) for k in ["recent_form","starter_recent","bullpen","split","velocity","weather"])
-        adv["advanced_used"]=used; adv["advanced_completeness"]=used/adv["advanced_total"]
-        missing=[k for k in ["recent_form","starter_recent","bullpen","split","velocity","weather"] if not adv["statuses"].get(k)]
-        # Missing information widens uncertainty; no fabricated average fills the slot.
-        adv["extra_uncertainty_pp"]=min(2.7,.35*len(missing))
+        # v3.1 highest-detail MLB layer. All slots are fail-soft; unavailable data stays MISSING.
+        deep_adv={}
+        if deep:
+            try:
+                deep_adv=self.deep_provider.collect(
+                    home=home,away=away,kickoff=kickoff,schedule_row=schedule_row,
+                    home_profile=hs,away_profile=aws,home_pitcher=hpdata,away_pitcher=apdata,
+                    lineup=lineup,market_frame=market_frame,event_id=event_id,season=season,
+                )
+            except Exception as e:
+                deep_adv={"statuses":{},"components":{},"advanced_total":0,"advanced_used":0,
+                          "advanced_completeness":0,"extra_uncertainty_pp":1.0,
+                          "missing_high_priority":["v3.1_deep_layer"],"error":str(e)}
+        adv["statuses"].update(deep_adv.get("statuses") or {})
+        adv["components"].update({k:v for k,v in (deep_adv.get("components") or {}).items() if v is not None})
+        base_keys=["recent_form","starter_recent","bullpen","split","velocity","weather"]
+        all_keys=base_keys+list((deep_adv.get("statuses") or {}).keys())
+        # preserve order while removing duplicates
+        all_keys=list(dict.fromkeys(all_keys))
+        adv["advanced_total"]=len(all_keys)
+        used=sum(bool(adv["statuses"].get(k)) for k in all_keys)
+        adv["advanced_used"]=used; adv["advanced_completeness"]=used/max(1,adv["advanced_total"])
+        missing=[k for k in all_keys if not adv["statuses"].get(k)]
+        # Missing high-priority deep data widens uncertainty; no fabricated average fills the slot.
+        adv["extra_uncertainty_pp"]=min(4.5,.18*len(missing)+float(deep_adv.get("extra_uncertainty_pp") or 0))
         if missing:adv["notes"].append("MISSING: "+", ".join(missing))
+        adv["deep_v31"]=deep_adv
 
         ctx={
-            "league":"MLB","stage":stage,"source":"MLB Stats API + The Odds API",
+            "league":"MLB","stage":stage,"source":"MLB Stats API + Baseball Savant + The Odds API",
             "starter_confirmed":starters,"lineup_confirmed":bool(lineup.get("confirmed")),
             "home_starter":schedule_row.get("home_probable") or hpdata.get("name"),
             "away_starter":schedule_row.get("away_probable") or apdata.get("name"),

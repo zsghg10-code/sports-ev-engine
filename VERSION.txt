@@ -1,2 +1,2 @@
-Sports EV Engine v3.0.3
-BUILD v3.0.3-mlb-full-analysis
+Sports EV Engine v3.1.0
+BUILD v3.1.0-mlb-deep-statcast

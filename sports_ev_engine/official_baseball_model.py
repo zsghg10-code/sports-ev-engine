@@ -92,19 +92,26 @@ def _apply_context(hm,am,hs,aws,ctx):
 
     adv=ctx.get("advanced") or {}
     c=adv.get("components") or {}
-    for key in ("home_recent_form_factor","home_split_factor","home_vs_bullpen_factor"):
+    for key in ("home_recent_form_factor","home_split_factor","home_vs_bullpen_factor",
+                "home_vs_bullpen_exact_factor","home_lineup_platoon_factor","home_pitch_matchup_factor",
+                "home_travel_rest_factor","home_bvp_factor"):
         if c.get(key) is not None: hm*=float(c[key])
-    for key in ("away_recent_form_factor","away_split_factor","away_vs_bullpen_factor"):
+    for key in ("away_recent_form_factor","away_split_factor","away_vs_bullpen_factor",
+                "away_vs_bullpen_exact_factor","away_lineup_platoon_factor","away_pitch_matchup_factor",
+                "away_travel_rest_factor","away_bvp_factor"):
         if c.get(key) is not None: am*=float(c[key])
     if c.get("away_starter_recent_factor") is not None: hm*=float(c["away_starter_recent_factor"])
     if c.get("home_starter_recent_factor") is not None: am*=float(c["home_starter_recent_factor"])
+    # v3.1 Statcast/discipline/workload composite for the opposing starter.
+    if c.get("away_starter_deep_factor") is not None: hm*=float(c["away_starter_deep_factor"])
+    if c.get("home_starter_deep_factor") is not None: am*=float(c["home_starter_deep_factor"])
     if c.get("weather_factor") is not None:
         hm*=float(c["weather_factor"]); am*=float(c["weather_factor"])
 
-    # Season + lineup + advanced signals combined are capped to +/-14% from
-    # the pre-context scoring environment.
-    hm=max(base_hm*.86,min(base_hm*1.14,hm))
-    am=max(base_am*.86,min(base_am*1.14,am))
+    # More measured signals are available in v3.1, but the full context layer is
+    # still prevented from overwhelming the independent scoring model.
+    hm=max(base_hm*.84,min(base_hm*1.16,hm))
+    am=max(base_am*.84,min(base_am*1.16,am))
     return hm,am
 
 
@@ -149,12 +156,22 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
     # ledger makes their availability and omissions explicit without double-counting.
     signal_ledger=SignalLedger()
     statuses=adv.get("statuses") or {}
-    for key,label in (("starter_recent","starter_recent_3_5"),("recent_form","recent_team_form"),
-                      ("bullpen","bullpen_workload"),("split","platoon_split"),
-                      ("velocity","velocity_trend"),("weather","park_weather")):
-        signal_ledger.add(label,bool(statuses.get(key)),"context" if statuses.get(key) else "neutral",0,.75 if statuses.get(key) else 0,
+    labels={
+        "starter_recent":"starter_recent_3_5","recent_form":"recent_team_form","bullpen":"bullpen_workload",
+        "split":"team_platoon_split","velocity":"velocity_trend","weather":"park_weather",
+        "plate_discipline":"whiff_chase_zone_contact","statcast_quality":"statcast_xwoba_barrel_hardhit",
+        "batted_ball_regression":"gb_fb_hrfb_babip_regression","pitch_mix":"pitch_mix_arsenal",
+        "starter_workload":"starter_pitchcount_rest_workload","bullpen_exact":"bullpen_exact_3day_pitchcount",
+        "lineup_platoon_exact":"lineup_player_lr_ops","pitch_matchup":"pitch_type_hitter_matchup",
+        "availability_news":"injury_return_transactions","lineup_change":"lineup_change_watch",
+        "market_movement":"market_odds_movement","roof":"roof_open_closed","umpire":"home_plate_umpire",
+        "travel_rest":"travel_timezone_rest","bvp":"batter_vs_pitcher","bullpen_manager":"bullpen_manager_pattern",
+        "news_scan":"injury_rest_news_scan",
+    }
+    for key,label in labels.items():
+        signal_ledger.add(label,bool(statuses.get(key)),"context" if statuses.get(key) else "neutral",0,.80 if statuses.get(key) else 0,
                           source=context.get("source","") or hs.get("source",""),
-                          note="used by advanced baseball context" if statuses.get(key) else "not returned by wired source")
+                          note="measured/observed signal wired into v3.1 context" if statuses.get(key) else "MISSING: source did not return a usable pregame value")
     signal_ledger.add("confirmed_lineup",bool(context.get("lineup_confirmed")),"context",0,.9,source=context.get("source","") or "")
     signal_ledger.add("confirmed_starters",bool(context.get("starter_confirmed")),"context",0,.9,source=context.get("source","") or "")
 
@@ -167,7 +184,20 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
         mp=float(r["consensus_prob"])
         fw,mw,raw_gap=_blend(rw,rp,mp,quality)
         fl=max(0,1-fw-rp)
-        ev=analyze_bet(float(r["best_odds"]),fw,rp,unc)
+        # Row-specific market movement from locally observed Odds API snapshots.
+        deep31=(adv.get("deep_v31") or {})
+        move_map=((deep31.get("market_movement") or {}).get("by_key") or {})
+        point_val=None if r["market"]=="h2h" else float(r["point"])
+        point_s="" if point_val is None else f"{point_val:g}"
+        move_key=f'{r["market"]}|{r["selection"]}|{point_s}'
+        move=(move_map.get(move_key) or {})
+        move_pp=move.get("move_pp")
+        row_unc=float(unc)
+        if move_pp is not None:
+            if float(move_pp)<=-2.0: row_unc+=.70
+            elif float(move_pp)<=-1.0: row_unc+=.35
+            elif float(move_pp)>=2.0: row_unc=max(2.5,row_unc-.20)
+        ev=analyze_bet(float(r["best_odds"]),fw,rp,row_unc)
         resolved=max(1e-9,1-rp); final_gap=(fw/resolved-mp)*100
         sanity="OUTLIER_SHRUNK" if abs(raw_gap)>18 else "HIGH_DISAGREEMENT" if abs(raw_gap)>12 else "CHECK" if abs(raw_gap)>8 else "OK"
         grade=ev.grade
@@ -182,7 +212,7 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
             "display_pick":f'{home}-{away} | {r["selection"]}'+("" if point is None else (f" {point:+g}" if r["market"]=="spreads" else f" {point:g}")),
             "raw_independent_prob":rw,"model_win_prob":fw,"push_prob":rp,"model_lose_prob":fl,
             "break_even":ev.break_even,"edge_pp":ev.edge_pp,"ev_roi":ev.ev_roi,"conservative_ev_roi":ev.conservative_ev_roi,
-            "uncertainty_pp":unc,"kelly_scaled":ev.kelly_scaled,"grade":grade,"sanity":sanity,
+            "uncertainty_pp":row_unc,"market_move_pp":move_pp,"market_from_open_pp":move.get("from_open_pp"),"kelly_scaled":ev.kelly_scaled,"grade":grade,"sanity":sanity,
             "raw_market_gap_pp":raw_gap,"final_market_gap_pp":final_gap,"model_weight":mw,
             "data_quality":quality,"starter_confirmed":bool(context.get("starter_confirmed")),"lineup_confirmed":bool(context.get("lineup_confirmed")),
             "home_starter":context.get("home_starter"),"away_starter":context.get("away_starter"),
@@ -203,6 +233,14 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
             "weather_temp_c": ((context.get("advanced") or {}).get("weather") or {}).get("temperature_c"),
             "weather_wind_kmh": ((context.get("advanced") or {}).get("weather") or {}).get("wind_kmh"),
             "weather_precip_mm": ((context.get("advanced") or {}).get("weather") or {}).get("precip_mm"),
+            "plate_discipline_used":bool(statuses.get("plate_discipline")),"statcast_quality_used":bool(statuses.get("statcast_quality")),
+            "batted_ball_regression_used":bool(statuses.get("batted_ball_regression")),"pitch_mix_used":bool(statuses.get("pitch_mix")),
+            "starter_workload_used":bool(statuses.get("starter_workload")),"bullpen_exact_used":bool(statuses.get("bullpen_exact")),
+            "lineup_platoon_exact_used":bool(statuses.get("lineup_platoon_exact")),"pitch_matchup_used":bool(statuses.get("pitch_matchup")),
+            "availability_news_used":bool(statuses.get("availability_news")),"lineup_change_used":bool(statuses.get("lineup_change")),
+            "market_movement_used":bool(statuses.get("market_movement")),"roof_used":bool(statuses.get("roof")),
+            "umpire_used":bool(statuses.get("umpire")),"travel_rest_used":bool(statuses.get("travel_rest")),
+            "bvp_used":bool(statuses.get("bvp")),"bullpen_manager_used":bool(statuses.get("bullpen_manager")),
             "source":context.get("source") or hs.get("source"),
         })
 
@@ -217,7 +255,7 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
         counter_cases,counter_risk=build_counter_cases(
             sample_matches=min(int(hs.get("games") or 0),int(aws.get("games") or 0)),
             lineup_confirmed=bool(context.get("lineup_confirmed")),sanity=sanity,
-            uncertainty_pp=unc,signal_coverage=signal_ledger.coverage,stage=stage,
+            uncertainty_pp=row_unc,signal_coverage=signal_ledger.coverage,stage=stage,
             advanced_completeness=completeness,
         )
         legacy_ok=grade in {"A","B","C"} and ev.conservative_ev_roi>0 and sanity not in {"OUTLIER_SHRUNK","HIGH_DISAGREEMENT"}
