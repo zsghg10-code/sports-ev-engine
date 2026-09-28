@@ -23,8 +23,11 @@ from sports_ev_engine.telegram_notify import TelegramNotifier
 
 def main():
     odds=os.getenv("THE_ODDS_API_KEY")
+    baseball_key=os.getenv("API_BASEBALL_KEY") or os.getenv("API_FOOTBALL_KEY")
     if not odds:
         raise SystemExit("THE_ODDS_API_KEY is required")
+    if not baseball_key:
+        raise SystemExit("API_BASEBALL_KEY or API_FOOTBALL_KEY is required")
     notifier=None
     if os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID"):
         notifier=TelegramNotifier(os.getenv("TELEGRAM_BOT_TOKEN"),os.getenv("TELEGRAM_CHAT_ID"))
@@ -44,7 +47,7 @@ def main():
             state_path=f"data/{lg.lower()}_monitor_state.json",
             reserve_credits=reserve,
         )
-        engines.append(BaseballMonitorEngine(odds,cfg,notifier))
+        engines.append(BaseballMonitorEngine(odds,baseball_key,cfg,notifier))
 
     print("KBO/NPB monitor started:",wanted)
     while True:

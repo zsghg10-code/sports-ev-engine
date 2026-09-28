@@ -12,11 +12,12 @@ from sports_ev_engine.market import consensus, clean_odds
 from sports_ev_engine.auto_soccer import analyze_event
 from sports_ev_engine.competition_form import build_competition_pool
 from sports_ev_engine.core.parlay import optimize_parlays
-from sports_ev_engine.providers.sofascore_baseball import SofaScoreBaseball
+from sports_ev_engine.providers.api_sports_baseball import APISportsBaseball
 from sports_ev_engine.auto_baseball import analyze_baseball_event, build_league_pool
 
-st.set_page_config(page_title="Sports EV Engine v2.4.1",layout="wide")
-st.title("Sports EV Engine v2.4.1")
+st.set_page_config(page_title="Sports EV Engine v2.4.2",layout="wide")
+st.title("Sports EV Engine v2.4.2")
+st.caption("BUILD v2.4.2-api-sports-baseball · 2026-09-28")
 st.caption("종목 선택 → 배당 수집 → 상대전력 Elo + 최근폼 → 시장 prior 캘리브레이션 → BE/Edge/EV → 2~6폴")
 
 def secret(name):
@@ -28,6 +29,7 @@ def secret(name):
 
 ODDS_KEY=secret("THE_ODDS_API_KEY")
 FOOTBALL_KEY=secret("API_FOOTBALL_KEY")
+BASEBALL_KEY=secret("API_BASEBALL_KEY") or FOOTBALL_KEY
 
 
 tabs=st.tabs(["⚡ 완전자동 축구","⚾ KBO/NPB 자동분석","실시간 배당","시장 가격","MLB","다폴","📡 모니터링","설정"])
@@ -182,11 +184,13 @@ with tabs[0]:
 
 with tabs[1]:
     st.subheader("⚾ KBO / NPB 완전자동 분석")
-    st.write("The Odds API 배당 + SofaScore 경기/라인업/선발 데이터로 최근 득실·상대전력·선발투수를 자동 반영합니다.")
-    st.caption("v2.4.1: NPB/KBO 리그·시즌을 SofaScore tournament 목록에서 직접 찾고, 실패 시 팀별 최근경기로 자동 fallback합니다. 선발/라인업 미확인은 LOW/MEDIUM으로 표시합니다.")
+    st.write("The Odds API 배당 + API-Sports Baseball의 KBO/NPB 시즌 경기 데이터로 최근 득실·상대전력을 자동 반영합니다.")
+    st.caption("v2.4.2: Streamlit Cloud에서 SofaScore가 403으로 차단되는 문제를 제거했습니다. 기존 API-Sports 키를 사용해 NPB/KBO 시즌 기록을 가져옵니다. 선발/라인업 전용 피드는 아직 별도 연결 전이라 MEDIUM으로 표시합니다.")
 
     if not ODDS_KEY:
         st.warning("THE_ODDS_API_KEY가 필요합니다.")
+    if not BASEBALL_KEY:
+        st.warning("API_BASEBALL_KEY 또는 기존 API_FOOTBALL_KEY가 필요합니다.")
 
     b1,b2,b3,b4=st.columns(4)
     league=b1.selectbox("리그",["KBO","NPB"],index=0)
@@ -195,7 +199,7 @@ with tabs[1]:
     brecent=b3.selectbox("최근 경기 반영",[6,8,10,12],index=2)
     bbooks=b4.slider("최소 북메이커",1,5,2,key="baseball_books")
     bmarkets=st.multiselect("야구 분석 마켓",["h2h","spreads","totals"],default=["h2h","spreads","totals"],key="baseball_markets")
-    brun=st.button("⚾ 선택 리그 전체 자동분석",type="primary",disabled=not ODDS_KEY)
+    brun=st.button("⚾ 선택 리그 전체 자동분석",type="primary",disabled=not(ODDS_KEY and BASEBALL_KEY))
 
     if brun:
         try:
@@ -212,16 +216,21 @@ with tabs[1]:
 
                 marketb=consensus(rawb,min_books=bbooks)
                 st.session_state["baseball_market"]=marketb
-                sofa=SofaScoreBaseball()
+                baseball_api=APISportsBaseball(BASEBALL_KEY)
 
                 # Build one common league pool using the first current event if we can match it.
                 seed=None
                 try:
                     r0=marketb.iloc[0]
-                    seed=sofa.find_event(r0["home_team"],r0["away_team"],r0["commence_time"])
+                    seed=baseball_api.find_event(r0["home_team"],r0["away_team"],r0["commence_time"])
                 except Exception:
                     pass
-                pool=build_league_pool(sofa,league,seed)
+                pool=build_league_pool(baseball_api,league,seed)
+                st.write(
+                    f"야구 모델 데이터: API-Sports Baseball "
+                    f"(league_id={pool.get('tournament_id')}, season={pool.get('season_id')}, "
+                    f"games={len(pool.get('events',[]))}, 남은 요청={baseball_api.remaining_requests()})"
+                )
 
                 all_rows=[]; failures=[]; metas=[]
                 groups=list(marketb.groupby("event_id"))
@@ -229,7 +238,7 @@ with tabs[1]:
                     home=g.iloc[0]["home_team"]; away=g.iloc[0]["away_team"]
                     st.write(f"[{i}/{len(groups)}] {home} - {away}")
                     try:
-                        analyzed,meta=analyze_baseball_event(g,sofa,league,recent_n=brecent,pool=pool)
+                        analyzed,meta=analyze_baseball_event(g,baseball_api,league,recent_n=brecent,pool=pool)
                         metas.append(meta)
                         if not analyzed.empty:
                             all_rows.append(analyzed)
@@ -269,7 +278,7 @@ with tabs[1]:
         for c in ["edge_pp","uncertainty_pp","away_recent_rf","away_recent_ra","home_recent_rf","home_recent_ra","away_expected_runs","home_expected_runs","away_starter_era","home_starter_era","away_starter_whip","home_starter_whip"]:
             if c in vb: vb[c]=pd.to_numeric(vb[c],errors="coerce").round(2)
         st.dataframe(vb.head(100),use_container_width=True,hide_index=True)
-        st.caption("HIGH=양팀 선발+확정 라인업 확인, MEDIUM=일부 확인, LOW=선발/라인업 미확인. LOW에서는 강한 등급을 자동 제한합니다.")
+        st.caption("v2.4.2 기준 MEDIUM=최근 시즌/상대전력 데이터 충분하지만 선발·라인업 전용 피드 미연결, LOW=최근 데이터까지 부족. LOW는 자동 다폴에서 제외합니다.")
 
         st.markdown("### 야구 2~6폴")
         sizesb=st.multiselect("야구 폴더 수",[2,3,4,5,6],default=[2,3],key="baseball_parlay_sizes")
@@ -379,7 +388,7 @@ with tabs[6]:
         "Odds API":"연결됨" if ODDS_KEY else "미연결",
         "API-Football":"연결됨" if FOOTBALL_KEY else "미연결",
         "Telegram":"연결됨" if (telegram_token and telegram_chat) else "미연결",
-        "KBO/NPB 데이터":"SofaScore 공개 데이터 — 별도 키 불필요",
+        "KBO/NPB 데이터":"API-Sports Baseball — API_BASEBALL_KEY 또는 기존 API_FOOTBALL_KEY",
     })
 
     if telegram_token and telegram_chat:
@@ -387,7 +396,7 @@ with tabs[6]:
             try:
                 from sports_ev_engine.telegram_notify import TelegramNotifier
                 TelegramNotifier(telegram_token,telegram_chat)(
-                    "✅ Sports EV Engine v2.4.1\nTelegram 알림 연결 테스트 성공"
+                    "✅ Sports EV Engine v2.4.2\nTelegram 알림 연결 테스트 성공"
                 )
                 st.success("테스트 알림을 보냈습니다.")
             except Exception as e:
@@ -425,16 +434,19 @@ Streamlit Cloud → **App settings → Secrets** 에 다음 형식으로 저장:
 ```toml
 THE_ODDS_API_KEY = "..."
 API_FOOTBALL_KEY = "..."
+API_BASEBALL_KEY = "..."  # 선택사항: 없으면 API_FOOTBALL_KEY 사용
 TELEGRAM_BOT_TOKEN = "..."
 TELEGRAM_CHAT_ID = "..."
 ```
 
-**v2.4.1 야구 데이터 소스 수정**
-- current-day schedule 매칭이 실패해도 NPB/KBO tournament/season을 직접 발견
-- tournament 최근경기 → 일별 일정 → 팀별 최근경기 3단 fallback
-- `api.sofascore.com` 실패 시 `www.sofascore.com/api/v1` 자동 재시도
-- 데이터 실패 시 실제 provider 오류를 화면에 표시
-- NPB 영문 팀명 alias 확장
+**v2.4.2 야구 데이터 소스 교체**
+- Streamlit Cloud에서 발생한 SofaScore `403 Forbidden` 의존성 제거
+- KBO/NPB 최근 경기·시즌 기록을 API-Sports Baseball로 변경
+- 기존 API_FOOTBALL_KEY를 자동 fallback으로 재사용
+- API_BASEBALL_KEY를 따로 넣어도 사용 가능
+- 시즌 리그 ID 자동 탐색 + 전체 시즌 경기 1회 수집
+- API-Sports 일일 남은 요청량을 화면에 표시
+- 선발/라인업 전용 데이터는 현재 별도 안정 소스 연결 전이므로 허위 반영하지 않음
 
 **v2.4 KBO/NPB 추가**
 - `baseball_kbo`, `baseball_npb` 실시간 배당 자동수집

@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 
 from sports_ev_engine.providers.the_odds_api import TheOddsAPI
-from sports_ev_engine.providers.sofascore_baseball import SofaScoreBaseball, extract_lineup_players
+from sports_ev_engine.providers.api_sports_baseball import APISportsBaseball
 from sports_ev_engine.market import clean_odds, consensus
 from sports_ev_engine.auto_baseball import analyze_baseball_event, build_league_pool
 from sports_ev_engine.monitoring import (
@@ -36,9 +36,9 @@ def _hash(obj):
 
 
 class BaseballMonitorEngine:
-    def __init__(self, odds_key, config: BaseballMonitorConfig, notifier=None):
+    def __init__(self, odds_key, baseball_key, config: BaseballMonitorConfig, notifier=None):
         self.odds=TheOddsAPI(odds_key)
-        self.sofa=SofaScoreBaseball()
+        self.baseball=APISportsBaseball(baseball_key)
         self.cfg=config
         self.notifier=notifier
         self.store=JSONStateStore(config.state_path)
@@ -118,22 +118,9 @@ class BaseballMonitorEngine:
                 "observed_at":now.isoformat(),
             }
 
-            # KBO/NPB lineup/starter watch: 120 min before first pitch.
-            if 0<mins<=120:
-                try:
-                    se=self.sofa.find_event(es["home_team"],es["away_team"],es["commence_time"])
-                    if se:
-                        sm=self.sofa.event_meta(se)
-                        lp=extract_lineup_players(self.sofa.lineups(int(sm["event_id"])))
-                        lh=_hash(lp)
-                        oldh=es.get("lineup_hash")
-                        es["lineup_hash"]=lh
-                        es["sofa_event_id"]=sm["event_id"]
-                        if oldh and lh!=oldh:
-                            triggered.add(eid)
-                            es["lineup_changed"]=True
-                except Exception:
-                    pass
+            # Starting-lineup watch is intentionally disabled in v2.4.2.
+            # API-Sports Baseball is used for stable history; it does not expose
+            # a reliable KBO/NPB starting-lineup feed in this integration.
 
         # reanalyze triggered events
         pool=None
@@ -141,8 +128,8 @@ class BaseballMonitorEngine:
             # seed with one current Sofa event when possible
             try:
                 r0=market.iloc[0]
-                seed=self.sofa.find_event(r0["home_team"],r0["away_team"],r0["commence_time"])
-                pool=build_league_pool(self.sofa,self.cfg.league,seed)
+                seed=self.baseball.find_event(r0["home_team"],r0["away_team"],r0["commence_time"])
+                pool=build_league_pool(self.baseball,self.cfg.league,seed)
             except Exception:
                 pool=None
 
@@ -150,7 +137,7 @@ class BaseballMonitorEngine:
             g=market[market["event_id"].astype(str)==eid].copy()
             if g.empty: continue
             try:
-                analyzed,meta=analyze_baseball_event(g,self.sofa,self.cfg.league,self.cfg.recent_n,pool)
+                analyzed,meta=analyze_baseball_event(g,self.baseball,self.cfg.league,self.cfg.recent_n,pool)
             except Exception:
                 continue
             if analyzed.empty: continue

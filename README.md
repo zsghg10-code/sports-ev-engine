@@ -1,4 +1,4 @@
-# Sports EV Engine v2.4.1 — Soccer + KBO/NPB + 20K Monitor
+# Sports EV Engine v2.4.2 — Soccer + KBO/NPB + 20K Monitor
 
 v2.3 adds background odds/lineup monitoring to the v2.2 model.
 
@@ -102,12 +102,12 @@ The app fails soft: missing lineup/starter data increases uncertainty and caps g
 instead of pretending that the data exists.
 
 
-## v2.4.1 NPB/KBO source fix
+## v2.4.2 NPB/KBO source fix
 
 v2.4 could fail with `SofaScore recent league games unavailable` when the daily event
 match was not enough to discover the current tournament/season IDs.
 
-v2.4.1 uses a three-stage history strategy:
+v2.4.2 uses a three-stage history strategy:
 
 1. Discover NPB/KBO from `/sport/baseball/unique-tournaments` and select the current season.
 2. Fetch paginated `/unique-tournament/{id}/season/{id}/events/last/{page}`.
@@ -115,3 +115,34 @@ v2.4.1 uses a three-stage history strategy:
 
 Two SofaScore hosts are tried automatically. Provider errors are surfaced in the UI instead
 of being hidden behind a generic "unavailable" message.
+
+
+## v2.4.2 — KBO/NPB provider switch
+
+The prior SofaScore dependency returned HTTP 403 from Streamlit Cloud.
+v2.4.2 removes SofaScore from the core KBO/NPB model and uses:
+
+- The Odds API: current KBO/NPB prices
+- API-Sports Baseball (`https://v1.baseball.api-sports.io`): league discovery + season games
+- `API_BASEBALL_KEY` if provided
+- otherwise the existing `API_FOOTBALL_KEY` is reused
+
+API-Sports documents KBO and NPB schedule/historical-data coverage. The app uses only
+real returned game data; if the provider does not return a season, it fails visibly.
+
+### Secrets
+
+```toml
+THE_ODDS_API_KEY = "..."
+API_FOOTBALL_KEY = "..."
+
+# Optional. If omitted, API_FOOTBALL_KEY is used for Baseball too.
+API_BASEBALL_KEY = "..."
+```
+
+### Lineups / starting pitchers
+
+v2.4.2 deliberately does NOT pretend to have KBO/NPB starting lineups.
+The core API-Sports Baseball integration is used for stable schedule/history data.
+Until a stable lineup source is connected, those games are usually MEDIUM data quality
+when recent history is sufficient, and the uncertainty penalty remains active.

@@ -6,10 +6,16 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from sports_ev_engine.core.ev import analyze_bet
-from sports_ev_engine.providers.sofascore_baseball import (
-    SofaScoreBaseball, norm, extract_lineup_players, find_starting_pitcher,
-    extract_pitcher_metrics,
-)
+from sports_ev_engine.providers.api_sports_baseball import APISportsBaseball, norm
+
+def extract_lineup_players(payload):
+    return {"home": [], "away": [], "confirmed": False}
+
+def find_starting_pitcher(players):
+    return None
+
+def extract_pitcher_metrics(payload):
+    return {}
 
 
 def _finished(e):
@@ -252,7 +258,7 @@ def _selection_side(r):
     return None
 
 
-def build_league_pool(provider: SofaScoreBaseball, league: str, current_event=None):
+def build_league_pool(provider: APISportsBaseball, league: str, current_event=None):
     league=league.upper()
     seed=current_event
     tid=sid=None
@@ -325,7 +331,7 @@ def _merge_team_history(provider, events, team_name):
     return list(by_id.values())
 
 
-def analyze_baseball_event(event_market: pd.DataFrame, provider: SofaScoreBaseball, league: str, recent_n=10, pool=None):
+def analyze_baseball_event(event_market: pd.DataFrame, provider: APISportsBaseball, league: str, recent_n=10, pool=None):
     first=event_market.iloc[0]
     home=str(first["home_team"]); away=str(first["away_team"])
     sofa_event=provider.find_event(home,away,first["commence_time"])
@@ -348,7 +354,7 @@ def analyze_baseball_event(event_market: pd.DataFrame, provider: SofaScoreBaseba
         detail=pool.get("provider_error") or provider.last_error or "no events returned"
         return pd.DataFrame(),{
             "status":"data_failed",
-            "reason":f"SofaScore league/team history unavailable ({detail})"
+            "reason":f"API-Sports Baseball league/team history unavailable ({detail})"
         }
 
     strengths=_team_strength(events)
@@ -389,6 +395,9 @@ def analyze_baseball_event(event_market: pd.DataFrame, provider: SofaScoreBaseba
     if starter_count==2 and lineup.get("confirmed"):
         quality="HIGH"
     elif starter_count>=1 or lineup_available:
+        quality="MEDIUM"
+    elif min(hf["matches"], af["matches"]) >= 8 and len(events) >= 40:
+        # Stable league history but no reliable lineup feed.
         quality="MEDIUM"
     else:
         quality="LOW"
