@@ -235,8 +235,12 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
             "data_source":competition_pool.get("data_source","A매치 최근 기록") if international else "대회 기록",
             "evidence_note":evidence_note,
             "lineup_confirmed":lineup_ok,
-            "lineup_source":deep_ctx.get("lineup_source") or ("manual/public" if lineup_ok else None),
+            "probable_lineup":bool(deep_ctx.get("probable_lineup_available")) and not lineup_ok,
+            "lineup_source":deep_ctx.get("lineup_source") or ("manual/public" if lineup_ok else deep_ctx.get("probable_lineup_source")),
             "lineup_status":deep_ctx.get("lineup_status") or ("CONFIRMED" if lineup_ok else "NOT_PUBLISHED"),
+            "stage":"FINAL" if lineup_ok else ("PROBABLE" if deep_ctx.get("probable_lineup_available") else "PRE-LINEUP"),
+            "home_probable_players":deep_ctx.get("home_probable_players"),
+            "away_probable_players":deep_ctx.get("away_probable_players"),
             "fixture_id":deep_ctx.get("fixture_id"),
             "parlay_eligible":bool((lineup_ok or not international) and grade in {"A","B","C"} and ev.conservative_ev_roi>0 and sanity not in REVIEW_STATES),
         })
@@ -264,11 +268,12 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
             scenarios=scenario_rows,base_ev=ev.ev_roi,sanity=sanity,
             data_ready=sample>=3,lineup_required=lineup_required,lineup_confirmed=lineup_ok,
         )
+        _stage="FINAL" if lineup_ok else ("PROBABLE" if deep_ctx.get("probable_lineup_available") else "PRE-LINEUP")
         counter_cases,counter_risk=build_counter_cases(
             sample_matches=sample,lineup_confirmed=lineup_ok if lineup_required else None,
             sanity=sanity,uncertainty_pp=base_unc,
             signal_coverage=signal_ledger.coverage if deep_ctx.get("deep_context_attempted") else None,
-            international=international,
+            stage=_stage, international=international,
         )
         if international:
             legacy_ok=bool(d.get('scenario_candidate')) and d.get('selection_status') not in {'REVIEW','DATA_HOLD','PASS'}

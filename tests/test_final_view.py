@@ -36,3 +36,12 @@ def test_summary_and_status():
 def test_split():
     x=split_events(sample())
     assert len(x)==1 and x[0][1]=='Germany vs Greece · 09/29 01:30 KST'
+
+
+def test_natural_failure_and_data_risk_are_separated():
+    x=sample()
+    x['counter_case_summary']='recent sample 6 matches | model uncertainty 10.5pp | deep signal coverage 17% | national-team samples/venues/rotation are less stable'
+    s=event_summary(x)
+    assert '모델 확률 자체' in s['failure']
+    assert '최근 표본 6경기' in s['data_risk']
+    assert '정밀 신호 확보율 17%' in s['data_risk']

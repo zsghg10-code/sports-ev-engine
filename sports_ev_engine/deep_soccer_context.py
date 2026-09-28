@@ -254,12 +254,33 @@ def collect_deep_context(api,pool,home,away,kickoff_iso,season=None,horizon_hour
         injury_request_ok=False
     ctx["injury_available"]=injury_request_ok
     ctx["injury_source"]="API-Football injuries"
+    injured_ids={"home":set(),"away":set()}
     for side,tname in (("home",home),("away",away)):
         pids=[]
         for r in injuries or []:
             if norm_name((r.get("team") or {}).get("name",""))!=norm_name(tname):continue
             p=(r.get("player") or {}); pids.append(p.get("id"))
+        injured_ids[side]={int(x) for x in pids if x is not None}
         atk,defn,names=_impact_by_position(importance[side],[x for x in pids if x])
         ctx[f"{side}_injury_attack_pct"]=atk;ctx[f"{side}_injury_defense_pct"]=defn
         ctx[f"{side}_missing_players"]=names
+
+    # Pre-confirmation projected XI. This is NOT an official/probable lineup feed.
+    # It is a conservative model projection from season player importance after
+    # excluding provider-listed unavailable players.  It is used only as a
+    # low-weight PRE-LINEUP signal and is replaced immediately by startXI.
+    projected={"home":[],"away":[]}
+    for side in ("home","away"):
+        ranked=[(pid,v) for pid,v in importance[side].items() if int(pid) not in injured_ids[side]]
+        ranked.sort(key=lambda z:z[1].get("importance",0),reverse=True)
+        projected[side]=ranked[:11]
+        ids_proj=[pid for pid,_ in projected[side]]
+        pa,pdef=_lineup_change(importance[side],ids_proj)
+        ctx[f"{side}_probable_lineup_attack_pct"]=pa
+        ctx[f"{side}_probable_lineup_defense_pct"]=pdef
+        ctx[f"{side}_probable_players"]=[v.get("name","") for _,v in projected[side] if v.get("name")]
+    ctx["probable_lineup_available"]=len(projected["home"])==11 and len(projected["away"])==11 and not ctx.get("lineup_confirmed")
+    ctx["probable_lineup_source"]="MODEL-PROJECTED XI: API-Football player importance + availability"
+    if ctx["probable_lineup_available"] and not ctx.get("lineup_confirmed"):
+        ctx["lineup_status"]="PROBABLE"
     return ctx

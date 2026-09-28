@@ -36,9 +36,21 @@ def test_prelineup_is_kept_but_shrunk():
     assert final.iloc[0]["daily_quality_score"] > pre.iloc[0]["daily_quality_score"]
 
 
-def test_high_counter_case_is_excluded():
+def test_high_counter_case_is_visible_but_not_combo_eligible():
     f=prepare_daily_candidates(pd.DataFrame([base(counter_case_risk="HIGH")]))
-    assert f.empty
+    assert len(f)==1
+    assert bool(f.iloc[0]["daily_combo_eligible"]) is False
+    assert f.iloc[0]["daily_candidate_state"]=="검토 후보"
+    assert "HIGH" in f.iloc[0]["daily_gate_reason"]
+
+
+def test_robust_high_uncertainty_candidate_no_longer_disappears():
+    row=base(counter_case_risk="HIGH",uncertainty_pp=10.5,ev_roi=.099,conservative_ev_roi=-.20,
+             robust_positive_ratio=1.0,robust_ev_p10=.045,v3_candidate=True,stage="FINAL",lineup_confirmed=True)
+    f=prepare_daily_candidates(pd.DataFrame([row]))
+    assert len(f)==1
+    assert abs(float(f.iloc[0]["daily_original_ev"])-.099)<1e-9
+    assert bool(f.iloc[0]["daily_combo_eligible"]) is False
 
 
 def test_combo_never_uses_two_picks_same_event():

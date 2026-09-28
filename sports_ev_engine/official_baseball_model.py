@@ -257,7 +257,7 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
             "weather_temp_c": ((context.get("advanced") or {}).get("weather") or {}).get("temperature_c"),
             "weather_wind_kmh": ((context.get("advanced") or {}).get("weather") or {}).get("wind_kmh"),
             "weather_precip_mm": ((context.get("advanced") or {}).get("weather") or {}).get("precip_mm"),
-            "plate_discipline_used":bool(statuses.get("plate_discipline")),"statcast_quality_used":bool(statuses.get("statcast_quality")),
+            "plate_discipline_used":bool(statuses.get("plate_discipline")),"statcast_quality_used":bool(statuses.get("statcast_quality")),"statcast_fallback_used":bool((((context.get("advanced") or {}).get("deep_v31") or {}).get("statcast_fallback_used"))),
             "batted_ball_regression_used":bool(statuses.get("batted_ball_regression")),"pitch_mix_used":bool(statuses.get("pitch_mix")),
             "starter_workload_used":bool(statuses.get("starter_workload")),"bullpen_exact_used":bool(statuses.get("bullpen_exact")),
             "lineup_platoon_exact_used":bool(statuses.get("lineup_platoon_exact")),"pitch_matchup_used":bool(statuses.get("pitch_matchup")),

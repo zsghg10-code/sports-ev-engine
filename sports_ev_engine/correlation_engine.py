@@ -26,6 +26,10 @@ def historical_correlations(settled_rows=None,min_days=20):
     # Only candidate snapshots; dedupe pick identity to the last settled snapshot.
     latest={}
     for r in settled_rows or []:
+        if r.get("paper_eligible") is False: continue
+        if r.get("paper_eligible") is None:
+            rec=pd.to_datetime(r.get("recorded_at"),utc=True,errors="coerce"); kick=pd.to_datetime(r.get("commence_time"),utc=True,errors="coerce")
+            if not pd.isna(rec) and not pd.isna(kick) and rec>=kick: continue
         if not bool(r.get("v3_candidate")): continue
         if _num(r.get("settle_push"),0)>0: continue
         y=_num(r.get("settle_win"))

@@ -23,6 +23,7 @@ def _ident(r):
 def replay_snapshots(selected_date:date, minutes_before:int=0, model_version:str|None=None):
     rows=[]
     for r in load_predictions():
+        if r.get("paper_eligible") is False: continue
         ko=pd.to_datetime(r.get("commence_time"),utc=True,errors="coerce")
         rec=pd.to_datetime(r.get("recorded_at"),utc=True,errors="coerce")
         if pd.isna(ko) or pd.isna(rec) or ko.tz_convert(KST).date()!=selected_date: continue
@@ -63,6 +64,7 @@ def replay_day(selected_date:date,minutes_before:int=0,model_version:str|None=No
 def version_backtest(start_date:date,end_date:date):
     settled=load_settled(); latest={}
     for r in settled:
+        if r.get("paper_eligible") is False: continue
         ts=pd.to_datetime(r.get("commence_time"),utc=True,errors="coerce")
         if pd.isna(ts):continue
         d=ts.tz_convert(KST).date()

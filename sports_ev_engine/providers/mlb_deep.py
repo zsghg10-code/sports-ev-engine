@@ -548,12 +548,16 @@ class MLBDeepContext:
             rq=_weighted_mean(recent_q,recent_w); sq=_weighted_mean(season_q,season_w)
             if rq is not None and sq is not None: usage_quality_delta=rq-sq
             usage_change=sorted(usage_change,key=lambda x:abs(x.get("delta_pp") or 0),reverse=True)
+        savant_ok=bool(season_profile.get("available") and arsenal.get("available"))
+        fallback_used=bool(not savant_ok and discipline.get("available"))
         return {
             "available": bool(season_profile.get("available") or discipline.get("available") or arsenal.get("available")),
             "season": season_profile, "recent_discipline": discipline, "arsenal": arsenal,
             "usage_change":usage_change,"usage_quality_delta":usage_quality_delta,
             "recent_batted_ball": recent_raw, "season_batted_ball": season_raw,
-            "source": "Baseball Savant + MLB Stats API play-by-play",
+            "fallback_used":fallback_used,
+            "fallback_note":"Baseball Savant 일부 장애/미수집 → MLB Stats API play-by-play의 Whiff/Chase/Zone/Contact·구속 신호만 사용; xwOBA/Barrel/HardHit은 MISSING 유지" if fallback_used else "",
+            "source": "MLB Stats API play-by-play fallback" if fallback_used else "Baseball Savant + MLB Stats API play-by-play",
         }
 
     def starter_workload(self, pitcher_payload, kickoff):
@@ -1149,6 +1153,7 @@ class MLBDeepContext:
             "advanced_completeness":sum(bool(v) for v in statuses.values())/len(statuses),
             "extra_uncertainty_pp":min(4.2,extra_unc),
             "home_statcast":hp_sc,"away_statcast":ap_sc,
+            "statcast_fallback_used":bool(hp_sc.get("fallback_used") or ap_sc.get("fallback_used")),
             "home_starter_workload":hp_work,"away_starter_workload":ap_work,
             "home_bullpen_exact":hb,"away_bullpen_exact":ab,
             "home_bullpen_manager":hmgr,"away_bullpen_manager":amgr,

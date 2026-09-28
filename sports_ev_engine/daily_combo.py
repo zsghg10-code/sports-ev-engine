@@ -21,6 +21,7 @@ import pandas as pd
 
 from .prediction_store import load_predictions
 from .correlation_engine import correlation_adjusted_hit, historical_correlations
+from .model_drift import drift_rows
 
 KST = ZoneInfo("Asia/Seoul")
 DEFAULT_PREDICTIONS = "data/prediction_snapshots.jsonl"
@@ -120,6 +121,8 @@ def _stage_factor(row: pd.Series) -> tuple[float, str, str]:
 
     if stage == "FINAL" or (quality == "HIGH" and lineup):
         return 1.00, "확정", "FINAL"
+    if "PROBABLE" in stage:
+        return 0.93, "예상 라인업", stage
     if "PRE" in stage:
         return 0.89, "미확정", stage
     if "LINEUP" in stage or lineup:
@@ -187,83 +190,123 @@ def _sport_label(row: pd.Series) -> str:
 def prepare_daily_candidates(frame: pd.DataFrame) -> pd.DataFrame:
     """Normalize all sports into one comparable candidate table.
 
-    PRE-LINEUP is never silently treated as FINAL.  Its model edge is shrunk
-    toward the market before combo ranking.  This is a ranking haircut only;
-    the original model probability/EV remains visible unchanged.
+    v3.4.1 separates *candidate visibility* from *combo eligibility*.
+    A ROBUST/SENSITIVE pick with positive current EV remains visible even when
+    a strict safety gate (HIGH counter-case risk, stale data, drift ALERT,
+    adaptive review, etc.) blocks it from the actual accumulator.  This avoids
+    the confusing state where an event shows 27/27 stress-positive in its own
+    analysis but the daily tab reports zero candidates.
     """
     if frame is None or frame.empty:
         return pd.DataFrame()
-    rows = []
-    for _, r in frame.iterrows():
-        status = str(r.get("v3_decision_status") or "").upper()
+    try:
+        _drift_map={(str(x.get("sport_family") or ""),str(x.get("market") or "")):str(x.get("status") or "") for x in drift_rows()}
+    except Exception:
+        _drift_map={}
+    rows=[]
+    for _,r in frame.iterrows():
+        status=str(r.get("v3_decision_status") or "").upper()
+        if status not in {"ROBUST","SENSITIVE"}:
+            continue
+        odds=_num(r.get("best_odds")); model=_num(r.get("model_win_prob"))
+        market=_num(r.get("consensus_prob"),_num(r.get("break_even")))
+        be=_num(r.get("break_even")); push=max(0.0,_num(r.get("push_prob"),0.0))
+        raw_ev=_num(r.get("ev_roi"),_num(r.get("point_ev_roi")))
+        if not (math.isfinite(odds) and odds>1 and math.isfinite(model) and math.isfinite(market)):
+            continue
+        if not math.isfinite(raw_ev):
+            raw_ev=odds*model+push-1.0
+        if raw_ev<=0:
+            continue
+
+        stage_factor,lineup_state,stage_label=_stage_factor(r)
+        risk_factor=_risk_factor(r)
+        drift=_drift_map.get((str(r.get("sport_family") or ""),str(r.get("market") or "")),"")
+        reasons=[]
+        combo_eligible=True
+
         if "v3_candidate" in r.index and not _truth(r.get("v3_candidate")):
-            continue
-        if status not in {"ROBUST", "SENSITIVE"}:
-            continue
-        if str(r.get("adaptive_gate") or "OK").upper() not in {"", "OK"}:
-            continue
-        odds = _num(r.get("best_odds"))
-        model = _num(r.get("model_win_prob"))
-        market = _num(r.get("consensus_prob"), _num(r.get("break_even")))
-        be = _num(r.get("break_even"))
-        base_ev = _num(r.get("conservative_ev_roi"), _num(r.get("ev_roi")))
-        if not (math.isfinite(odds) and odds > 1 and math.isfinite(model) and math.isfinite(market)):
-            continue
-        stage_factor, lineup_state, stage_label = _stage_factor(r)
-        risk_factor = _risk_factor(r)
-        # HIGH-risk picks remain visible in diagnostics elsewhere but are too
-        # fragile to be called a daily best-combo candidate.
-        if risk_factor <= 0.70:
-            continue
-        maturity = stage_factor * risk_factor
-        adj_prob = market + maturity * (model - market)
-        adj_prob = max(0.001, min(0.999, adj_prob))
-        if not math.isfinite(base_ev):
-            base_ev = odds * model - 1.0
-        adj_ev = base_ev * maturity
-        if adj_ev <= 0:
-            continue
-        robust_ratio = _num(r.get("robust_positive_ratio"), 0.5)
-        p10 = _num(r.get("robust_ev_p10"), adj_ev)
-        unc = max(0.0, _num(r.get("uncertainty_pp"), 7.0))
-        # Transparent, survival-first ranking.  EV is capped so a longshot with
-        # a huge theoretical edge cannot dominate a lower-risk daily combo.
-        ev_component = min(max(adj_ev, 0.0), 0.20) / 0.20
-        p10_component = min(max(p10, -0.10), 0.15)
-        quality = (
-            0.47 * adj_prob
-            + 0.20 * ev_component
-            + 0.18 * max(0.0, min(1.0, robust_ratio))
-            + 0.10 * stage_factor
-            + 0.05 * max(0.0, min(1.0, (p10_component + 0.10) / 0.25))
-            - min(unc, 15.0) * 0.005
+            combo_eligible=False
+            reasons.append("v3 보수 후보 게이트 미통과")
+        adaptive=str(r.get("adaptive_gate") or "OK").upper()
+        if adaptive not in {"","OK"}:
+            combo_eligible=False
+            if adaptive=="MODEL_CONFLICT_REVIEW": reasons.append("앙상블 모델 충돌로 REVIEW")
+            elif adaptive=="PASS_AFTER_CALIBRATION": reasons.append("보수/캘리브레이션 게이트에서 조합 제외")
+            else: reasons.append(f"적응형 게이트 {adaptive}")
+        if drift=="ALERT":
+            combo_eligible=False; reasons.append("최근 모델 성능 drift ALERT")
+        elif drift=="WATCH":
+            risk_factor*=0.94; reasons.append("최근 모델 성능 drift WATCH")
+
+        rec=pd.to_datetime(r.get("recorded_at"),utc=True,errors="coerce")
+        kick=pd.to_datetime(r.get("commence_time"),utc=True,errors="coerce")
+        now=pd.Timestamp.now(tz="UTC")
+        age=float("nan")
+        if not pd.isna(rec) and not pd.isna(kick) and kick>now:
+            age=(now-rec).total_seconds()/60
+            if age>180:
+                combo_eligible=False; reasons.append("분석 스냅샷 3시간 초과·재분석 필요")
+            elif age>90:
+                risk_factor*=0.90; reasons.append("분석 스냅샷 90분 초과")
+
+        counter=str(r.get("counter_case_risk") or "").upper()
+        if counter=="HIGH":
+            combo_eligible=False
+            reasons.append("반증/데이터 위험 HIGH")
+
+        maturity=stage_factor*risk_factor
+        adj_prob=market+maturity*(model-market)
+        adj_prob=max(0.001,min(max(0.001,1-push-0.001),adj_prob))
+        adj_ev=odds*adj_prob+push-1.0
+        if adj_ev<=0:
+            combo_eligible=False
+            reasons.append("보수 확률 축소 후 EV≤0")
+
+        robust_ratio=_num(r.get("robust_positive_ratio"),0.5)
+        p10=_num(r.get("robust_ev_p10"),adj_ev)
+        unc=max(0.0,_num(r.get("uncertainty_pp"),7.0))
+        ev_component=min(max(adj_ev,0.0),0.20)/0.20
+        p10_component=min(max(p10,-0.10),0.15)
+        quality=(
+            0.47*adj_prob
+            +0.20*ev_component
+            +0.18*max(0.0,min(1.0,robust_ratio))
+            +0.10*stage_factor
+            +0.05*max(0.0,min(1.0,(p10_component+0.10)/0.25))
+            -min(unc,15.0)*0.005
         )
-        kickoff = r.get("kickoff_kst")
-        if pd.isna(kickoff):
-            kickoff = _kickoff_kst(r.get("commence_time"))
-        event_id = str(r.get("event_id") or f"{r.get('home_team','')}__{r.get('away_team','')}__{r.get('commence_time','')}")
+        kickoff=r.get("kickoff_kst")
+        if pd.isna(kickoff): kickoff=_kickoff_kst(r.get("commence_time"))
+        event_id=str(r.get("event_id") or f"{r.get('home_team','')}__{r.get('away_team','')}__{r.get('commence_time','')}")
+        candidate_state="조합 가능" if combo_eligible else "검토 후보"
+        reason=" · ".join(dict.fromkeys(reasons)) if reasons else "강건성·리스크 게이트 통과"
         rows.append({
             **r.to_dict(),
-            "sport_label": _sport_label(r),
-            "event_key": event_id,
-            "game_label": f"{r.get('home_team','')} vs {r.get('away_team','')}",
-            "pick_label": _pick_label(r),
-            "kickoff_kst": kickoff,
-            "lineup_state": lineup_state,
-            "daily_stage": stage_label,
-            "daily_stage_factor": stage_factor,
-            "daily_adjusted_prob": adj_prob,
-            "daily_adjusted_ev": adj_ev,
-            "daily_quality_score": quality * 100.0,
-            "daily_provisional": lineup_state != "확정",
-            "daily_original_prob": model,
-            "daily_original_ev": _num(r.get("ev_roi"), base_ev),
-            "daily_be": be,
+            "sport_label":_sport_label(r),
+            "event_key":event_id,
+            "game_label":f"{r.get('home_team','')} vs {r.get('away_team','')}",
+            "pick_label":_pick_label(r),
+            "kickoff_kst":kickoff,
+            "lineup_state":lineup_state,
+            "daily_stage":stage_label,
+            "daily_stage_factor":stage_factor,
+            "daily_adjusted_prob":adj_prob,
+            "daily_adjusted_ev":adj_ev,
+            "daily_quality_score":quality*100.0,
+            "daily_provisional":lineup_state!="확정",
+            "daily_original_prob":model,
+            "daily_original_ev":raw_ev,
+            "daily_be":be,
+            "daily_drift_status":drift or "OK",
+            "daily_combo_eligible":bool(combo_eligible),
+            "daily_candidate_state":candidate_state,
+            "daily_gate_reason":reason,
+            "daily_snapshot_age_min":age,
         })
-    out = pd.DataFrame(rows)
-    if out.empty:
-        return out
-    return out.sort_values(["daily_quality_score", "daily_adjusted_prob", "daily_adjusted_ev"], ascending=False).reset_index(drop=True)
+    out=pd.DataFrame(rows)
+    if out.empty:return out
+    return out.sort_values(["daily_combo_eligible","daily_quality_score","daily_adjusted_prob","daily_adjusted_ev"],ascending=[False,False,False,False]).reset_index(drop=True)
 
 
 def _combo_row(combo: Iterable[dict], corr_matrix=None) -> dict | None:
@@ -311,9 +354,14 @@ def _combo_row(combo: Iterable[dict], corr_matrix=None) -> dict | None:
 def best_combos(candidates: pd.DataFrame, sizes=(1, 2, 3), top_n=5) -> dict[int, list[dict]]:
     if candidates is None or candidates.empty:
         return {int(n): [] for n in sizes}
-    # The first 24 candidates are enough for a daily best-combo search and keep
+    pool_frame=candidates.copy()
+    if "daily_combo_eligible" in pool_frame.columns:
+        pool_frame=pool_frame[pool_frame["daily_combo_eligible"].fillna(False).astype(bool)].copy()
+    if pool_frame.empty:
+        return {int(n): [] for n in sizes}
+    # The first 24 combo-eligible candidates are enough for a daily search and keep
     # 3-leg combinations computationally cheap on Streamlit Cloud.
-    records = candidates.head(24).to_dict("records")
+    records = pool_frame.head(24).to_dict("records")
     corr_matrix = historical_correlations()
     out: dict[int, list[dict]] = {}
     for n in sizes:

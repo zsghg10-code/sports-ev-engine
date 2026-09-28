@@ -1,5 +1,6 @@
 """Per-match analysis view, independent of candidate eligibility."""
 import pandas as pd
+from sports_ev_engine.explanations import humanize_policy_reason
 
 def match_summary(frame):
     out=[]
@@ -32,7 +33,7 @@ def match_summary(frame):
                 '판정':'모델상 양의 EV' if value.point_ev_roi>0 else '현재 배당에서 양의 EV 없음',
                 '라인업':'확인' if value.lineup_confirmed else '미확인',
                 '조합':'참고 조합 가능' if value.scenario_parlay_eligible else '제외',
-                '이유':value.selection_reason}
+                '이유':humanize_policy_reason(value.selection_reason,value)}
             if 'v3_decision_status' in rows.columns:
                 item.update({'v3 판정':value.v3_decision_status,
                              'Stress 양수 비율(%)':round(float(value.robust_positive_ratio)*100,1),

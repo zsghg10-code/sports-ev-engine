@@ -37,6 +37,7 @@ from sports_ev_engine.core.parlay import optimize_parlays
 from sports_ev_engine.review_policy import candidate_mask, review_mask
 from sports_ev_engine.national_policy import reference_pairs
 from sports_ev_engine.analysis_view import match_summary
+from sports_ev_engine.explanations import humanize_policy_reason
 from sports_ev_engine.validation import validate
 from sports_ev_engine.providers.official_baseball import OfficialBaseballStats
 from sports_ev_engine.official_baseball_model import analyze_official_event
@@ -59,15 +60,21 @@ from sports_ev_engine.adaptive_model import calibration_curve
 from sports_ev_engine.data_freshness import freshness_rows
 from sports_ev_engine.postgame_stats import failure_statistics
 from sports_ev_engine.replay_backtest import replay_day, version_backtest
+from sports_ev_engine.lineup_stage import resolve_lineup_stage
+from sports_ev_engine.source_health import source_health_rows
+from sports_ev_engine.paper_trade import paper_summary
+from sports_ev_engine.feature_attribution import attribution
+from sports_ev_engine.model_drift import drift_rows
+from sports_ev_engine.bankroll import simulate as simulate_bankroll
 
-st.set_page_config(page_title="Sports EV Engine v3.3.1",layout="wide")
-st.title("Sports EV Engine v3.3.1")
-st.caption("BUILD v3.3.1-amatch-lineup-fix · 2026-09-29")
+st.set_page_config(page_title="Sports EV Engine v3.4.1",layout="wide")
+st.title("Sports EV Engine v3.4.1")
+st.caption("BUILD v3.4.1-readable-reasons-candidate-gates · 2026-09-29")
 if any(getattr(module,"PROVIDER_BUILD",None)!="3.0.0" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider,deep_soccer_provider)):
     st.error("앱과 수집 파일 버전이 다릅니다. ZIP의 sports_ev_engine 폴더까지 전부 반영한 뒤 Streamlit 앱을 Reboot하세요.")
     st.stop()
 FootballAccessError=football_provider.FootballAccessError
-st.caption("분석 백엔드 v3.3 · 자동 calibration/앙상블 + 상관 다폴 + replay/backtest + 변화로그/신선도/실패통계")
+st.caption("분석 백엔드 v3.4.1 · 자연어 판정/실패경로 + 후보/조합 게이트 분리 + source fallback + blind paper")
 st.caption("독립 모델 → 정밀 컨텍스트 → 반증 검사 → 시장 캘리브레이션 → 27개 스트레스 시나리오 → EV/ROBUST 판정 → 기록·사후검증")
 
 def secret(name):
@@ -84,7 +91,7 @@ SUPABASE_KEY=secret("SUPABASE_SERVICE_ROLE_KEY") or secret("SUPABASE_KEY")
 configure_persistence(SUPABASE_URL,SUPABASE_KEY)
 BASEBALL_KEY=None
 
-_BUILD_ID = "3.3.1-amatch-lineup-fix"
+_BUILD_ID = "3.4.1-readable-reasons-candidate-gates"
 if st.session_state.get("_build_id") != _BUILD_ID:
     for _k in [
         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
@@ -174,7 +181,9 @@ def render_final_decision_layer(frame, key_prefix, title="🧠 v3 FINAL Decision
         summary_lines.append(f"**런라인 최우선 후보:** {summary.get('spread_best','없음')}")
     summary_lines += [
         f"**다폴:** {summary['parlay']}",
+        f"**선정/판정 이유:** {summary.get('selection_reason','-')}",
         f"**주요 실패경로:** {summary['failure']}",
+        f"**데이터/모델 리스크:** {summary.get('data_risk','-')}",
         f"**데이터 상태:** {summary['data_status']}",
         f"**Model confidence:** {summary['confidence']}/100",
     ]
@@ -188,7 +197,7 @@ def render_final_decision_layer(frame, key_prefix, title="🧠 v3 FINAL Decision
         st.caption(f"강건성: {positive}/{n}개 스트레스 시나리오에서 +EV{p10_text} · confidence는 확률이 아니라 데이터 완성도/불확실성/시장 충돌/강건성을 합친 휴리스틱 점수입니다.")
     else:
         st.caption("confidence는 적중확률이 아니라 데이터 완성도·불확실성·시장 충돌을 요약한 휴리스틱 점수입니다.")
-    with st.expander("이 경기의 v3 근거·결측 신호 보기"):
+    with st.expander("이 경기의 v3 근거·결측 신호·내부 판정코드 보기"):
         if summary.get('signal_summary'):
             st.write("확인 신호:",summary['signal_summary'])
         if summary.get('missing_signals'):
@@ -212,7 +221,7 @@ def render_final_decision_layer(frame, key_prefix, title="🧠 v3 FINAL Decision
             rows.append({"경기":elabel,"모델 최우선":es['model_best'],"토탈 최우선":es['total_best'],"다폴":es['parlay'],"데이터 상태":es['data_status'],"Confidence":es['confidence']})
         st.dataframe(pd.DataFrame(rows),hide_index=True,use_container_width=True)
 
-tabs=st.tabs(["⚡ 완전자동 축구","🌍 축구 A매치","⚾ KBO/NPB 자동분석","실시간 배당","시장 가격","MLB","🏆 오늘의 베스트 조합","다폴","📡 모니터링","설정","📊 모델 검증","🧪 모델 연구소"])
+tabs=st.tabs(["⚡ 완전자동 축구","🌍 축구 A매치","⚾ KBO/NPB 자동분석","실시간 배당","시장 가격","MLB","🏆 오늘의 베스트 조합","다폴","📡 모니터링","설정","📊 모델 검증","🧪 모델 연구소","🛡️ 데이터·리스크"])
 
 with tabs[0]:
     st.subheader("클럽 축구 자동분석")
@@ -496,14 +505,17 @@ with tabs[1]:
                             else:
                                 pool["event_context"]={"deep_context_attempted":False,"deep_context_reason":"API-Football key missing or deep context disabled","lineup_confirmed":False,"lineup_status":"NOT_CHECKED"}
                             deep=pool.get("event_context") or {}
-                            if deep.get("lineup_confirmed"):
+                            lineup_stage=resolve_lineup_stage(deep,pool.get("manual_context") or {})
+                            if lineup_stage.get("confirmed") or lineup_stage.get("probable"):
                                 st.session_state["national_lineups"].append({
                                     "경기":match_label,
-                                    "홈 포메이션":deep.get("home_formation") or "—",
-                                    "홈 선발":" · ".join(deep.get("home_lineup_players") or []),
-                                    "원정 포메이션":deep.get("away_formation") or "—",
-                                    "원정 선발":" · ".join(deep.get("away_lineup_players") or []),
-                                    "소스":deep.get("lineup_source") or "API-Football"
+                                    "상태":lineup_stage.get("label"),
+                                    "홈 포메이션":lineup_stage.get("home_formation") or "—",
+                                    "홈 선발/예상":" · ".join(lineup_stage.get("home_players") or []),
+                                    "원정 포메이션":lineup_stage.get("away_formation") or "—",
+                                    "원정 선발/예상":" · ".join(lineup_stage.get("away_players") or []),
+                                    "소스":lineup_stage.get("source") or "—",
+                                    "fallback":"YES" if lineup_stage.get("fallback_used") else "NO",
                                 })
                             analyzed,meta=analyze_event(g,pool,recent_n=national_recent)
                             if analyzed.empty:
@@ -514,9 +526,15 @@ with tabs[1]:
                                 analyzed["kickoff_kst"]=format_kst(kickoff)
                                 all_rows.append(analyzed)
                                 deep=pool.get("event_context") or {}
-                                manual_ok=pool.get("manual_context",{}).get("home",{}).get("confirmed") and pool.get("manual_context",{}).get("away",{}).get("confirmed")
-                                lineup_ok=bool(manual_ok or deep.get("lineup_confirmed"))
-                                lineup_label="확정 (API-Football)" if deep.get("lineup_confirmed") else ("확정 (공개소스)" if manual_ok else ("부분 게시" if deep.get("lineup_status")=="PARTIAL" else "미확인"))
+                                lineup_stage=resolve_lineup_stage(deep,pool.get("manual_context") or {})
+                                lineup_ok=bool(lineup_stage.get("confirmed"))
+                                lineup_label=lineup_stage.get("label") or "미확인"
+                                analyzed["lineup_confirmed"]=lineup_ok
+                                analyzed["probable_lineup"]=bool(lineup_stage.get("probable"))
+                                analyzed["lineup_source"]=lineup_stage.get("source")
+                                analyzed["lineup_status"]=lineup_stage.get("stage")
+                                analyzed["lineup_fallback_used"]=bool(lineup_stage.get("fallback_used"))
+                                analyzed["stage"]="FINAL" if lineup_ok else ("PROBABLE" if lineup_stage.get("probable") else "PRE-LINEUP")
                                 deep_bits=[]
                                 if deep.get("deep_context_attempted"):
                                     deep_bits.append("정밀 컨텍스트 조회")
@@ -528,7 +546,7 @@ with tabs[1]:
                                     "경기":match_label,"경기시간(KST)":format_kst(kickoff),"상태":"분석 가능",
                                     "이유":"기록 기준 충족 · " + " · ".join(deep_bits),
                                     "라인업":lineup_label,
-                                    "라인업 소스":deep.get("lineup_source") or ("공개소스" if manual_ok else "—")
+                                    "라인업 소스":lineup_stage.get("source") or "—"
                                 })
                         except DataHold as e:
                             failures.append({"경기":match_label_kst(home,away,g.iloc[0]["commence_time"]),"이유":str(e)})
@@ -561,8 +579,8 @@ with tabs[1]:
         st.markdown("#### 경기별 수집·분석 가능 여부 — 추천 여부와 별개")
         st.dataframe(pd.DataFrame(st.session_state["national_status"]),hide_index=True)
     if st.session_state.get("national_lineups"):
-        with st.expander("✅ API-Football 확정 선발 11명 보기", expanded=False):
-            st.caption("여기에는 API-Football startXI에서 양 팀 11명이 모두 확인된 경기만 표시합니다. 제3자 Probable Lineups는 확정으로 승격하지 않습니다.")
+        with st.expander("👥 라인업 상태 · 예상→확정 보기", expanded=False):
+            st.caption("CONFIRMED는 공식/검증된 11명만 의미합니다. PROBABLE은 시즌 중요도+availability로 만든 저가중치 모델 예상 XI이며 확정으로 승격하지 않습니다. 공식 startXI가 들어오면 즉시 대체됩니다.")
             st.dataframe(pd.DataFrame(st.session_state["national_lineups"]),hide_index=True,use_container_width=True)
     if st.session_state.get("national_sources"):
         with st.expander("실제 수집 결과 · 소스 진단"):
@@ -604,6 +622,7 @@ with tabs[1]:
             st.write("v3는 분석 당시 모델확률·배당·BE·Edge·EV·모델버전·ROBUST 판정을 append-only 스냅샷으로 저장합니다. The Odds API scores가 지원되는 종목은 최근 종료 경기 결과를 자동 연결해 Brier, Log loss, ROI를 계산합니다. 장기 검증은 충분한 사후 표본이 쌓인 뒤 판단해야 합니다.")
         st.markdown("#### 가정 변화에도 기대값이 양수인 개별 후보")
         st.caption("양 팀 예상 득점을 각각 −10%·기준·+10%, 원모델 비중을 15%·25%·35%로 바꾼 27개 조합입니다. 이 범위는 실측 오차나 신뢰구간이 아닙니다. 기존 약 8.5%p 일괄 차감은 후보 선정에서 사용하지 않습니다.")
+        st.info("여기서 '가정 변화 통과'는 개별 픽의 강건성 시험 통과를 뜻합니다. 🏆 오늘의 베스트 조합에서는 여기에 데이터 신선도·반증위험·드리프트·라인업 단계 등 별도 안전 게이트를 한 번 더 적용하므로, 통과 픽이 '검토 후보'로는 보이더라도 실제 조합에서는 제외될 수 있습니다.")
         counts=nr.selection_status.value_counts()
         st.write({"분석 옵션":len(nr),"가정 변화 통과":int(counts.get('SCENARIO_PASS',0)),"가정에 민감":int(counts.get('SENSITIVE',0)),"괴리 검토":int(counts.get('REVIEW',0)),"기대값 미달":int(counts.get('PASS',0)),"자료 보류":int(counts.get('DATA_HOLD',0))})
         labels={'SCENARIO_PASS':'가정 변화 통과 · 미검증','SENSITIVE':'가정에 민감 · 조합 제외','REVIEW':'괴리 검토 · 조합 제외','PASS':'기대값 미달','DATA_HOLD':'자료 보류'}
@@ -613,7 +632,9 @@ with tabs[1]:
             for col in ['model_win_prob','break_even','point_ev_roi','scenario_win_min','scenario_win_max','scenario_ev_min','scenario_ev_max']:
                 shown[col]=(shown[col]*100).round(2)
             shown['selection_status']=shown['selection_status'].map(labels)
-            return shown.rename(columns={'selection_status':'판정','display_pick':'경기/선택','model_win_prob':'기준 확률(%)','break_even':'BE(%)','edge_pp':'Edge(%p)','point_ev_roi':'기준 EV(%)','scenario_win_min':'가정 최저 확률(%)','scenario_win_max':'가정 최고 확률(%)','scenario_ev_min':'가정 최저 EV(%)','scenario_ev_max':'가정 최고 EV(%)','lineup_confirmed':'라인업 확인','selection_reason':'판정/조합 제외 이유'})
+            if 'selection_reason' in shown:
+                shown['selection_reason']=[humanize_policy_reason(v, frame.iloc[i] if i < len(frame) else None) for i,v in enumerate(shown['selection_reason'].tolist())]
+            return shown.rename(columns={'selection_status':'판정','display_pick':'경기/선택','model_win_prob':'기준 확률(%)','break_even':'BE(%)','edge_pp':'Edge(%p)','point_ev_roi':'기준 EV(%)','scenario_win_min':'가정 최저 확률(%)','scenario_win_max':'가정 최고 확률(%)','scenario_ev_min':'가정 최저 EV(%)','scenario_ev_max':'가정 최고 EV(%)','lineup_confirmed':'라인업 확인','selection_reason':'사람이 읽는 판정 이유'})
         passed=nr[nr.scenario_candidate].sort_values('scenario_ev_min',ascending=False)
         if passed.empty:st.info("설정한 모든 가정에서 기대값이 양수인 후보는 없습니다. 아래 민감 후보와 제외 이유를 확인하세요.")
         else:st.dataframe(policy_table(passed),hide_index=True)
@@ -1121,19 +1142,23 @@ with tabs[6]:
         present=sorted(set(daily_candidates.get("sport_label",pd.Series(dtype=str)).dropna().astype(str))) if not daily_candidates.empty else []
         expected=["클럽축구","A매치","KBO","NPB","MLB"]
         missing=[x for x in expected if x not in present]
-        m1,m2,m3,m4=st.columns(4)
+        combo_ready=(daily_candidates[daily_candidates.get("daily_combo_eligible",pd.Series(False,index=daily_candidates.index)).fillna(False).astype(bool)].copy() if not daily_candidates.empty else pd.DataFrame())
+        m1,m2,m3,m4,m5=st.columns(5)
         m1.metric("저장된 경기",int(daily_raw.get("event_id",pd.Series(dtype=str)).astype(str).nunique()) if "event_id" in daily_raw else 0)
         m2.metric("+EV 후보",len(daily_candidates))
-        m3.metric("분석 종목",len(present))
-        m4.metric("잠정 후보",int(daily_candidates.get("daily_provisional",pd.Series(dtype=bool)).fillna(False).sum()) if not daily_candidates.empty else 0)
+        m3.metric("조합 가능",len(combo_ready))
+        m4.metric("분석 종목",len(present))
+        m5.metric("잠정 후보",int(daily_candidates.get("daily_provisional",pd.Series(dtype=bool)).fillna(False).sum()) if not daily_candidates.empty else 0)
         if present:
             st.caption("현재 집계: "+" · ".join(present))
         if missing:
             st.caption("현재 통합 +EV 후보가 없는 종목: "+" · ".join(missing)+" — 경기가 없거나, 아직 분석 전이거나, 현재 후보 기준을 통과하지 못한 경우입니다.")
 
         if daily_candidates.empty:
-            st.warning("저장된 경기는 있지만 ROBUST/SENSITIVE +EV 조건을 통과한 통합 후보가 없습니다. 억지로 조합을 만들지 않습니다.")
+            st.warning("저장된 경기는 있지만 현재 확률·배당 기준 ROBUST/SENSITIVE +EV 후보가 없습니다. 억지로 조합을 만들지 않습니다.")
         else:
+            if combo_ready.empty:
+                st.warning("+EV 검토 후보는 있지만 현재 안전 게이트를 모두 통과한 '조합 가능' 후보는 없습니다. 아래 후보표의 '조합 제외 이유'를 확인하세요.")
             combos=best_combos(daily_candidates,sizes=(1,2,3),top_n=5)
             best_single=(combos.get(1) or [None])[0]
             best_two=(combos.get(2) or [None])[0]
@@ -1173,7 +1198,8 @@ with tabs[6]:
             show_cols={
                 "sport_label":"종목","경기시간(KST)":"경기시간(KST)","game_label":"경기","pick_label":"픽","best_odds":"배당",
                 "모델확률":"모델확률(%)","조합용 보수확률":"조합용 보수확률(%)","BE":"BE(%)","EV":"EV(%)","보수EV":"보수EV(%)",
-                "강건성":"강건성(%)","lineup_state":"라인업","daily_stage":"데이터상태","v3_decision_status":"판정","daily_quality_score":"통합점수"
+                "강건성":"강건성(%)","lineup_state":"라인업","daily_stage":"데이터상태","v3_decision_status":"판정",
+                "daily_candidate_state":"후보상태","daily_gate_reason":"조합 제외 이유","daily_quality_score":"통합점수"
             }
             table=view[[c for c in show_cols if c in view.columns]].rename(columns=show_cols)
             if "통합점수" in table: table["통합점수"]=pd.to_numeric(table["통합점수"],errors="coerce").round(1)
@@ -1209,7 +1235,7 @@ with tabs[6]:
                         rows.append({"구분":f"{n}폴" if n>1 else "1픽","순위":rank,"조합":x["combo_label"],"배당":round(x["combined_odds"],2),"근사 적중확률(%)":round(x["estimated_hit_prob"]*100,1),"근사 EV(%)":round(x["estimated_ev"]*100,1),"잠정픽":x["provisional_legs"]})
                 st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
 
-    st.caption("이 탭의 '최고'는 보장된 적중을 뜻하지 않습니다. 저장된 최신 모델확률·시장가격·강건성·불확실성·라인업 단계에 대한 위험조정 점수 기준입니다. 같은 경기의 여러 선택지는 한 조합에 동시에 넣지 않습니다.")
+    st.caption("이 탭의 '후보'와 '조합 가능'은 구분됩니다. +EV/강건성 후보는 표시하되, 반증위험 HIGH·오래된 분석·드리프트·적응형 REVIEW 등 안전 게이트를 통과하지 못하면 실제 조합에서는 제외합니다. 같은 경기의 여러 선택지는 한 조합에 동시에 넣지 않습니다.")
 
 
 with tabs[7]:
@@ -1297,7 +1323,7 @@ with tabs[8]:
             try:
                 from sports_ev_engine.telegram_notify import TelegramNotifier
                 TelegramNotifier(telegram_token,telegram_chat)(
-                    "✅ Sports EV Engine v3.3.1\nTelegram 알림 연결 테스트 성공"
+                    "✅ Sports EV Engine v3.4.0\nTelegram 알림 연결 테스트 성공"
                 )
                 st.success("테스트 알림을 보냈습니다.")
             except Exception as e:
@@ -1506,8 +1532,8 @@ with tabs[10]:
 
 
 with tabs[11]:
-    st.subheader("🧪 v3.3 모델 연구소")
-    st.write("확률이 왜 바뀌었는지, calibration이 실제로 필요한지, 다폴 상관보정이 얼마나 적용됐는지, 과거 시점에서 결과를 모른 채 어떤 판단을 했는지를 검증하는 연구/감사 탭입니다.")
+    st.subheader("🧪 v3.4 모델 연구소")
+    st.write("확률 변화, calibration, 상관보정, no-lookahead replay를 검증하는 연구/감사 탭입니다. v3.4의 Source Health·Paper lock·Drift·자금위험은 데이터·리스크 탭에서 확인합니다.")
 
     st.markdown("### 1) 🔄 픽 변화 로그")
     _changes=change_logs(limit=200)
@@ -1609,3 +1635,75 @@ with tabs[11]:
             })
             st.dataframe(_ev.head(200),use_container_width=True,hide_index=True)
     st.caption("모델끼리 크게 충돌하면 REVIEW로 보내 자동 다폴에서 제외합니다. 같은 경기 두 옵션 조합 금지와 별개로, 다폴 확률은 정산 데이터에서 추정된 pair 상관을 사용할 수 있을 때 단순 곱셈을 보정합니다.")
+
+
+with tabs[12]:
+    st.subheader("🛡️ 데이터·리스크 센터")
+    st.write("v3.4의 감사/안전 계층입니다. 소스 fallback, blind paper-trading 잠금, 확률 기여도, model drift, drawdown을 한 곳에서 확인합니다.")
+
+    st.markdown("### 1) 🩺 Source Health + Fallback")
+    _shr=source_health_rows()
+    if _shr:
+        _shdf=pd.DataFrame(_shr)
+        st.dataframe(_shdf,use_container_width=True,hide_index=True)
+        st.caption("OK=최근 실제 수집, FALLBACK=대체/예상 소스 사용, WAIT=공식 게시 대기, MISSING=실제 수집되지 않음. MISSING을 평균값으로 꾸미지 않습니다.")
+    else:
+        st.info("예정 경기 분석을 한 번 실행하면 실제 사용한 소스 상태가 표시됩니다.")
+
+    st.markdown("### 2) 🔒 Blind Paper-Trading / No-lookahead")
+    _ps=paper_summary()
+    p1,p2,p3=st.columns(3)
+    p1.metric("잠긴 스냅샷",_ps.get("locked",0))
+    p2.metric("킥오프 전 적격",_ps.get("pregame_eligible",0))
+    p3.metric("정산된 적격",_ps.get("settled_eligible",0))
+    st.caption("v3.4부터 모든 예측 스냅샷은 append-only로 잠기며, 킥오프 이후 생성된 스냅샷은 Calibration·Correlation·Replay/Backtest 학습표본에서 자동 제외됩니다.")
+
+    st.markdown("### 3) 🧮 Feature Attribution")
+    _today=latest_snapshots_for_kst_date(datetime.now(KST).date())
+    if _today.empty:
+        st.info("오늘 분석 스냅샷이 생기면 확률 기여도를 확인할 수 있습니다.")
+    else:
+        _today=_today.copy()
+        _today["_label"]=_today.get("away_team","").astype(str)+" @ "+_today.get("home_team","").astype(str)+" · "+_today.get("selection","").astype(str)
+        _sel=st.selectbox("기여도 확인 픽",list(_today.index),format_func=lambda i:_today.loc[i,"_label"],key="attr_pick")
+        _ar=attribution(_today.loc[_sel].to_dict())
+        a1,a2=st.columns(2)
+        a1.metric("시장 no-vig", "—" if pd.isna(_ar.get("market_prob")) else f"{_ar['market_prob']*100:.1f}%")
+        a2.metric("최종 조건부확률", "—" if pd.isna(_ar.get("final_cond_prob")) else f"{_ar['final_cond_prob']*100:.1f}%")
+        st.dataframe(pd.DataFrame(_ar.get("probability_contributions") or []),use_container_width=True,hide_index=True)
+        if _ar.get("context_ledger"):
+            with st.expander("정밀 컨텍스트 ledger"):
+                st.dataframe(pd.DataFrame(_ar["context_ledger"]),use_container_width=True,hide_index=True)
+        st.caption("확률 기여도는 시장 anchor 대비 앙상블 성분의 감사용 근사 분해입니다. 비선형 라인업/xG/정규화 효과는 잔차로 분리하며 Shapley처럼 정확한 인과분해라고 주장하지 않습니다.")
+
+    st.markdown("### 4) 🚨 Model Drift 경보")
+    _dr=drift_rows()
+    if _dr:
+        _dd=pd.DataFrame(_dr)
+        st.dataframe(_dd,use_container_width=True,hide_index=True)
+        if any(x.get("status")=="ALERT" for x in _dr):
+            st.warning("최근 Brier 또는 CLV가 과거 baseline보다 의미 있게 악화된 시장이 있습니다. 해당 시장은 자동 다폴 포함 전 원인 점검이 필요합니다.")
+    else:
+        st.info("정산된 blind paper 표본이 쌓이면 종목×마켓별 drift를 자동 감시합니다.")
+
+    st.markdown("### 5) 💰 Bankroll / Drawdown 시뮬레이터")
+    _d=st.date_input("시뮬레이션 후보 날짜(KST)",value=datetime.now(KST).date(),key="risk_date")
+    _snap=latest_snapshots_for_kst_date(_d)
+    _cand=prepare_daily_candidates(_snap)
+    if _cand.empty:
+        st.info("선택 날짜에 통합 +EV 후보가 없습니다.")
+    else:
+        r1,r2,r3,r4=st.columns(4)
+        _bank=r1.number_input("가상 시작자금",min_value=10000,value=1000000,step=100000,key="risk_bank")
+        _kelly=r2.selectbox("Kelly 배수",[0.10,0.25,0.50],index=1,key="risk_kelly")
+        _cap=r3.selectbox("픽당 최대 노출",[0.01,0.02,0.03,0.05],index=1,key="risk_cap")
+        _dcap=r4.selectbox("1회차 총노출 상한",[0.03,0.05,0.08,0.10],index=2,key="risk_dcap")
+        _sim=simulate_bankroll(_cand.head(12).to_dict("records"),bankroll=_bank,paths=2000,cycles=100,kelly_mult=_kelly,per_bet_cap=_cap,daily_cap=_dcap)
+        if _sim.get("paths"):
+            c1,c2,c3,c4=st.columns(4)
+            c1.metric("100회 후 중앙값",f"{_sim['median_final']:,.0f}")
+            c2.metric("10% 하위 결과",f"{_sim['p10_final']:,.0f}")
+            c3.metric("중앙 최대낙폭",f"{_sim['median_max_drawdown']*100:.1f}%")
+            c4.metric("초기자금 50% 이하 확률",f"{_sim['ruin_probability']*100:.1f}%")
+            st.write({"사용 후보":_sim.get("legs"),"실효 총노출":f"{_sim.get('effective_daily_exposure',0)*100:.1f}%","90%ile 최대낙폭":f"{_sim.get('p90_max_drawdown',0)*100:.1f}%"})
+        st.caption("Monte Carlo 결과는 입력 확률이 맞다는 가정의 위험 시뮬레이션이며 수익 보장이 아닙니다. 보수확률과 노출 상한을 사용해 연패/낙폭을 별도로 봅니다.")

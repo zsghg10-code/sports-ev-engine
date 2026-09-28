@@ -81,6 +81,11 @@ def calibration_curve(settled_rows:list[dict], sport_family:str, market:str, *, 
     # snapshots must not make one game count 5-10 times in calibration.
     latest={}
     for r in settled_rows or []:
+        # Strict paper-trade guard: post-kickoff snapshots never train calibration.
+        if r.get("paper_eligible") is False: continue
+        if r.get("paper_eligible") is None:
+            rec=pd.to_datetime(r.get("recorded_at"),utc=True,errors="coerce"); kick=pd.to_datetime(r.get("commence_time"),utc=True,errors="coerce")
+            if not pd.isna(rec) and not pd.isna(kick) and rec>=kick: continue
         if str(r.get("sport_family") or "") != str(sport_family or ""): continue
         if str(r.get("market") or "") != str(market or ""): continue
         try: point=round(float(r.get("point")),4)

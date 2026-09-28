@@ -15,6 +15,7 @@ from typing import Any
 import pandas as pd
 
 from sports_ev_engine.kst_schedule import format_kst
+from sports_ev_engine.explanations import humanize_data_risk, humanize_failure_route, humanize_selection_summary
 
 
 def _num(v: Any, default=float("nan")) -> float:
@@ -179,27 +180,15 @@ def _candidate_row(frame: pd.DataFrame, market: str):
 
 
 def _failure_text(row: pd.Series | None) -> str:
-    if row is None:return "핵심 +EV 후보가 없어 별도 실패경로를 선정하지 않음"
-    raw=str(row.get("counter_case_summary") or "").strip()
-    if not raw:return "현재 자동 반증 엔진에서 중대한 추가 실패경로를 찾지 못함"
-    repl=[
-        (r"recent sample only (\d+) matches",r"최근 표본이 \1경기로 작음"),
-        (r"recent sample (\d+) matches",r"최근 표본이 \1경기로 얇음"),
-        (r"starting lineup not confirmed",r"선발 라인업 미확정·로테이션 위험"),
-        (r"independent model strongly conflicts with market \(([^)]+)\)",r"독립모델과 시장의 강한 충돌(\1)"),
-        (r"independent model/market gap requires monitoring",r"모델-시장 괴리 추가 확인 필요"),
-        (r"model uncertainty ([0-9.]+)pp",r"모델 불확실성 \1%p"),
-        (r"deep signal coverage ([0-9]+)%",r"xG·결장·선수영향 등 정밀 신호 확보율 \1%"),
-        (r"pregame stage is ([A-Z _-]+)",r"사전 데이터 단계가 \1"),
-        (r"advanced signal completeness ([0-9]+)%",r"고급 신호 완성도 \1%"),
-        (r"national-team samples/venues/rotation are less stable",r"국가대표 특유의 표본·중립구장·로테이션 변동성"),
-    ]
-    txt=raw
-    for pat,sub in repl:
-        txt=re.sub(pat,sub,txt,flags=re.I)
-    txt=txt.replace(" | "," + ")
-    return txt
+    if row is None:
+        return "핵심 +EV 후보가 없어 별도 실패경로를 선정하지 않음"
+    return humanize_failure_route(row.get("counter_case_summary"))
 
+
+def _data_risk_text(row: pd.Series | None) -> str:
+    if row is None:
+        return "후보가 없어 별도 데이터 리스크 요약 없음"
+    return humanize_data_risk(row.get("counter_case_summary"))
 
 def data_status(frame: pd.DataFrame) -> str:
     if frame.empty:return "DATA HOLD"
@@ -264,7 +253,9 @@ def event_summary(frame: pd.DataFrame) -> dict:
         "total_best":total_best,
         "spread_best":spread_best,
         "parlay":parlay,
+        "selection_reason":humanize_selection_summary(focus),
         "failure":_failure_text(focus),
+        "data_risk":_data_risk_text(focus),
         "data_status":data_status(frame),
         "confidence":confidence_score(frame,focus),
         "focus_status":_status(focus),

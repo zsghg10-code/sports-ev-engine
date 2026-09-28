@@ -14,7 +14,7 @@ from itertools import product
 import math
 from typing import Callable, Iterable
 
-ENGINE_ID = "chatgpt-style-v3.3.0-adaptive"
+ENGINE_ID = "chatgpt-style-v3.4.0-audited"
 
 
 def clamp(v, lo, hi):
@@ -129,6 +129,16 @@ def apply_soccer_context(home_lambda: float, away_lambda: float, context: dict |
                    "home" if (hla-ala)>(hld-ald) else "away" if (ala-hla)>(ald-hld) else "neutral",
                    (hla+ald)-(ala+hld),.90,context.get("lineup_source","API-Football lineups"),
                    f"H atk/def {hla:+.1f}/{hld:+.1f}%; A {ala:+.1f}/{ald:+.1f}%")
+    elif bool(context.get("probable_lineup_available")):
+        pha=float(context.get("home_probable_lineup_attack_pct") or 0.0); phd=float(context.get("home_probable_lineup_defense_pct") or 0.0)
+        paa=float(context.get("away_probable_lineup_attack_pct") or 0.0); pad=float(context.get("away_probable_lineup_defense_pct") or 0.0)
+        # projected XI gets only 40% of a confirmed-lineup effect
+        h*=1+.40*(pha+pad)/100.0; a*=1+.40*(paa+phd)/100.0
+        net=(pha+pad)-(paa+phd)
+        ledger.add("probable_lineup",True,"home" if net>0 else "away" if net<0 else "neutral",.40*net,.45,
+                   context.get("probable_lineup_source","model projected XI"),"projected, not official; replaced by startXI")
+        ledger.add("confirmed_lineup",False,note="projected XI available; official startXI not confirmed")
+        miss_penalty(.45 if international else .30)
     else:
         ledger.add("confirmed_lineup",False,note="both starting XIs not confirmed")
         miss_penalty(1.0 if international else .7)
@@ -198,7 +208,10 @@ def build_counter_cases(*, sample_matches:int|None=None, lineup_confirmed:bool|N
     elif sample_matches is not None and sample_matches<7:
         add("THIN_SAMPLE","medium",f"recent sample {sample_matches} matches")
     if lineup_confirmed is False:
-        add("LINEUP_UNKNOWN","high","starting lineup not confirmed")
+        if str(stage or "").upper()=="PROBABLE":
+            add("LINEUP_PROJECTED","medium","projected XI available; official starting lineup not confirmed")
+        else:
+            add("LINEUP_UNKNOWN","high","starting lineup not confirmed")
     if sanity in {"OUTLIER_SHRUNK","HIGH_DISAGREEMENT"}:
         add("MARKET_CONFLICT","high",f"independent model strongly conflicts with market ({sanity})")
     elif sanity=="CHECK":
