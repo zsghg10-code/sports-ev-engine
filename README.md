@@ -1,4 +1,4 @@
-# Sports EV Engine v3.0.2 — KST Calendar + Kickoff Time
+# Sports EV Engine v3.1.2 — Daily Best Combo + MLB Deep/Postgame
 
 
 ## v3.0.2 KST Calendar + kickoff time
@@ -450,3 +450,55 @@ New MLB signal slots:
 
 The deep layer is bounded so it cannot overwhelm the independent run model. Low-sample BvP, news headlines,
 and umpire tendency do not receive aggressive directional coefficients.
+
+## v3.1.1 — MLB automatic post-game review
+
+MLB settlement now continues into an evidence-based retrospective review.
+
+Workflow:
+1. Pregame analysis writes an immutable snapshot including model probability, odds, EV, ROBUST status and pregame starter baselines.
+2. Settlement attaches the final score through The Odds API.
+3. MLB Stats API boxscore + inning-by-inning linescore are matched to the settled game.
+4. H2H / totals / run-line outcomes receive an objective post-game classification.
+5. The Model Validation tab shows the classification and evidence.
+
+Examples of automatic classes:
+- `MODEL_CONFIRMATION`
+- `MODEL_OVERCONFIDENCE_STARTER_COLLAPSE`
+- `GOOD_PICK_LATE_REVERSAL`
+- `GOOD_PICK_EXTRA_INNING_TAIL`
+- `GOOD_PICK_LATE_TOTAL_TAIL`
+- `MODEL_MISS_TOTAL_DIRECTION`
+- `GOOD_PICK_RUN_SEQUENCING_LOSS`
+- `OFFENSE_UNDERPERFORMANCE`
+- `REVIEW` when the data does not justify a stronger causal label
+
+Important anti-hindsight rule:
+`GOOD PICK` is never assigned merely because a pregame EV was positive. The code requires observable game-state evidence such as a late lead that was lost, an under that stayed below the line deep into the game before a late crossing, an extra-inning tail, or unusually high traffic/LOB with low run conversion.
+
+`python settle_once.py` is for an external persistent host/cron scheduler. It is not a command to type into Streamlit. The app's `📊 모델 검증` tab can run the same settlement + MLB review manually. The Odds API scores endpoint is queried on a short recent window, so unattended operation should run at least once every 1–3 days.
+
+## v3.1.2 — KST daily best combo across all supported sports
+
+A new `🏆 오늘의 베스트 조합` tab aggregates the latest immutable snapshots already produced by the analysis tabs for one KST calendar date.
+
+Supported pool:
+- club soccer
+- national-team soccer
+- KBO
+- NPB
+- MLB
+
+Rules:
+- The latest re-analysis wins on the daily screen while older snapshots remain immutable on disk.
+- PRE-LINEUP / partial-data games are **not hidden**. Their model-vs-market disagreement is shrunk toward the market and they are shown as provisional candidates.
+- FINAL / lineup-confirmed games receive the full maturity weight.
+- HIGH counter-case-risk rows are not promoted into the daily best-combo pool.
+- Only ROBUST/SENSITIVE +EV candidates are considered.
+- A parlay can never contain two selections from the same event.
+- Multi-leg best-combo mode does not force sub-50% risk-adjusted legs into a parlay.
+- Survival probability receives more weight than raw theoretical EV, so large-odds fragile accumulators do not dominate the ranking.
+- The screen shows the strongest single, strongest 2-leg combo, optional 3-leg combo, and top-5 comparison.
+- If the lineup is later confirmed, rerun that sport tab. The newer snapshot automatically replaces the earlier provisional view in the daily combo screen.
+
+The integrated daily-combo probability/EV is a risk-adjusted ranking layer, not a new calibrated model probability and not a guarantee of profit.

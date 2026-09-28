@@ -175,6 +175,24 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
     signal_ledger.add("confirmed_lineup",bool(context.get("lineup_confirmed")),"context",0,.9,source=context.get("source","") or "")
     signal_ledger.add("confirmed_starters",bool(context.get("starter_confirmed")),"context",0,.9,source=context.get("source","") or "")
 
+    # Pregame starter baselines persisted for objective post-game comparison.
+    _hsr=(adv.get("home_starter_recent") or {})
+    _asr=(adv.get("away_starter_recent") or {})
+    def _avg_recent_ip(rec):
+        vals=[]
+        for x in (rec.get("starts") or []):
+            try:
+                v=float(x.get("ip"))
+            except (TypeError,ValueError):
+                continue
+            vals.append(v)
+        return sum(vals)/len(vals) if vals else None
+    _home_expected_ip=_avg_recent_ip(_hsr)
+    _away_expected_ip=_avg_recent_ip(_asr)
+    _deep31=(adv.get("deep_v31") or {})
+    _hb_exact=(_deep31.get("home_bullpen_exact") or {})
+    _ab_exact=(_deep31.get("away_bullpen_exact") or {})
+
     rows=[]
     for _,r in event_market.iterrows():
         side=_side(r)
@@ -218,6 +236,11 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
             "home_starter":context.get("home_starter"),"away_starter":context.get("away_starter"),
             "home_starter_era":(context.get("home_starter_stats") or {}).get("era"),"away_starter_era":(context.get("away_starter_stats") or {}).get("era"),
             "home_starter_whip":(context.get("home_starter_stats") or {}).get("whip"),"away_starter_whip":(context.get("away_starter_stats") or {}).get("whip"),
+            "home_starter_expected_ip":_home_expected_ip,"away_starter_expected_ip":_away_expected_ip,
+            "home_starter_recent_bb_pct":_hsr.get("bb_pct"),"away_starter_recent_bb_pct":_asr.get("bb_pct"),
+            "home_starter_recent_k_pct":_hsr.get("k_pct"),"away_starter_recent_k_pct":_asr.get("k_pct"),
+            "home_starter_recent_kbb_pct":_hsr.get("kbb_pct"),"away_starter_recent_kbb_pct":_asr.get("kbb_pct"),
+            "home_bullpen_pitches_last3":_hb_exact.get("total_relief_pitches"),"away_bullpen_pitches_last3":_ab_exact.get("total_relief_pitches"),
             "home_lineup_strength":context.get("home_lineup_strength"),"away_lineup_strength":context.get("away_lineup_strength"),
             "home_recent_rf":hs["runs_per_game"],"home_recent_ra":hs["runs_allowed_per_game"],"away_recent_rf":aws["runs_per_game"],"away_recent_ra":aws["runs_allowed_per_game"],
             "home_form_matches":hs["games"],"away_form_matches":aws["games"],"home_expected_runs":hm,"away_expected_runs":am,

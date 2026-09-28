@@ -42,3 +42,17 @@ def test_quarter_push_keeps_roi_but_not_binary_calibration(tmp_path):
     assert rep['n']==0
     assert rep['roi_n']==1
     assert abs(rep['overall']['roi']-.5)<1e-12
+
+
+def test_mlb_pregame_baselines_are_persisted(tmp_path):
+    pred=tmp_path/'pred.jsonl'
+    f=pd.DataFrame([dict(event_id='m1',home_team='NYY',away_team='BOS',market='h2h',selection='NYY',point=None,
+                         best_odds=1.8,model_win_prob=.62,push_prob=0,v3_decision_status='ROBUST',
+                         home_starter_expected_ip=5.8,away_starter_expected_ip=5.4,
+                         home_starter_recent_bb_pct=.074,away_starter_recent_bb_pct=.091,
+                         home_bullpen_pitches_last3=102,away_bullpen_pitches_last3=81)])
+    assert record_frame(f,sport_key='baseball_mlb',sport_family='baseball_mlb',path=pred)==1
+    row=json.loads(pred.read_text(encoding='utf-8').strip())
+    assert row['home_starter_expected_ip']==5.8
+    assert row['home_starter_recent_bb_pct']==.074
+    assert row['home_bullpen_pitches_last3']==102

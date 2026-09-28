@@ -8,7 +8,7 @@ import pandas as pd
 
 from .core.asian import settle_total_under, settle_total_over, settle_home_handicap
 
-MODEL_VERSION="3.0.0"
+MODEL_VERSION="3.1.2"
 DEFAULT_PREDICTIONS="data/prediction_snapshots.jsonl"
 DEFAULT_SETTLED="data/settled_predictions.jsonl"
 
@@ -56,7 +56,10 @@ def record_frame(frame:pd.DataFrame, sport_key:str|None=None, sport_family:str="
     keep=["event_id","commence_time","home_team","away_team","market","selection","point","best_book","best_odds","books",
           "consensus_prob","raw_independent_prob","model_win_prob","push_prob","break_even","edge_pp","ev_roi","point_ev_roi",
           "conservative_ev_roi","uncertainty_pp","grade","sanity","stage","data_quality","sport_key","home_lambda","away_lambda",
-          "home_expected_runs","away_expected_runs","reasoning_engine_id","signal_coverage","missing_signals","counter_case_risk",
+          "home_expected_runs","away_expected_runs","home_starter","away_starter","home_starter_expected_ip","away_starter_expected_ip",
+          "home_starter_recent_bb_pct","away_starter_recent_bb_pct","home_starter_recent_k_pct","away_starter_recent_k_pct",
+          "home_starter_recent_kbb_pct","away_starter_recent_kbb_pct","home_bullpen_pitches_last3","away_bullpen_pitches_last3",
+          "lineup_confirmed","reasoning_engine_id","signal_coverage","missing_signals","counter_case_risk",
           "counter_case_summary","v3_decision_status","robust_positive_ratio","robust_ev_min","robust_ev_p10","robust_ev_max",
           "robust_prob_min","robust_prob_max","robust_scenario_count","v3_candidate","v3_parlay_eligible"]
     for _,r in frame.iterrows():
