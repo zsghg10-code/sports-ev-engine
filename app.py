@@ -48,15 +48,16 @@ from sports_ev_engine.providers import baseball_advanced as advanced_provider, t
 from sports_ev_engine.deep_soccer_context import collect_deep_context
 from sports_ev_engine import deep_soccer_context as deep_soccer_provider
 from sports_ev_engine.prediction_store import record_frame, auto_settle, evaluation, pending_sport_keys
+from sports_ev_engine.final_view import split_events, compact_table, event_summary
 
-st.set_page_config(page_title="Sports EV Engine v3.0.0",layout="wide")
-st.title("Sports EV Engine v3.0.0")
-st.caption("BUILD v3.0.0-chatgpt-style · 2026-09-28")
+st.set_page_config(page_title="Sports EV Engine v3.0.1",layout="wide")
+st.title("Sports EV Engine v3.0.1")
+st.caption("BUILD v3.0.1-final-decision-ui · 2026-09-28")
 if any(getattr(module,"PROVIDER_BUILD",None)!="3.0.0" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider,deep_soccer_provider)):
     st.error("앱과 수집 파일 버전이 다릅니다. ZIP의 sports_ev_engine 폴더까지 전부 반영한 뒤 Streamlit 앱을 Reboot하세요.")
     st.stop()
 FootballAccessError=football_provider.FootballAccessError
-st.caption("수집 모듈 v3.0.0 확인 완료")
+st.caption("분석 백엔드 v3.0.0 확인 완료 · FINAL UI v3.0.1")
 st.caption("독립 모델 → 정밀 컨텍스트 → 반증 검사 → 시장 캘리브레이션 → 27개 스트레스 시나리오 → EV/ROBUST 판정 → 기록·사후검증")
 
 def secret(name):
@@ -70,7 +71,7 @@ ODDS_KEY=secret("THE_ODDS_API_KEY")
 FOOTBALL_KEY=secret("API_FOOTBALL_KEY")
 BASEBALL_KEY=None
 
-_BUILD_ID = "3.0.0-chatgpt-style"
+_BUILD_ID = "3.0.1-final-decision-ui"
 if st.session_state.get("_build_id") != _BUILD_ID:
     for _k in [
         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
@@ -79,6 +80,74 @@ if st.session_state.get("_build_id") != _BUILD_ID:
         st.session_state.pop(_k, None)
     st.session_state["_build_id"] = _BUILD_ID
 
+
+
+
+def render_final_decision_layer(frame, key_prefix, title="🧠 v3 FINAL Decision Layer"):
+    """Manual-analysis style per-match presentation for v3 outputs."""
+    events=split_events(frame)
+    if not events:
+        return
+    # Put the strongest ROBUST/+EV match first so the useful result is visible immediately.
+    scored=[]
+    for key,label,g in events:
+        cand=g[g.get("v3_candidate",pd.Series(False,index=g.index)).fillna(False).astype(bool)].copy()
+        robust=cand[cand.get("v3_decision_status",pd.Series("",index=cand.index)).eq("ROBUST")] if not cand.empty else cand
+        src=robust if not robust.empty else cand
+        p10=pd.to_numeric(src.get("robust_ev_p10"),errors="coerce").max() if not src.empty and "robust_ev_p10" in src else float("nan")
+        ev=pd.to_numeric(src.get("ev_roi"),errors="coerce").max() if not src.empty and "ev_roi" in src else float("nan")
+        scored.append((0 if not robust.empty else 1 if not cand.empty else 2, -(p10 if pd.notna(p10) else -9), -(ev if pd.notna(ev) else -9), key,label,g))
+    scored.sort(key=lambda x:(x[0],x[1],x[2],x[4]))
+    events=[(x[3],x[4],x[5]) for x in scored]
+    st.markdown(f"### {title}")
+    st.caption("내가 경기 하나를 수동 분석할 때처럼 승/무/패와 대표 O/U를 한 표에 모으고, +EV와 강건성·반증 위험·라인업 상태를 분리해 보여줍니다.")
+    labels={key:label for key,label,_ in events}
+    selected=st.selectbox("경기 선택",[key for key,_,_ in events],format_func=lambda k:labels[k],key=f"{key_prefix}_final_event")
+    key,label,g=next(x for x in events if x[0]==selected)
+    st.markdown(f"#### {label}")
+    final_table=compact_table(g)
+    st.dataframe(final_table,hide_index=True,use_container_width=True)
+    summary=event_summary(g)
+    st.markdown(
+        f"**모델 최우선 후보:** {summary['model_best']}  \n"
+        f"**토탈 최우선 후보:** {summary['total_best']}  \n"
+        f"**다폴:** {summary['parlay']}  \n"
+        f"**주요 실패경로:** {summary['failure']}  \n"
+        f"**데이터 상태:** {summary['data_status']}  \n"
+        f"**Model confidence:** {summary['confidence']}/100"
+    )
+    ratio=summary.get('robust_positive_ratio')
+    n=summary.get('robust_scenario_count',0)
+    p10=summary.get('robust_ev_p10')
+    if pd.notna(ratio) and n:
+        positive=int(round(float(ratio)*int(n)))
+        p10_text=f" · P10 EV {float(p10)*100:+.1f}%" if pd.notna(p10) else ""
+        st.caption(f"강건성: {positive}/{n}개 스트레스 시나리오에서 +EV{p10_text} · confidence는 확률이 아니라 데이터 완성도/불확실성/시장 충돌/강건성을 합친 휴리스틱 점수입니다.")
+    else:
+        st.caption("confidence는 적중확률이 아니라 데이터 완성도·불확실성·시장 충돌을 요약한 휴리스틱 점수입니다.")
+    with st.expander("이 경기의 v3 근거·결측 신호 보기"):
+        if summary.get('signal_summary'):
+            st.write("확인 신호:",summary['signal_summary'])
+        if summary.get('missing_signals'):
+            st.write("MISSING:",summary['missing_signals'])
+        detail_cols=[c for c in [
+            "display_pick","best_book","best_odds","raw_independent_prob","market_prob","model_win_prob",
+            "robust_positive_ratio","robust_ev_min","robust_ev_p10","robust_ev_max",
+            "counter_case_risk","counter_case_summary","sanity","uncertainty_pp","signal_coverage",
+            "lineup_confirmed","stage","data_quality","home_lambda","away_lambda","home_expected_runs","away_expected_runs"
+        ] if c in g.columns]
+        detail=g[detail_cols].copy()
+        for c in ["raw_independent_prob","market_prob","model_win_prob","robust_positive_ratio","signal_coverage"]:
+            if c in detail:detail[c]=(pd.to_numeric(detail[c],errors="coerce")*100).round(1)
+        for c in ["robust_ev_min","robust_ev_p10","robust_ev_max"]:
+            if c in detail:detail[c]=(pd.to_numeric(detail[c],errors="coerce")*100).round(1)
+        st.dataframe(detail,hide_index=True,use_container_width=True)
+    with st.expander("모든 경기 FINAL 요약"):
+        rows=[]
+        for _,elabel,eg in events:
+            es=event_summary(eg)
+            rows.append({"경기":elabel,"모델 최우선":es['model_best'],"토탈 최우선":es['total_best'],"다폴":es['parlay'],"데이터 상태":es['data_status'],"Confidence":es['confidence']})
+        st.dataframe(pd.DataFrame(rows),hide_index=True,use_container_width=True)
 
 tabs=st.tabs(["⚡ 완전자동 축구","🌍 축구 A매치","⚾ KBO/NPB 자동분석","실시간 배당","시장 가격","MLB","다폴","📡 모니터링","설정","📊 모델 검증"])
 
@@ -213,7 +282,8 @@ with tabs[0]:
 
     if "ranked" in st.session_state and not st.session_state["ranked"].empty:
         ranked=st.session_state["ranked"]
-        st.markdown("### 조건을 통과한 +EV 후보")
+        render_final_decision_layer(ranked,"club",title="🧠 v3 FINAL Decision Layer · 클럽 축구")
+        st.markdown("### 상세 진단 · 조건을 통과한 +EV 후보")
         view=ranked[candidate_mask(ranked)].copy()
         if view.empty:st.info("괴리/기대값 기준을 통과한 후보가 없습니다. 검토 대상을 억지로 추천하지 않습니다.")
         cols=["v3_decision_status","robust_positive_ratio","robust_ev_p10","robust_ev_min","counter_case_risk","signal_coverage",
@@ -432,7 +502,8 @@ with tabs[1]:
             st.download_button("검증 보고서 다운로드",json.dumps(report,ensure_ascii=False,indent=2),file_name="validation_report.json")
     nr=st.session_state.get("national_ranked")
     if isinstance(nr,pd.DataFrame) and not nr.empty:
-        st.markdown("### 전체 경기 자동분석 · 승무패 / 언더오버")
+        render_final_decision_layer(nr,"national",title="🧠 v3 FINAL Decision Layer · A매치")
+        st.markdown("### 상세 진단 · 전체 경기 자동분석")
         st.caption("확률이 가장 높은 선택과 배당 대비 기대값이 가장 높은 선택을 따로 표시합니다. EV가 음수인 경기도 표시합니다. 언더오버 요약은 양방향 배당이 있는 라인 중 북메이커 수와 시장 균형으로 대표 라인을 고릅니다. 모든 라인과 핸디캡은 아래 전체 옵션에서 확인하세요.")
         st.dataframe(match_summary(nr),hide_index=True)
         st.info("분석 확률과 EV는 모델 추정입니다. v3 정밀 모드에서는 제공사가 실제 반환한 xG·확정 라인업·결장·선수 중요도·휴식일을 추가 반영하며, 확보하지 못한 신호는 MISSING으로 남깁니다.")
@@ -493,7 +564,7 @@ with tabs[1]:
 with tabs[2]:
     st.subheader("⚾ KBO / NPB 완전자동 분석")
     st.write("The Odds API 배당 + KBO/NPB 공식 팀기록 + 예고/확정 선발 + 실제 라인업을 자동 수집해 최종 확률을 다시 계산합니다.")
-    st.caption("v3.0.0: 기존 선발/타선/불펜/좌우/날씨 신호에 반증 검사와 27개 스트레스 시나리오를 추가하고 ROBUST만 자동 다폴에 허용합니다.")
+    st.caption("v3.0.1: v3 백엔드 반증/27개 스트레스 시나리오 결과를 FINAL Decision Layer로 바로 표시하며 ROBUST만 자동 다폴에 허용합니다.")
 
     if not ODDS_KEY:
         st.warning("THE_ODDS_API_KEY가 필요합니다.")
@@ -634,7 +705,8 @@ with tabs[2]:
 
     if "baseball_ranked" in st.session_state and not st.session_state["baseball_ranked"].empty:
         rb=st.session_state["baseball_ranked"]
-        st.markdown("### KBO/NPB +EV 후보")
+        render_final_decision_layer(rb,"baseball",title="🧠 v3 FINAL Decision Layer · KBO/NPB")
+        st.markdown("### 상세 진단 · KBO/NPB +EV 후보")
         vb=rb[rb.get("v3_candidate",pd.Series(False,index=rb.index)).fillna(False).astype(bool)].copy()
         cols=[
             "v3_decision_status","robust_positive_ratio","robust_ev_p10","robust_ev_min","counter_case_risk","signal_coverage",
@@ -797,7 +869,7 @@ with tabs[7]:
             try:
                 from sports_ev_engine.telegram_notify import TelegramNotifier
                 TelegramNotifier(telegram_token,telegram_chat)(
-                    "✅ Sports EV Engine v3.0.0\nTelegram 알림 연결 테스트 성공"
+                    "✅ Sports EV Engine v3.0.1\nTelegram 알림 연결 테스트 성공"
                 )
                 st.success("테스트 알림을 보냈습니다.")
             except Exception as e:

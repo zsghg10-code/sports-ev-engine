@@ -1,4 +1,19 @@
-# Sports EV Engine v3.0.0 — ChatGPT-style Analysis Engine
+# Sports EV Engine v3.0.1 — ChatGPT-style FINAL Decision UI
+
+
+## v3.0.1 FINAL Decision UI
+
+분석 엔진은 v3.0.0과 동일하고, 사용자가 실제로 보는 결과 화면을 수동 ChatGPT 분석 형식으로 바꿨습니다.
+
+- 경기 선택 → 승/무/패 + 대표 O/U를 한 표에 표시
+- `추정확률 | BE | Edge | EV | 불확실성 | 상태`를 즉시 표시
+- `모델 최우선 후보 / 토탈 최우선 후보 / 다폴 / 주요 실패경로 / 데이터 상태 / Model confidence` 요약
+- ROBUST 스트레스 시나리오 통과 개수와 P10 EV 표시
+- MISSING 신호·시장 충돌·반증 근거는 펼침 상세창으로 분리
+- 클럽 축구, A매치, KBO/NPB에 동일한 FINAL Decision Layer 적용
+- 기존 넓은 진단표는 삭제하지 않고 `상세 진단`으로 아래에 유지
+
+`Model confidence`는 적중확률이 아니라 데이터 완성도·불확실성·시장 충돌·강건성을 합친 휴리스틱 점수입니다.
 
 최신 안내는 **V3_CHATGPT_STYLE_KO.md**를 먼저 읽으세요. v2.9.4의 기존 기능을 유지하면서 다음 계층을 추가했습니다.
 
