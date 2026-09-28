@@ -70,7 +70,9 @@ def _starter_multiplier(starter, team_era):
 
 def _apply_context(hm,am,hs,aws,ctx):
     if not ctx:return hm,am
-    # Opposing starter changes each offense's expected runs.
+    base_hm,base_am=hm,am
+
+    # Opposing starter season quality.
     hm*=_starter_multiplier(ctx.get("away_starter_stats") or {},aws.get("era"))
     am*=_starter_multiplier(ctx.get("home_starter_stats") or {},hs.get("era"))
 
@@ -79,13 +81,29 @@ def _apply_context(hm,am,hs,aws,ctx):
         if hf is not None: hm*=max(.90,min(1.10,float(hf)))
         if af is not None: am*=max(.90,min(1.10,float(af)))
     elif str(ctx.get("league",""))=="KBO":
-        # KBO endpoint exposes grouped lineup WAR. Use relative difference only.
         hw=ctx.get("home_lineup_strength"); aw=ctx.get("away_lineup_strength")
         if hw is not None and aw is not None:
             diff=max(-8.0,min(8.0,float(hw)-float(aw)))
             rel=math.exp(.008*diff)
             hm*=rel; am/=rel
+
+    adv=ctx.get("advanced") or {}
+    c=adv.get("components") or {}
+    for key in ("home_recent_form_factor","home_split_factor","home_vs_bullpen_factor"):
+        if c.get(key) is not None: hm*=float(c[key])
+    for key in ("away_recent_form_factor","away_split_factor","away_vs_bullpen_factor"):
+        if c.get(key) is not None: am*=float(c[key])
+    if c.get("away_starter_recent_factor") is not None: hm*=float(c["away_starter_recent_factor"])
+    if c.get("home_starter_recent_factor") is not None: am*=float(c["home_starter_recent_factor"])
+    if c.get("weather_factor") is not None:
+        hm*=float(c["weather_factor"]); am*=float(c["weather_factor"])
+
+    # Season + lineup + advanced signals combined are capped to +/-14% from
+    # the pre-context scoring environment.
+    hm=max(base_hm*.86,min(base_hm*1.14,hm))
+    am=max(base_am*.86,min(base_am*1.14,am))
     return hm,am
+
 
 
 def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,context:dict|None=None):
@@ -117,6 +135,12 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
     if stage=="FINAL": quality,unc="HIGH",3.5
     elif stage in {"STARTER CONFIRMED","LINEUP CONFIRMED"}: quality,unc="MEDIUM",4.5
     else: quality,unc="LOW",5.8
+
+    adv=context.get("advanced") or {}
+    unc += float(adv.get("extra_uncertainty_pp") or 0)
+    completeness=float(adv.get("advanced_completeness") or 0)
+    if stage=="FINAL" and completeness < .55:
+        quality="MEDIUM"
 
     rows=[]
     for _,r in event_market.iterrows():
@@ -151,6 +175,17 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
             "home_recent_rf":hs["runs_per_game"],"home_recent_ra":hs["runs_allowed_per_game"],"away_recent_rf":aws["runs_per_game"],"away_recent_ra":aws["runs_allowed_per_game"],
             "home_form_matches":hs["games"],"away_form_matches":aws["games"],"home_expected_runs":hm,"away_expected_runs":am,
             "home_win_pct":hwp,"away_win_pct":awp,"home_recent10":hr10,"away_recent10":ar10,
+            "advanced_completeness": float((context.get("advanced") or {}).get("advanced_completeness") or 0),
+            "advanced_used": int((context.get("advanced") or {}).get("advanced_used") or 0),
+            "recent_form_used": bool(((context.get("advanced") or {}).get("statuses") or {}).get("recent_form")),
+            "starter_recent_used": bool(((context.get("advanced") or {}).get("statuses") or {}).get("starter_recent")),
+            "velocity_used": bool(((context.get("advanced") or {}).get("statuses") or {}).get("velocity")),
+            "bullpen_used": bool(((context.get("advanced") or {}).get("statuses") or {}).get("bullpen")),
+            "split_used": bool(((context.get("advanced") or {}).get("statuses") or {}).get("split")),
+            "weather_used": bool(((context.get("advanced") or {}).get("statuses") or {}).get("weather")),
+            "weather_temp_c": ((context.get("advanced") or {}).get("weather") or {}).get("temperature_c"),
+            "weather_wind_kmh": ((context.get("advanced") or {}).get("weather") or {}).get("wind_kmh"),
+            "weather_precip_mm": ((context.get("advanced") or {}).get("weather") or {}).get("precip_mm"),
             "source":context.get("source") or hs.get("source"),
         })
         rows.append(d)

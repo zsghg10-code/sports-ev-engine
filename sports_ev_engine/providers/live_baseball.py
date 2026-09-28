@@ -122,6 +122,37 @@ def _parse_make_table(raw):
     return rows
 
 
+def _parse_make_table_rich(raw):
+    """Same KBO table, but keep playerId embedded in anchor HTML."""
+    if not raw:
+        return []
+    if isinstance(raw,str):
+        try: raw=json.loads(raw)
+        except Exception:return []
+    out=[]
+    for row in (raw or {}).get("rows",[]):
+        vals=[]; ids=[]
+        for c in row.get("row",[]):
+            raw_text=str(c.get("Text",""))
+            vals.append(_clean(BeautifulSoup(raw_text,"html.parser").get_text(" ",strip=True)))
+            m=re.search(r"playerId=(\d+)",raw_text,re.I)
+            ids.append(m.group(1) if m else None)
+        out.append((vals,ids))
+    return out
+
+
+def _starter_player_id(game, home=True):
+    if not isinstance(game,dict):return None
+    pref="B_" if home else "T_"
+    for k,v in game.items():
+        ku=str(k).upper()
+        if not ku.startswith(pref):continue
+        if ("PIT" in ku or "PITCH" in ku) and ("ID" in ku or "CODE" in ku):
+            sv=str(v or "").strip()
+            if sv.isdigit():return sv
+    return None
+
+
 def empty_context(league, note=""):
     return {
         "league": league,
@@ -206,7 +237,7 @@ class KBOOfficialLive:
         def rows(key):
             raw = (data.get(key) or [None])[0]
             out = []
-            for rr in _parse_make_table(raw):
+            for rr,ids in _parse_make_table_rich(raw):
                 if len(rr) < 3:
                     continue
                 try:
@@ -214,7 +245,10 @@ class KBOOfficialLive:
                 except Exception:
                     continue
                 if 1 <= order <= 9:
-                    out.append({"order": order, "position": rr[1], "name": rr[2], "war": _num(rr[3]) if len(rr) > 3 else None})
+                    pid = ids[2] if len(ids) > 2 else None
+                    out.append({"order": order, "position": rr[1], "name": rr[2],
+                                "player_id": pid,
+                                "war": _num(rr[3]) if len(rr) > 3 else None})
             return sorted(out, key=lambda x: x["order"])
 
         def war(key):
@@ -281,6 +315,8 @@ class KBOOfficialLive:
             "league": "KBO", "stage": stage,
             "starter_confirmed": starter_ok, "lineup_confirmed": lineup_ok,
             "home_starter": home_sp, "away_starter": away_sp,
+            "home_starter_id": _starter_player_id(g, True),
+            "away_starter_id": _starter_player_id(g, False),
             "home_starter_stats": home_stat, "away_starter_stats": away_stat,
             "home_lineup": lineup.get("home", []), "away_lineup": lineup.get("away", []),
             "home_lineup_strength": lineup.get("home_war"), "away_lineup_strength": lineup.get("away_war"),

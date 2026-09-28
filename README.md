@@ -204,3 +204,40 @@ v2.5.1 no longer depends on that behavior.
 - Errors identify the exact league/table/source URL instead of only saying
   `official stats table not found`.
 - Old baseball session results are cleared on this build.
+
+
+## v2.6 Advanced KBO/NPB model
+
+The baseball final model now has independent signal slots for:
+
+1. starting pitcher recent 3–5 game trend (BB%, K%, K-BB%, ERA)
+2. recent batting form / last-N form
+3. recent bullpen workload
+4. lineup platoon split vs today's starter
+5. confirmed lineup strength
+6. stadium + weather
+7. recent velocity trend, when a stable official/public source exposes it
+
+Important no-fake rule:
+- A missing signal is **not** replaced with a made-up league average.
+- Missing signals increase `uncertainty_pp`.
+- `advanced_completeness` shows how many advanced slots were actually used.
+- Recent pitch velocity is often not exposed in stable pregame public tables for KBO/NPB.
+  In that case `velocity_used=False`; the model does not invent a velocity change.
+
+KBO:
+- official GameCenter starters / lineup
+- pitcher recent-game table for BB/K-BB
+- current lineup hitter recent-10 and exact L/R situation tables when player IDs are exposed
+- bullpen scheduling load proxy if exact relief innings are unavailable
+
+NPB:
+- NPB.jp announced starters and official lineup
+- official recent boxscores for starter recent form and relief innings
+- recent team on-base/run-form proxy from official boxscores
+- exact public player L/R OPS is not assumed when unavailable
+
+Weather:
+- Open-Meteo hourly temperature/humidity/precipitation/wind
+- indoor domes are neutral
+- high wind/rain increases uncertainty instead of forcing a directional run adjustment
