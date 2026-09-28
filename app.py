@@ -12,12 +12,13 @@ from sports_ev_engine.market import consensus, clean_odds
 from sports_ev_engine.auto_soccer import analyze_event
 from sports_ev_engine.competition_form import build_competition_pool
 from sports_ev_engine.core.parlay import optimize_parlays
-from sports_ev_engine.providers.api_sports_baseball import APISportsBaseball
-from sports_ev_engine.auto_baseball import analyze_baseball_event, build_league_pool
+from sports_ev_engine.providers.official_baseball import OfficialBaseballStats
+from sports_ev_engine.official_baseball_model import analyze_official_event
+from sports_ev_engine.providers.live_baseball import LiveBaseballContext
 
-st.set_page_config(page_title="Sports EV Engine v2.4.2",layout="wide")
-st.title("Sports EV Engine v2.4.2")
-st.caption("BUILD v2.4.2-api-sports-baseball · 2026-09-28")
+st.set_page_config(page_title="Sports EV Engine v2.5",layout="wide")
+st.title("Sports EV Engine v2.5")
+st.caption("BUILD v2.5-starter-lineup-final · 2026-09-28")
 st.caption("종목 선택 → 배당 수집 → 상대전력 Elo + 최근폼 → 시장 prior 캘리브레이션 → BE/Edge/EV → 2~6폴")
 
 def secret(name):
@@ -29,7 +30,16 @@ def secret(name):
 
 ODDS_KEY=secret("THE_ODDS_API_KEY")
 FOOTBALL_KEY=secret("API_FOOTBALL_KEY")
-BASEBALL_KEY=secret("API_BASEBALL_KEY") or FOOTBALL_KEY
+BASEBALL_KEY=None
+
+_BUILD_ID = "2.5-final"
+if st.session_state.get("_build_id") != _BUILD_ID:
+    for _k in [
+        "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
+        "baseball_raw_odds","baseball_market"
+    ]:
+        st.session_state.pop(_k, None)
+    st.session_state["_build_id"] = _BUILD_ID
 
 
 tabs=st.tabs(["⚡ 완전자동 축구","⚾ KBO/NPB 자동분석","실시간 배당","시장 가격","MLB","다폴","📡 모니터링","설정"])
@@ -184,26 +194,23 @@ with tabs[0]:
 
 with tabs[1]:
     st.subheader("⚾ KBO / NPB 완전자동 분석")
-    st.write("The Odds API 배당 + API-Sports Baseball의 KBO/NPB 시즌 경기 데이터로 최근 득실·상대전력을 자동 반영합니다.")
-    st.caption("v2.4.2: Streamlit Cloud에서 SofaScore가 403으로 차단되는 문제를 제거했습니다. 기존 API-Sports 키를 사용해 NPB/KBO 시즌 기록을 가져옵니다. 선발/라인업 전용 피드는 아직 별도 연결 전이라 MEDIUM으로 표시합니다.")
+    st.write("The Odds API 배당 + KBO/NPB 공식 팀기록 + 예고/확정 선발 + 실제 라인업을 자동 수집해 최종 확률을 다시 계산합니다.")
+    st.caption("v2.5: KBO는 공식 GameCenter의 선발/라인업, NPB는 NPB.jp 예고선발/공식 경기속보의 오더를 사용합니다. FINAL일 때만 A등급을 허용합니다.")
 
     if not ODDS_KEY:
         st.warning("THE_ODDS_API_KEY가 필요합니다.")
-    if not BASEBALL_KEY:
-        st.warning("API_BASEBALL_KEY 또는 기존 API_FOOTBALL_KEY가 필요합니다.")
-
     b1,b2,b3,b4=st.columns(4)
     league=b1.selectbox("리그",["KBO","NPB"],index=0)
     baseball_key={"KBO":"baseball_kbo","NPB":"baseball_npb"}[league]
     bregion=b2.selectbox("배당 지역",["eu","uk","us","au"],index=0,key="baseball_region")
-    brecent=b3.selectbox("최근 경기 반영",[6,8,10,12],index=2)
+    brecent=b3.selectbox("최근 경기 반영",[6,8,10,12],index=2,help="v2.5 공식 팀기록 모델에서는 UI 호환용입니다. KBO 최근10 폼과 현재 시즌 기록을 자동 반영합니다.")
     bbooks=b4.slider("최소 북메이커",1,5,2,key="baseball_books")
     bmarkets=st.multiselect("야구 분석 마켓",["h2h","spreads","totals"],default=["h2h","spreads","totals"],key="baseball_markets")
-    brun=st.button("⚾ 선택 리그 전체 자동분석",type="primary",disabled=not(ODDS_KEY and BASEBALL_KEY))
+    brun=st.button("⚾ 선택 리그 전체 자동분석",type="primary",disabled=not ODDS_KEY)
 
     if brun:
         try:
-            with st.status(f"{league} 배당/최근경기/선발 데이터를 분석 중...",expanded=True) as status:
+            with st.status(f"{league} 배당/공식기록/선발/라인업을 분석 중...",expanded=True) as status:
                 odds_api=TheOddsAPI(ODDS_KEY)
                 events,headers=odds_api.odds(baseball_key,bregion,",".join(bmarkets))
                 rawb=clean_odds(odds_api.flatten(events))
@@ -216,29 +223,32 @@ with tabs[1]:
 
                 marketb=consensus(rawb,min_books=bbooks)
                 st.session_state["baseball_market"]=marketb
-                baseball_api=APISportsBaseball(BASEBALL_KEY)
+                official=OfficialBaseballStats()
+                live=LiveBaseballContext()
+                year=pd.Timestamp.now(tz="Asia/Seoul").year
+                stats=official.load(league,year)
+                st.write(f"기본 모델 데이터: {league} 공식 기록 팀 {len(stats)}개")
 
-                # Build one common league pool using the first current event if we can match it.
-                seed=None
-                try:
-                    r0=marketb.iloc[0]
-                    seed=baseball_api.find_event(r0["home_team"],r0["away_team"],r0["commence_time"])
-                except Exception:
-                    pass
-                pool=build_league_pool(baseball_api,league,seed)
-                st.write(
-                    f"야구 모델 데이터: API-Sports Baseball "
-                    f"(league_id={pool.get('tournament_id')}, season={pool.get('season_id')}, "
-                    f"games={len(pool.get('events',[]))}, 남은 요청={baseball_api.remaining_requests()})"
-                )
-
-                all_rows=[]; failures=[]; metas=[]
+                all_rows=[]; failures=[]; metas=[]; live_rows=[]
                 groups=list(marketb.groupby("event_id"))
                 for i,(eid,g) in enumerate(groups,start=1):
                     home=g.iloc[0]["home_team"]; away=g.iloc[0]["away_team"]
                     st.write(f"[{i}/{len(groups)}] {home} - {away}")
                     try:
-                        analyzed,meta=analyze_baseball_event(g,baseball_api,league,recent_n=brecent,pool=pool)
+                        ctx=live.context(league,home,away,g.iloc[0]["commence_time"])
+                        live_rows.append({
+                            "경기":f"{home} - {away}",
+                            "단계":ctx.get("stage"),
+                            "원정 선발":ctx.get("away_starter") or "미확인",
+                            "홈 선발":ctx.get("home_starter") or "미확인",
+                            "선발확인":bool(ctx.get("starter_confirmed")),
+                            "라인업":("확정" if ctx.get("lineup_confirmed") else "미확정"),
+                            "원정 1~9":", ".join(x.get("name","") for x in ctx.get("away_lineup",[])[:9]) or "-",
+                            "홈 1~9":", ".join(x.get("name","") for x in ctx.get("home_lineup",[])[:9]) or "-",
+                            "소스":ctx.get("source"),
+                            "비고":ctx.get("note","")
+                        })
+                        analyzed,meta=analyze_official_event(g,stats,league,ctx)
                         metas.append(meta)
                         if not analyzed.empty:
                             all_rows.append(analyzed)
@@ -253,18 +263,24 @@ with tabs[1]:
                 st.session_state["baseball_ranked"]=rankedb
                 st.session_state["baseball_failures"]=failures
                 st.session_state["baseball_meta"]=metas
+                st.session_state["baseball_live_rows"]=live_rows
                 status.update(label=f"완료 — Odds API 남은 요청량 {headers.get('x-requests-remaining')}",state="complete")
         except Exception as e:
             st.error(f"야구 자동분석 실패: {e}")
+
+    if st.session_state.get("baseball_live_rows"):
+        st.markdown("### 선발 / 라인업 자동수집 상태")
+        st.dataframe(pd.DataFrame(st.session_state["baseball_live_rows"]),use_container_width=True,hide_index=True)
+        st.caption("PRE-LINEUP → STARTER CONFIRMED → LINEUP CONFIRMED → FINAL. 공식 라인업이 아직 발표 전이면 미확정으로 남는 것이 정상입니다.")
 
     if "baseball_ranked" in st.session_state and not st.session_state["baseball_ranked"].empty:
         rb=st.session_state["baseball_ranked"]
         st.markdown("### KBO/NPB +EV 후보")
         vb=rb[rb["grade"]!="PASS"].copy()
         cols=[
-            "grade","data_quality","sanity","display_pick","best_book","best_odds","books",
+            "grade","stage","data_quality","sanity","display_pick","best_book","best_odds","books",
             "consensus_prob","raw_independent_prob","model_win_prob","push_prob","break_even",
-            "edge_pp","conservative_ev_roi","uncertainty_pp","lineup_confirmed",
+            "edge_pp","conservative_ev_roi","uncertainty_pp","starter_confirmed","lineup_confirmed",
             "away_starter","away_starter_era","away_starter_whip",
             "home_starter","home_starter_era","home_starter_whip",
             "away_recent_rf","away_recent_ra","home_recent_rf","home_recent_ra",
@@ -278,13 +294,15 @@ with tabs[1]:
         for c in ["edge_pp","uncertainty_pp","away_recent_rf","away_recent_ra","home_recent_rf","home_recent_ra","away_expected_runs","home_expected_runs","away_starter_era","home_starter_era","away_starter_whip","home_starter_whip"]:
             if c in vb: vb[c]=pd.to_numeric(vb[c],errors="coerce").round(2)
         st.dataframe(vb.head(100),use_container_width=True,hide_index=True)
-        st.caption("v2.4.2 기준 MEDIUM=최근 시즌/상대전력 데이터 충분하지만 선발·라인업 전용 피드 미연결, LOW=최근 데이터까지 부족. LOW는 자동 다폴에서 제외합니다.")
+        st.caption("PRE-LINEUP은 C 이하, STARTER/LINEUP CONFIRMED는 A 제한, FINAL(양팀 선발+공식 라인업)만 A 허용. FINAL은 불확실성을 3.5%p로 낮춥니다.")
 
         st.markdown("### 야구 2~6폴")
         sizesb=st.multiselect("야구 폴더 수",[2,3,4,5,6],default=[2,3],key="baseball_parlay_sizes")
+        final_only=st.checkbox("자동 다폴은 FINAL 경기만 사용",value=True,key="baseball_final_only")
         rb_parlay=rb.copy()
-        # LOW data-quality is excluded from automatic parlays.
-        if "data_quality" in rb_parlay:
+        if final_only and "stage" in rb_parlay:
+            rb_parlay=rb_parlay[rb_parlay["stage"]=="FINAL"]
+        elif "data_quality" in rb_parlay:
             rb_parlay=rb_parlay[rb_parlay["data_quality"].isin(["HIGH","MEDIUM"])]
         resb=optimize_parlays(rb_parlay,sizes=sizesb,top_n=10) if not rb_parlay.empty else {n:[] for n in sizesb}
         for n in sizesb:
@@ -388,7 +406,7 @@ with tabs[6]:
         "Odds API":"연결됨" if ODDS_KEY else "미연결",
         "API-Football":"연결됨" if FOOTBALL_KEY else "미연결",
         "Telegram":"연결됨" if (telegram_token and telegram_chat) else "미연결",
-        "KBO/NPB 데이터":"API-Sports Baseball — API_BASEBALL_KEY 또는 기존 API_FOOTBALL_KEY",
+        "KBO/NPB 데이터":"공식 팀기록 + KBO GameCenter / NPB.jp 선발·라인업 — 별도 키 불필요",
     })
 
     if telegram_token and telegram_chat:
@@ -396,7 +414,7 @@ with tabs[6]:
             try:
                 from sports_ev_engine.telegram_notify import TelegramNotifier
                 TelegramNotifier(telegram_token,telegram_chat)(
-                    "✅ Sports EV Engine v2.4.2\nTelegram 알림 연결 테스트 성공"
+                    "✅ Sports EV Engine v2.5\nTelegram 알림 연결 테스트 성공"
                 )
                 st.success("테스트 알림을 보냈습니다.")
             except Exception as e:
@@ -434,31 +452,26 @@ Streamlit Cloud → **App settings → Secrets** 에 다음 형식으로 저장:
 ```toml
 THE_ODDS_API_KEY = "..."
 API_FOOTBALL_KEY = "..."
-API_BASEBALL_KEY = "..."  # 선택사항: 없으면 API_FOOTBALL_KEY 사용
 TELEGRAM_BOT_TOKEN = "..."
 TELEGRAM_CHAT_ID = "..."
 ```
 
-**v2.4.2 야구 데이터 소스 교체**
-- Streamlit Cloud에서 발생한 SofaScore `403 Forbidden` 의존성 제거
-- KBO/NPB 최근 경기·시즌 기록을 API-Sports Baseball로 변경
-- 기존 API_FOOTBALL_KEY를 자동 fallback으로 재사용
-- API_BASEBALL_KEY를 따로 넣어도 사용 가능
-- 시즌 리그 ID 자동 탐색 + 전체 시즌 경기 1회 수집
-- API-Sports 일일 남은 요청량을 화면에 표시
-- 선발/라인업 전용 데이터는 현재 별도 안정 소스 연결 전이므로 허위 반영하지 않음
+**v2.5 선발/라인업 FINAL 모델**
+- KBO 공식 GameCenter에서 예고/확정 선발 자동수집
+- KBO 공식 LineUpAnalysis에서 1~9번 타순·포지션·라인업 확정 여부 자동수집
+- NPB.jp 예고선발 자동수집
+- NPB 공식 경기속보에 오더가 공개되면 1~9번 자동수집
+- 공식 개인 투수/타자 기록으로 선발·라인업 영향 보정
+- PRE-LINEUP / STARTER CONFIRMED / LINEUP CONFIRMED / FINAL 상태 표시
+- FINAL에서만 A등급 허용, 기본 다폴도 FINAL만 사용
 
-**v2.4 KBO/NPB 추가**
-- `baseball_kbo`, `baseball_npb` 실시간 배당 자동수집
-- SofaScore 최근 경기/라인업/선발 자동 매칭
-- 최근 득점·실점 + 상대전력 보정
-- 선발 시즌 ERA/WHIP/K-BB 사용 가능 시 자동 반영
-- Negative Binomial 득점분포로 승패/핸디/O-U 가격화
-- 데이터 품질 HIGH/MEDIUM/LOW 표시
-- 선발/라인업 미확인 LOW는 강한 등급 자동 제한
-- KBO/NPB 배당 급변 및 라인업 변화 Telegram 알림
-- `monitor_baseball.py`로 KBO+NPB 백그라운드 감시
-- SofaScore 데이터는 The Odds API 크레딧을 사용하지 않음
+**야구 데이터 구성**
+- The Odds API: KBO/NPB 현재 배당
+- KBO 공식 기록/GameCenter: 팀 기록·선발·확정 라인업
+- NPB.jp: 팀/개인 기록·예고선발·공식 경기 오더
+- 별도 야구 API 키/구독 불필요
+- Negative Binomial 득점분포 + 시장 prior 캘리브레이션
+- 배당/선발/라인업 변화 시 `monitor_baseball.py` 재분석 가능
 
 **v2.3에서 추가된 모니터링**
 - 20K credits 최적화 시간대별 감시 주기
@@ -467,7 +480,7 @@ TELEGRAM_CHAT_ID = "..."
 - 4%p 급변 즉시 트리거
 - 핸디/토탈 0.25 이동 즉시 트리거
 - 일반 가격 변화는 2회 연속 관측 후 재분석
-- 경기 90분 전부터 라인업 15분 감시
+- 야구는 경기 150분 전부터 공식 선발/라인업 상태 변화 감시
 - Telegram 알림
 - 2,000 credits 비상 reserve 기본값
 - `monitor.py` 백그라운드 worker / `monitor_once.py` 스케줄러 실행

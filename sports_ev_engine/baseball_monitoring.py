@@ -8,9 +8,10 @@ from pathlib import Path
 import pandas as pd
 
 from sports_ev_engine.providers.the_odds_api import TheOddsAPI
-from sports_ev_engine.providers.api_sports_baseball import APISportsBaseball
+from sports_ev_engine.providers.official_baseball import OfficialBaseballStats
+from sports_ev_engine.providers.live_baseball import LiveBaseballContext
 from sports_ev_engine.market import clean_odds, consensus
-from sports_ev_engine.auto_baseball import analyze_baseball_event, build_league_pool
+from sports_ev_engine.official_baseball_model import analyze_official_event
 from sports_ev_engine.monitoring import (
     JSONStateStore, minutes_until, scheduled_interval_minutes,
     reanalysis_threshold_pp, should_take_full_snapshot, format_alert,
@@ -38,7 +39,8 @@ def _hash(obj):
 class BaseballMonitorEngine:
     def __init__(self, odds_key, baseball_key, config: BaseballMonitorConfig, notifier=None):
         self.odds=TheOddsAPI(odds_key)
-        self.baseball=APISportsBaseball(baseball_key)
+        self.official=OfficialBaseballStats()
+        self.live=LiveBaseballContext()
         self.cfg=config
         self.notifier=notifier
         self.store=JSONStateStore(config.state_path)
@@ -118,26 +120,48 @@ class BaseballMonitorEngine:
                 "observed_at":now.isoformat(),
             }
 
-            # Starting-lineup watch is intentionally disabled in v2.4.2.
-            # API-Sports Baseball is used for stable history; it does not expose
-            # a reliable KBO/NPB starting-lineup feed in this integration.
-
-        # reanalyze triggered events
-        pool=None
-        if triggered and not market.empty:
-            # seed with one current Sofa event when possible
+        # Watch official starter/lineup state in the final 150 minutes.
+        live_contexts={}
+        for eid,g in market.groupby("event_id") if not market.empty else []:
+            row=g.iloc[0]
+            mins=minutes_until(row["commence_time"],now)
+            if not (0 < mins <= 150):
+                continue
             try:
-                r0=market.iloc[0]
-                seed=self.baseball.find_event(r0["home_team"],r0["away_team"],r0["commence_time"])
-                pool=build_league_pool(self.baseball,self.cfg.league,seed)
+                ctx=self.live.context(self.cfg.league,row["home_team"],row["away_team"],row["commence_time"])
+                live_contexts[str(eid)]=ctx
+                es=state["events"].setdefault(str(eid),{})
+                signature=_hash({
+                    "stage":ctx.get("stage"),
+                    "home_starter":ctx.get("home_starter"),
+                    "away_starter":ctx.get("away_starter"),
+                    "home_lineup":ctx.get("home_lineup"),
+                    "away_lineup":ctx.get("away_lineup"),
+                })
+                old_sig=es.get("live_signature")
+                if old_sig and old_sig != signature:
+                    triggered.add(str(eid))
+                    es["lineup_changed"]=True
+                es["live_signature"]=signature
+                es["live_stage"]=ctx.get("stage")
             except Exception:
-                pool=None
+                pass
+
+        # Reanalysis uses official league team stats plus the current starter/lineup context.
+        stats=None
+        if triggered and not market.empty:
+            try:
+                year=now.year
+                stats=self.official.load(self.cfg.league,year)
+            except Exception:
+                stats=None
 
         for eid in triggered:
             g=market[market["event_id"].astype(str)==eid].copy()
             if g.empty: continue
             try:
-                analyzed,meta=analyze_baseball_event(g,self.baseball,self.cfg.league,self.cfg.recent_n,pool)
+                ctx=live_contexts.get(eid) or self.live.context(self.cfg.league,g.iloc[0]['home_team'],g.iloc[0]['away_team'],g.iloc[0]['commence_time'])
+                analyzed,meta=analyze_official_event(g,stats,self.cfg.league,ctx) if stats else (pd.DataFrame(), {'status':'data_failed'})
             except Exception:
                 continue
             if analyzed.empty: continue

@@ -146,3 +146,45 @@ v2.4.2 deliberately does NOT pretend to have KBO/NPB starting lineups.
 The core API-Sports Baseball integration is used for stable schedule/history data.
 Until a stable lineup source is connected, those games are usually MEDIUM data quality
 when recent history is sufficient, and the uncertainty penalty remains active.
+
+
+## v2.4.3 — official league data only
+
+KBO/NPB modeling no longer depends on SofaScore or API-Sports Baseball.
+
+NPB:
+- NPB.jp team batting stats
+- NPB.jp team pitching stats
+- current-season runs scored / allowed, win percentage
+
+KBO:
+- KBO official team batting stats
+- KBO official team pitching stats
+- KBO official team standings / recent 10-game record
+
+The Odds API remains the only paid/quota-based source used by the baseball tab.
+
+Because starting pitchers and confirmed lineups are not yet on a stable provider,
+baseball rows are MEDIUM quality and the model caps aggressive grades.
+
+## v2.5 — KBO/NPB official starter + lineup FINAL model
+
+### KBO
+- Official GameCenter `GetKboGameList`: game ID, announced starters, starter/lineup flags.
+- Official `GetLineUpAnalysis`: batting order 1–9, positions, lineup confirmation flag and lineup WAR groups.
+- Official pitcher table is matched for ERA / WHIP / K-BB when the starter appears in the current table.
+
+### NPB
+- NPB.jp `予告先発投手`: announced starters.
+- NPB official score page: batting orders when the official order is published before the game.
+- NPB individual pitcher pages: ERA, calculated WHIP and K-BB.
+- NPB individual batter pages: OPS; a confirmed lineup is compared with the team-season baseline.
+
+### Analysis stages
+- `PRE-LINEUP`
+- `STARTER CONFIRMED`
+- `LINEUP CONFIRMED`
+- `FINAL`
+
+Only `FINAL` can receive an A grade. The KBO/NPB parlay builder defaults to FINAL-only.
+No new paid API key is required for starter/lineup collection.
