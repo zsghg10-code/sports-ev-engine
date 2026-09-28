@@ -410,3 +410,18 @@ Weather:
 - Open-Meteo hourly temperature/humidity/precipitation/wind
 - indoor domes are neutral
 - high wind/rain increases uncertainty instead of forcing a directional run adjustment
+
+## v3.0.3 — MLB full-analysis UI + KST schedule fix
+
+The old MLB tab was schedule-only. v3.0.3 connects MLB to the same v3 decision pipeline used by the other automated sports tabs:
+
+- KST calendar semantics: adjacent MLB calendar dates are queried, then `gameDate` is converted from UTC to `Asia/Seoul` before filtering.
+- The Odds API `baseball_mlb`: h2h / spreads / totals market consensus and best plausible price.
+- MLB Stats API: team season scoring/allowing, recent results, probable starters, starter season and recent-5 pitching, lineup confirmation, recent bullpen innings, handedness splits when returned.
+- Optional deep context: recent FF/SI velocity from play-by-play and venue weather from Open-Meteo when real source fields are available.
+- Missing signals are marked MISSING and widen uncertainty. They are not replaced by invented league averages.
+- v3 counter-case + 27 stress scenarios + ROBUST/SENSITIVE/REVIEW/PASS/DATA_HOLD.
+- Same compact FINAL Decision Layer as A-match, plus representative run-line choices.
+- Immutable prediction snapshots + supported post-game settlement remain enabled.
+
+Automatic parlays remain stricter than single-game display: MLB defaults to FINAL/high-quality events only.

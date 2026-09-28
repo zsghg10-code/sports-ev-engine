@@ -245,8 +245,10 @@ def event_summary(frame: pd.DataFrame) -> dict:
         return {"model_best":"없음","total_best":"없음","parlay":"없음","failure":"-","data_status":"DATA HOLD","confidence":0}
     side=_candidate_row(frame,"h2h")
     total=_candidate_row(frame,"totals")
+    spread=_candidate_row(frame,"spreads")
     model_best=_option_label(side) if side is not None else "없음 (+EV/강건성 기준 미달)"
     total_best=_option_label(total) if total is not None else "없음 (+EV/강건성 기준 미달)"
+    spread_best=_option_label(spread) if spread is not None else "없음 (+EV/강건성 기준 미달)"
     eligible=frame[frame.get("v3_parlay_eligible",pd.Series(False,index=frame.index)).fillna(False).astype(bool)].copy()
     if not eligible.empty:
         eligible["_p10"]=pd.to_numeric(eligible.get("robust_ev_p10"),errors="coerce")
@@ -260,6 +262,7 @@ def event_summary(frame: pd.DataFrame) -> dict:
     return {
         "model_best":model_best,
         "total_best":total_best,
+        "spread_best":spread_best,
         "parlay":parlay,
         "failure":_failure_text(focus),
         "data_status":data_status(frame),

@@ -27,7 +27,8 @@ def cached_public_lineup(event):
 
 from sports_ev_engine.providers.api_football import APIFootball
 from sports_ev_engine.providers import api_football as football_provider
-from sports_ev_engine.providers.mlb_statsapi import schedule as mlb_schedule
+from sports_ev_engine.providers.mlb_statsapi import schedule as mlb_schedule, schedule_kst as mlb_schedule_kst, match_schedule as mlb_match_schedule
+from sports_ev_engine.providers.mlb_context import MLBContextProvider
 from sports_ev_engine.market import consensus, clean_odds
 from sports_ev_engine.auto_soccer import analyze_event
 from sports_ev_engine.competition_form import build_competition_pool
@@ -51,14 +52,14 @@ from sports_ev_engine.prediction_store import record_frame, auto_settle, evaluat
 from sports_ev_engine.final_view import split_events, compact_table, event_summary
 from sports_ev_engine.kst_schedule import format_kst
 
-st.set_page_config(page_title="Sports EV Engine v3.0.2",layout="wide")
-st.title("Sports EV Engine v3.0.2")
-st.caption("BUILD v3.0.2-kst-calendar · 2026-09-28")
+st.set_page_config(page_title="Sports EV Engine v3.0.3",layout="wide")
+st.title("Sports EV Engine v3.0.3")
+st.caption("BUILD v3.0.3-mlb-full-analysis · 2026-09-28")
 if any(getattr(module,"PROVIDER_BUILD",None)!="3.0.0" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider,deep_soccer_provider)):
     st.error("앱과 수집 파일 버전이 다릅니다. ZIP의 sports_ev_engine 폴더까지 전부 반영한 뒤 Streamlit 앱을 Reboot하세요.")
     st.stop()
 FootballAccessError=football_provider.FootballAccessError
-st.caption("분석 백엔드 v3.0.0 확인 완료 · FINAL UI v3.0.2")
+st.caption("분석 백엔드 v3.0.0 확인 완료 · FINAL UI v3.0.3")
 st.caption("독립 모델 → 정밀 컨텍스트 → 반증 검사 → 시장 캘리브레이션 → 27개 스트레스 시나리오 → EV/ROBUST 판정 → 기록·사후검증")
 
 def secret(name):
@@ -72,11 +73,11 @@ ODDS_KEY=secret("THE_ODDS_API_KEY")
 FOOTBALL_KEY=secret("API_FOOTBALL_KEY")
 BASEBALL_KEY=None
 
-_BUILD_ID = "3.0.2-kst-calendar"
+_BUILD_ID = "3.0.3-mlb-full-analysis"
 if st.session_state.get("_build_id") != _BUILD_ID:
     for _k in [
         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
-        "ranked","failures","event_meta","raw_odds","market","baseball_raw_odds","baseball_market","national_ranked","national_failures","national_evidence","national_sources","national_status","validation_records","validation_report","club_filter_label","national_filter_label","baseball_filter_label"
+        "ranked","failures","event_meta","raw_odds","market","baseball_raw_odds","baseball_market","mlb_ranked","mlb_failures","mlb_status","mlb_schedule","mlb_market","mlb_raw_odds","mlb_filter_label","national_ranked","national_failures","national_evidence","national_sources","national_status","validation_records","validation_report","club_filter_label","national_filter_label","baseball_filter_label"
     ]:
         st.session_state.pop(_k, None)
     st.session_state["_build_id"] = _BUILD_ID
@@ -129,7 +130,7 @@ def match_label_kst(home,away,kickoff):
     return f"{home} - {away} · {format_kst(kickoff)}"
 
 
-def render_final_decision_layer(frame, key_prefix, title="🧠 v3 FINAL Decision Layer"):
+def render_final_decision_layer(frame, key_prefix, title="🧠 v3 FINAL Decision Layer", include_spread=False):
     """Manual-analysis style per-match presentation for v3 outputs."""
     events=split_events(frame)
     if not events:
@@ -151,17 +152,22 @@ def render_final_decision_layer(frame, key_prefix, title="🧠 v3 FINAL Decision
     selected=st.selectbox("경기 선택",[key for key,_,_ in events],format_func=lambda k:labels[k],key=f"{key_prefix}_final_event")
     key,label,g=next(x for x in events if x[0]==selected)
     st.markdown(f"#### {label}")
-    final_table=compact_table(g)
+    final_table=compact_table(g,include_spread=include_spread)
     st.dataframe(final_table,hide_index=True,use_container_width=True)
     summary=event_summary(g)
-    st.markdown(
-        f"**모델 최우선 후보:** {summary['model_best']}  \n"
-        f"**토탈 최우선 후보:** {summary['total_best']}  \n"
-        f"**다폴:** {summary['parlay']}  \n"
-        f"**주요 실패경로:** {summary['failure']}  \n"
-        f"**데이터 상태:** {summary['data_status']}  \n"
-        f"**Model confidence:** {summary['confidence']}/100"
-    )
+    summary_lines=[
+        f"**모델 최우선 후보:** {summary['model_best']}",
+        f"**토탈 최우선 후보:** {summary['total_best']}",
+    ]
+    if include_spread:
+        summary_lines.append(f"**런라인 최우선 후보:** {summary.get('spread_best','없음')}")
+    summary_lines += [
+        f"**다폴:** {summary['parlay']}",
+        f"**주요 실패경로:** {summary['failure']}",
+        f"**데이터 상태:** {summary['data_status']}",
+        f"**Model confidence:** {summary['confidence']}/100",
+    ]
+    st.markdown("  \n".join(summary_lines))
     ratio=summary.get('robust_positive_ratio')
     n=summary.get('robust_scenario_count',0)
     p10=summary.get('robust_ev_p10')
@@ -841,13 +847,184 @@ with tabs[4]:
         st.caption("lay/exchange, books 부족, 비정상 최고배당을 자동 필터링한 표입니다.")
 
 with tabs[5]:
-    st.subheader("MLB 일정/예고선발")
-    d=st.date_input("날짜",date.today())
-    if st.button("MLB 불러오기"):
-        try: st.session_state["mlb"]=mlb_schedule(str(d))
-        except Exception as e: st.error(str(e))
-    if "mlb" in st.session_state:
-        st.dataframe(st.session_state["mlb"],use_container_width=True,hide_index=True)
+    st.subheader("⚾ MLB 완전자동 분석")
+    st.write("The Odds API 배당 + MLB Stats API 일정/팀기록/예고선발/라인업을 결합해 승패·런라인·언더오버 확률과 EV를 계산합니다.")
+    st.caption("v3.0.3: MLB도 A매치와 동일한 FINAL Decision Layer를 사용합니다. KST 날짜로 경기를 묶고, 최근 타선·선발 최근 5경기·불펜 최근 사용량·좌우 스플릿·최근 구속·구장/날씨를 실제 수집된 경우에만 반영합니다.")
+    st.info("MLB 모델도 채팅 분석 체크리스트를 최대한 자동화한 별도 정량 엔진입니다. 확보하지 못한 신호는 MISSING으로 남기며 평균값을 임의로 채우지 않습니다.")
+
+    if not ODDS_KEY:
+        st.warning("THE_ODDS_API_KEY가 필요합니다.")
+
+    m1,m2,m3=st.columns(3)
+    mlb_region=m1.selectbox("배당 지역",["eu","uk","us","au"],index=0,key="mlb_region")
+    mlb_recent=m2.selectbox("최근 경기 반영",[6,8,10,12],index=2,key="mlb_recent",help="팀 최근폼은 선택 경기 수, 선발은 최근 최대 5경기를 사용합니다.")
+    mlb_books=m3.slider("최소 북메이커",1,6,2,key="mlb_books")
+    mlb_date_only,mlb_match_date,_=render_kst_calendar("mlb")
+    mlb_markets=st.multiselect("MLB 분석 마켓",["h2h","spreads","totals"],default=["h2h","spreads","totals"],key="mlb_markets")
+    mlb_deep=st.checkbox(
+        "🧠 MLB v3 정밀 컨텍스트 사용",value=True,key="mlb_deep",
+        help="좌우 스플릿·최근 FF/SI 구속·구장/날씨를 추가 조회합니다. 응답이 없으면 해당 신호는 MISSING 처리합니다."
+    )
+    mlb_run=st.button("⚾ 선택 날짜 MLB 전체 자동분석",type="primary",disabled=not(ODDS_KEY and mlb_markets))
+
+    if mlb_run:
+        st.session_state["mlb_ranked"]=pd.DataFrame()
+        st.session_state["mlb_failures"]=[]
+        st.session_state["mlb_status"]=[]
+        try:
+            with st.status("MLB 일정·배당·선발·최근 기록을 분석 중...",expanded=True) as status:
+                # 1) The MLB schedule date is NOT a KST date. Query adjacent MLB dates
+                # and filter by actual UTC first-pitch time converted to Asia/Seoul.
+                schedule_frame=mlb_schedule_kst(mlb_match_date)
+                st.session_state["mlb_schedule"]=schedule_frame
+                st.write(f"✅ {mlb_match_date:%Y-%m-%d} KST 일정 {len(schedule_frame)}경기 확인")
+
+                # 2) Market prices, independently filtered to the exact same KST day.
+                odds_api=TheOddsAPI(ODDS_KEY)
+                events,headers=odds_api.odds("baseball_mlb",mlb_region,",".join(mlb_markets))
+                raw=clean_odds(odds_api.flatten(events))
+                raw=apply_kst_filter(raw,date_only=True,selected_date=mlb_match_date,future_only=True) if not raw.empty else raw
+                st.session_state["mlb_raw_odds"]=raw
+                st.session_state["mlb_filter_label"]=f"{mlb_match_date:%Y-%m-%d} KST"
+                market=consensus(raw,min_books=mlb_books) if not raw.empty else pd.DataFrame()
+                st.session_state["mlb_market"]=market
+
+                if raw.empty:
+                    st.warning("선택한 KST 날짜에 현재 The Odds API가 제공하는 예정 MLB 배당이 없습니다. 일정은 아래에서 계속 확인할 수 있습니다.")
+                elif market.empty:
+                    st.warning("MLB 배당은 있으나 설정한 최소 북메이커 수를 충족하는 양방향 시장이 없습니다.")
+
+                provider=MLBContextProvider()
+                all_rows=[]; failures=[]; status_rows=[]; matched_gamepks=set()
+                groups=list(market.groupby("event_id")) if not market.empty else []
+                for idx,(eid,g) in enumerate(groups,1):
+                    home=g.iloc[0]["home_team"]; away=g.iloc[0]["away_team"]; kickoff=g.iloc[0]["commence_time"]
+                    label=match_label_kst(home,away,kickoff)
+                    st.write(f"[{idx}/{len(groups)}] {label}")
+                    sched=mlb_match_schedule(schedule_frame,home,away,kickoff)
+                    if sched and sched.get("gamePk"):matched_gamepks.add(sched.get("gamePk"))
+                    try:
+                        stats,ctx=provider.collect(home,away,kickoff,schedule_row=sched,recent_n=mlb_recent,deep=mlb_deep)
+                        adv=ctx.get("advanced") or {}; statuses=adv.get("statuses") or {}
+                        if not stats or any((stats.get(t) or {}).get("runs_per_game") is None or (stats.get(t) or {}).get("runs_allowed_per_game") is None for t in (home,away)):
+                            reason=ctx.get("note") or "MLB season run data unavailable"
+                            failures.append({"경기":label,"이유":reason})
+                            status_rows.append({
+                                "경기":label,"경기시간(KST)":format_kst(kickoff),"상태":"자료 부족 · 분석 보류","이유":reason,
+                                "원정 선발":ctx.get("away_starter") or "미확인","홈 선발":ctx.get("home_starter") or "미확인",
+                            })
+                            continue
+                        analyzed,meta=analyze_official_event(g,stats,"MLB",ctx)
+                        if analyzed.empty:
+                            reason=meta.get("reason",meta.get("status","분석 보류"))
+                            failures.append({"경기":label,"이유":reason})
+                        else:
+                            analyzed["sport_key"]="baseball_mlb"
+                            analyzed["kickoff_kst"]=format_kst(kickoff)
+                            all_rows.append(analyzed)
+
+                        missing=[k for k in ["recent_form","starter_recent","bullpen","split","velocity","weather"] if not statuses.get(k)]
+                        hp=(adv.get("home_starter_recent") or {}); ap=(adv.get("away_starter_recent") or {})
+                        hv=(adv.get("home_velocity") or {}); av=(adv.get("away_velocity") or {})
+                        hb=(adv.get("home_bullpen") or {}); ab=(adv.get("away_bullpen") or {})
+                        status_rows.append({
+                            "경기":label,"경기시간(KST)":format_kst(kickoff),"상태":ctx.get("stage","PRE-LINEUP"),
+                            "원정 선발":ctx.get("away_starter") or "미확인","홈 선발":ctx.get("home_starter") or "미확인",
+                            "라인업":"확정" if ctx.get("lineup_confirmed") else "미확인",
+                            "최근 타선 OPS":bool(statuses.get("recent_form")),"선발 최근5":bool(statuses.get("starter_recent")),
+                            "불펜 최근3일":bool(statuses.get("bullpen")),"좌우 스플릿":bool(statuses.get("split")),
+                            "최근 구속":bool(statuses.get("velocity")),"날씨":bool(statuses.get("weather")),
+                            "원정 선발 최근 K-BB%":ap.get("kbb_pct"),"홈 선발 최근 K-BB%":hp.get("kbb_pct"),
+                            "원정 FF/SI 구속변화(mph)":av.get("delta_mph"),"홈 FF/SI 구속변화(mph)":hv.get("delta_mph"),
+                            "원정 불펜 최근3G IP":ab.get("relief_ip_last3"),"홈 불펜 최근3G IP":hb.get("relief_ip_last3"),
+                            "MISSING":", ".join(missing) if missing else "없음",
+                        })
+                    except Exception as e:
+                        failures.append({"경기":label,"이유":f"{type(e).__name__}: {e}"})
+                        status_rows.append({"경기":label,"경기시간(KST)":format_kst(kickoff),"상태":"수집 실패","이유":str(e)})
+
+                # Include schedule-only games so '4 games only' cannot hide the rest of a KST slate.
+                if schedule_frame is not None and not schedule_frame.empty:
+                    for _,r in schedule_frame.iterrows():
+                        if r.get("gamePk") in matched_gamepks:continue
+                        status_rows.append({
+                            "경기":match_label_kst(r.get("home"),r.get("away"),r.get("gameDate")),
+                            "경기시간(KST)":format_kst(r.get("gameDate")),"상태":"일정 확인 · 분석 배당 없음",
+                            "원정 선발":r.get("away_probable") or "미확인","홈 선발":r.get("home_probable") or "미확인",
+                            "라인업":"미확인","MISSING":"현재 분석 가능한 시장가격",
+                        })
+
+                ranked=pd.concat(all_rows,ignore_index=True) if all_rows else pd.DataFrame()
+                if not ranked.empty:
+                    ranked=ranked.sort_values(["robust_positive_ratio","robust_ev_p10","conservative_ev_roi"],ascending=False)
+                    saved=record_frame(ranked,sport_key="baseball_mlb",sport_family="baseball_mlb")
+                    settle_info=auto_settle(odds_api,"baseball_mlb")
+                    st.caption(f"v3 불변 예측 스냅샷 {saved}개 추가 · 자동 정산 {settle_info.get('settled',0)}개" + (f" · 정산 오류: {settle_info.get('error')}" if settle_info.get('error') else ""))
+                st.session_state["mlb_ranked"]=ranked
+                st.session_state["mlb_failures"]=failures
+                st.session_state["mlb_status"]=status_rows
+                status.update(label=f"완료 — KST 일정 {len(schedule_frame)}경기 · 분석시장 {len(groups)}경기",state="complete")
+        except Exception as e:
+            st.session_state["mlb_ranked"]=pd.DataFrame()
+            st.session_state["mlb_failures"]=[{"경기":"MLB 전체","이유":f"{type(e).__name__}: {e}"}]
+            st.error(f"MLB 자동분석 실패: {type(e).__name__}: {e}")
+
+    if isinstance(st.session_state.get("mlb_schedule"),pd.DataFrame) and not st.session_state["mlb_schedule"].empty:
+        with st.expander(f"📅 {st.session_state.get('mlb_filter_label','선택 날짜')} MLB 전체 일정",expanded=False):
+            sd=st.session_state["mlb_schedule"].copy()
+            show=pd.DataFrame({
+                "경기시간(KST)":sd["gameDate"].map(format_kst),"원정":sd["away"],"홈":sd["home"],
+                "원정 예고선발":sd["away_probable"].fillna("미확인"),"홈 예고선발":sd["home_probable"].fillna("미확인"),"상태":sd["status"],
+            })
+            st.dataframe(show,use_container_width=True,hide_index=True)
+
+    if st.session_state.get("mlb_status"):
+        st.markdown("### 경기별 수집·분석 가능 여부 — 추천 여부와 별개")
+        st.dataframe(pd.DataFrame(st.session_state["mlb_status"]),use_container_width=True,hide_index=True)
+        st.caption("PRE-LINEUP → STARTER CONFIRMED → FINAL. 확정 라인업이 나오기 전에는 단일 후보를 볼 수 있어도 자동 다폴은 제한합니다. MISSING 신호는 모델이 지어내지 않습니다.")
+
+    mr=st.session_state.get("mlb_ranked")
+    if isinstance(mr,pd.DataFrame) and not mr.empty:
+        if st.session_state.get("mlb_filter_label"):st.caption(f"분석 경기일: {st.session_state['mlb_filter_label']}")
+        render_final_decision_layer(mr,"mlb",title="🧠 v3 FINAL Decision Layer · MLB",include_spread=True)
+        st.markdown("### 상세 진단 · MLB 전체 옵션")
+        cols=[c for c in [
+            "v3_decision_status","robust_positive_ratio","robust_ev_p10","robust_ev_min","counter_case_risk","signal_coverage",
+            "stage","data_quality","kickoff_kst","display_pick","best_book","best_odds","books","consensus_prob",
+            "raw_independent_prob","model_win_prob","push_prob","break_even","edge_pp","ev_roi","conservative_ev_roi","uncertainty_pp",
+            "home_starter","away_starter","home_starter_era","away_starter_era","home_starter_whip","away_starter_whip",
+            "home_recent_rf","home_recent_ra","away_recent_rf","away_recent_ra","home_expected_runs","away_expected_runs",
+            "recent_form_used","starter_recent_used","bullpen_used","split_used","velocity_used","weather_used","missing_signals",
+        ] if c in mr.columns]
+        shown=mr[cols].copy()
+        for c in ["consensus_prob","raw_independent_prob","model_win_prob","push_prob","break_even","robust_positive_ratio","signal_coverage"]:
+            if c in shown:shown[c]=(pd.to_numeric(shown[c],errors="coerce")*100).round(1)
+        for c in ["robust_ev_p10","robust_ev_min","ev_roi","conservative_ev_roi"]:
+            if c in shown:shown[c]=(pd.to_numeric(shown[c],errors="coerce")*100).round(1)
+        st.dataframe(shown,use_container_width=True,hide_index=True)
+
+        st.markdown("### MLB 2~6폴")
+        mlb_sizes=st.multiselect("MLB 폴더 수",[2,3,4,5,6],default=[2,3],key="mlb_parlay_sizes")
+        mlb_final_only=st.checkbox("MLB 자동 다폴은 FINAL 경기만 사용",value=True,key="mlb_final_only")
+        pool=mr.copy()
+        if mlb_final_only and "stage" in pool:
+            pool=pool[(pool["stage"]=="FINAL") & (pool["data_quality"]=="HIGH")]
+        res=optimize_parlays(pool,sizes=mlb_sizes,top_n=10) if not pool.empty else {n:[] for n in mlb_sizes}
+        for n in mlb_sizes:
+            st.markdown(f"#### {n}폴 TOP")
+            f=pd.DataFrame(res.get(n,[]))
+            if not f.empty:
+                f["배당"]=f["배당"].round(2); f["근사 적중확률"]=(f["근사 적중확률"]*100).round(1); f["근사 EV"]=(f["근사 EV"]*100).round(1)
+            st.dataframe(f,use_container_width=True,hide_index=True)
+    elif "mlb_ranked" in st.session_state:
+        if st.session_state.get("mlb_failures"):
+            st.warning("MLB 일정은 확인했지만 분석 가능한 결과를 만들지 못한 경기가 있습니다. 아래 실패 사유를 확인하세요.")
+        else:
+            st.info("선택 날짜에 분석 가능한 MLB 시장이 없습니다.")
+
+    if st.session_state.get("mlb_failures"):
+        with st.expander(f"분석하지 못한 MLB 경기 {len(st.session_state['mlb_failures'])}개"):
+            st.dataframe(pd.DataFrame(st.session_state["mlb_failures"]),use_container_width=True,hide_index=True)
 
 with tabs[6]:
     st.subheader("2~6폴 자동 조합")
@@ -906,7 +1083,7 @@ with tabs[7]:
             try:
                 from sports_ev_engine.telegram_notify import TelegramNotifier
                 TelegramNotifier(telegram_token,telegram_chat)(
-                    "✅ Sports EV Engine v3.0.2\nTelegram 알림 연결 테스트 성공"
+                    "✅ Sports EV Engine v3.0.3\nTelegram 알림 연결 테스트 성공"
                 )
                 st.success("테스트 알림을 보냈습니다.")
             except Exception as e:

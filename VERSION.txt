@@ -1,1 +1,2 @@
-3.0.2
+Sports EV Engine v3.0.3
+BUILD v3.0.3-mlb-full-analysis
