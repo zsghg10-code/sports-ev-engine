@@ -63,5 +63,17 @@ class FreeTests(unittest.TestCase):
             self.assertFalse(at.exception)
             self.assertEqual(at.session_state['national_failures'],[])
             self.assertEqual(len(at.session_state['national_ranked']),3)
+            result=at.session_state['national_ranked']
+            self.assertTrue((result.scenario_count==27).all())
+            self.assertTrue(result.selection_reason.str.len().gt(0).all())
+            self.assertTrue(any('A매치 후보' in m.value for m in at.markdown))
+            # Populate the positive-candidate branch too, without provider traffic.
+            result=result.copy()
+            result['scenario_candidate']=True
+            result['selection_status']='SCENARIO_PASS'
+            at.session_state['national_ranked']=result
+            at.run()
+            self.assertFalse(at.exception)
+            self.assertTrue(any('가정 최저 EV(%)' in d.value.columns for d in at.dataframe))
 
 if __name__=='__main__':unittest.main()

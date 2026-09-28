@@ -7,6 +7,7 @@ import pandas as pd
 from sports_ev_engine.models.soccer_auto import score_matrix, price_from_matrix, norm_name
 from sports_ev_engine.models.elo import build_elo, opponent_adjusted_form
 from sports_ev_engine.core.ev import analyze_bet
+from sports_ev_engine.national_policy import scenario_matrices, assess, POLICY_ID
 from sports_ev_engine.free_national import adjust_lambdas
 from sports_ev_engine.review_policy import review_reason, REVIEW_STATES
 
@@ -111,6 +112,7 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
     lineup_ok=False; evidence_note=""
     if international:hl,al,lineup_ok,evidence_note=adjust_lambdas(hl,al,competition_pool)
     matrix=score_matrix(hl,al)
+    scenarios=scenario_matrices(hl,al) if international else []
 
     sample=min(hf["matches"],af["matches"])
     base_unc=3.5 + (1.5 if sample<5 else 0.0) + (1.0 if sample<3 else 0.0)
@@ -217,6 +219,16 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
             "lineup_confirmed":lineup_ok,
             "parlay_eligible":bool((lineup_ok or not international) and grade in {"A","B","C"} and ev.conservative_ev_roi>0 and sanity not in REVIEW_STATES),
         })
+        if international:
+            d.update(assess(d,scenarios,side,line))
+            d['selection_policy']=POLICY_ID
+            d['legacy_grade']=d['grade']
+            d['grade']=d['selection_status']
+            d['legacy_conservative_ev_roi']=d['conservative_ev_roi']
+            d['uncertainty_method']='27개 가정 범위; 통계적 신뢰구간/실측 오차 아님'
+            d['kelly_scaled']=0.0
+            # Generic optimizer must not silently treat these as calibrated picks.
+            d['parlay_eligible']=False
         rows.append(d)
 
     return pd.DataFrame(rows),{

@@ -6,7 +6,7 @@ import time
 from threading import Lock
 from datetime import date, datetime, timezone
 
-PROVIDER_BUILD = "2.9.2"
+PROVIDER_BUILD = "2.9.3"
 
 class FootballAccessError(RuntimeError):
     """Account-wide failure: stop the batch instead of repeating it for every team."""

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from sports_ev_engine.models.soccer_auto import norm_name
 
 
-PROVIDER_BUILD = "2.9.2"
+PROVIDER_BUILD = "2.9.3"
 
 
 def is_senior_international(sport, include_inactive=False):

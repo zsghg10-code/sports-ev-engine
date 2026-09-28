@@ -5,7 +5,7 @@ import pandas as pd
 import requests
 from sports_ev_engine.models.soccer_auto import norm_name
 
-PROVIDER_BUILD = '2.9.2'
+PROVIDER_BUILD = '2.9.3'
 FREE_URL = 'https://raw.githubusercontent.com/martj42/international_results/master/results.csv'
 HISTORY_COLUMNS = 'date,home_team,away_team,home_score,away_score,tournament,neutral,score_basis,home_xg,away_xg,source'.split(',')
 CONTEXT_COLUMNS = 'kickoff,home_team,away_team,team,lineup_confirmed,lineup_players,missing_players,attack_change_pct,defense_change_pct,neutral,source,checked_at'.split(',')

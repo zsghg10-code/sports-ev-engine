@@ -34,6 +34,7 @@ from sports_ev_engine.competition_form import build_competition_pool
 from sports_ev_engine.national_soccer import is_senior_international, build_national_event_pool
 from sports_ev_engine.core.parlay import optimize_parlays
 from sports_ev_engine.review_policy import candidate_mask, review_mask
+from sports_ev_engine.national_policy import reference_pairs
 from sports_ev_engine.validation import validate
 from sports_ev_engine.providers.official_baseball import OfficialBaseballStats
 from sports_ev_engine.official_baseball_model import analyze_official_event
@@ -44,14 +45,14 @@ from sports_ev_engine import national_soccer as national_provider
 from sports_ev_engine import free_national as free_provider
 from sports_ev_engine.providers import baseball_advanced as advanced_provider, the_odds_api as odds_provider
 
-st.set_page_config(page_title="Sports EV Engine v2.9.2",layout="wide")
-st.title("Sports EV Engine v2.9.2")
-st.caption("BUILD v2.9.2-auto-national · 2026-09-28")
-if any(getattr(module,"PROVIDER_BUILD",None)!="2.9.2" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider)):
+st.set_page_config(page_title="Sports EV Engine v2.9.3",layout="wide")
+st.title("Sports EV Engine v2.9.3")
+st.caption("BUILD v2.9.3-auto-national · 2026-09-28")
+if any(getattr(module,"PROVIDER_BUILD",None)!="2.9.3" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider)):
     st.error("앱과 수집 파일 버전이 다릅니다. ZIP의 sports_ev_engine 폴더까지 전부 반영한 뒤 Streamlit 앱을 Reboot하세요.")
     st.stop()
 FootballAccessError=football_provider.FootballAccessError
-st.caption("수집 모듈 v2.9.2 확인 완료")
+st.caption("수집 모듈 v2.9.3 확인 완료")
 st.caption("종목 선택 → 배당 수집 → 상대전력 Elo + 최근폼 → 시장 prior 캘리브레이션 → BE/Edge/EV → 2~6폴")
 
 def secret(name):
@@ -65,7 +66,7 @@ ODDS_KEY=secret("THE_ODDS_API_KEY")
 FOOTBALL_KEY=secret("API_FOOTBALL_KEY")
 BASEBALL_KEY=None
 
-_BUILD_ID = "2.9.2-auto-national"
+_BUILD_ID = "2.9.3-auto-national"
 if st.session_state.get("_build_id") != _BUILD_ID:
     for _k in [
         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
@@ -358,7 +359,7 @@ with tabs[1]:
                             st.session_state["national_status"].append({"경기":f"{home} - {away}","상태":"수집/분석 실패","이유":str(e)})
                 ranked=pd.concat(all_rows,ignore_index=True) if all_rows else pd.DataFrame()
                 if not ranked.empty:
-                    ranked=ranked.sort_values(["conservative_ev_roi","edge_pp"],ascending=False)
+                    ranked=ranked.sort_values(["scenario_ev_min","point_ev_roi"],ascending=False)
                 st.session_state["national_ranked"]=ranked
                 st.session_state["national_failures"]=failures
                 status.update(label=f"{'기록 수집 제한으로 중단' if access_blocked else '완료'} — Odds API 남은 요청량 {headers.get('x-requests-remaining','확인 불가')}",state="error" if access_blocked else "complete")
@@ -388,33 +389,35 @@ with tabs[1]:
             st.download_button("검증 보고서 다운로드",json.dumps(report,ensure_ascii=False,indent=2),file_name="validation_report.json")
     nr=st.session_state.get("national_ranked")
     if isinstance(nr,pd.DataFrame) and not nr.empty:
-        st.markdown("### 차감 전 양의 기대값 · 미검증 관찰 목록")
-        observations=nr[nr['observation_only']].copy()
-        obs_cols=['display_pick','best_odds','model_win_prob','break_even','edge_pp','point_ev_roi','uncertainty_pp','stress_ev_roi','calibration_status','lineup_confirmed']
-        shown=observations[obs_cols].copy()
-        for col in ['model_win_prob','break_even','point_ev_roi','stress_ev_roi']:shown[col]=(shown[col]*100).round(2)
-        st.dataframe(shown.rename(columns={'point_ev_roi':'차감 전 EV(%)','stress_ev_roi':'가정 차감 후 EV(%)','uncertainty_pp':'가정 차감(%p)','calibration_status':'검증 상태'}),hide_index=True)
-        st.caption("이 목록은 검증된 추천이 아니며 자동 다폴에 추가하지 않습니다. 기대값은 모델 추정치입니다. 사진에서 보이던 일괄 차감 효과를 비교하기 위한 관찰 목록입니다.")
-        st.markdown("### 기존 보수 시나리오 기준 통과 목록")
-        columns=["grade","sanity","display_pick","best_book","best_odds","books","model_win_prob","push_prob","break_even","edge_pp","conservative_ev_roi","uncertainty_pp","home_form_matches","away_form_matches","home_elo","away_elo","lineup_confirmed","parlay_eligible","data_source","evidence_note"]
-        columns += ["raw_market_gap_pp","final_market_gap_pp","review_reason"]
-        view=nr.loc[candidate_mask(nr),columns].copy()
-        if view.empty:st.info("괴리/기대값 기준을 통과한 후보가 없습니다.")
-        for col in ("model_win_prob","push_prob","break_even","conservative_ev_roi"):
-            view[col]=(view[col]*100).round(1)
-        st.dataframe(view.head(100),use_container_width=True,hide_index=True)
-        review=nr[review_mask(nr)]
-        st.caption(f"전체 {len(nr)}개 옵션 · 후보 {len(view)}개 · 검토 {len(review)}개")
-        with st.expander(f"A매치 검토 대상 {len(review)}개 — 추천/자동 다폴 제외"):
-            st.dataframe(review[["grade","sanity","display_pick","raw_market_gap_pp","final_market_gap_pp","review_reason","home_form_matches","away_form_matches"]],hide_index=True)
-
-        st.caption("공개 기록은 누락·업데이트 지연이 있을 수 있습니다. 라인업은 공개된 선발 명단을 사용하며 xG·결장은 미수집입니다. 모델은 실전 적중률 검증을 마치지 않았습니다.")
+        st.markdown("### A매치 후보 · 가정 변화 시험")
+        st.caption("양 팀 예상 득점을 각각 −10%·기준·+10%, 원모델 비중을 15%·25%·35%로 바꾼 27개 조합입니다. 이 범위는 실측 오차나 신뢰구간이 아닙니다. 기존 약 8.5%p 일괄 차감은 후보 선정에서 사용하지 않습니다.")
+        counts=nr.selection_status.value_counts()
+        st.write({"분석 옵션":len(nr),"가정 변화 통과":int(counts.get('SCENARIO_PASS',0)),"가정에 민감":int(counts.get('SENSITIVE',0)),"괴리 검토":int(counts.get('REVIEW',0)),"기대값 미달":int(counts.get('PASS',0)),"자료 보류":int(counts.get('DATA_HOLD',0))})
+        labels={'SCENARIO_PASS':'가정 변화 통과 · 미검증','SENSITIVE':'가정에 민감 · 조합 제외','REVIEW':'괴리 검토 · 조합 제외','PASS':'기대값 미달','DATA_HOLD':'자료 보류'}
+        def policy_table(frame):
+            cols=['selection_status','display_pick','best_book','best_odds','model_win_prob','break_even','edge_pp','point_ev_roi','scenario_win_min','scenario_win_max','scenario_ev_min','scenario_ev_max','lineup_confirmed','selection_reason']
+            shown=frame[[c for c in cols if c in frame]].copy()
+            for col in ['model_win_prob','break_even','point_ev_roi','scenario_win_min','scenario_win_max','scenario_ev_min','scenario_ev_max']:
+                shown[col]=(shown[col]*100).round(2)
+            shown['selection_status']=shown['selection_status'].map(labels)
+            return shown.rename(columns={'selection_status':'판정','display_pick':'경기/선택','model_win_prob':'기준 확률(%)','break_even':'BE(%)','edge_pp':'Edge(%p)','point_ev_roi':'기준 EV(%)','scenario_win_min':'가정 최저 확률(%)','scenario_win_max':'가정 최고 확률(%)','scenario_ev_min':'가정 최저 EV(%)','scenario_ev_max':'가정 최고 EV(%)','lineup_confirmed':'라인업 확인','selection_reason':'판정/조합 제외 이유'})
+        passed=nr[nr.scenario_candidate].sort_values('scenario_ev_min',ascending=False)
+        if passed.empty:st.info("설정한 모든 가정에서 기대값이 양수인 후보는 없습니다. 아래 민감 후보와 제외 이유를 확인하세요.")
+        else:st.dataframe(policy_table(passed),hide_index=True)
+        st.markdown("#### 기준 기대값은 양수지만 가정에 민감한 후보")
+        sensitive=nr[nr.selection_status.eq('SENSITIVE')].sort_values('point_ev_roi',ascending=False)
+        if sensitive.empty:st.caption("해당 후보 없음")
+        else:st.dataframe(policy_table(sensitive),hide_index=True)
+        with st.expander("모든 옵션 · 개별 판정 이유"):
+            st.dataframe(policy_table(nr),hide_index=True)
+        with st.expander("이전 버전 일괄 차감 결과 비교 · 현재 선정에는 미사용"):
+            st.dataframe(nr[['display_pick','legacy_grade','uncertainty_pp','legacy_conservative_ev_roi']],hide_index=True)
+        st.caption("통과는 설정한 가정 안에서만 의미가 있습니다. xG·결장은 미수집이며 최종 시장 혼합 확률과 수익성은 검증되지 않았습니다. A/B/C 등급과 베팅금액 추천은 제공하지 않습니다.")
         st.download_button("전체 분석 CSV 다운로드",nr.to_csv(index=False).encode("utf-8-sig"),file_name="national_analysis.csv")
-        eligible=nr[nr["parlay_eligible"]].sort_values("conservative_ev_roi",ascending=False).head(20)
-        st.markdown("#### 양 팀 라인업 확인된 +EV 후보: 2폴")
-        combos=optimize_parlays(eligible,sizes=[2],top_n=5).get(2,[]) if not eligible.empty else []
+        st.markdown("#### 라인업 확인 + 가정 변화 통과: 참고용 2폴")
+        combos=reference_pairs(nr)
         if combos:st.dataframe(pd.DataFrame(combos),hide_index=True)
-        else:st.info("라인업과 +EV 기준을 충족한 서로 다른 2경기가 없습니다. 조합을 만들지 않습니다.")
+        else:st.info("라인업 확인과 가정 변화 시험을 모두 통과한 서로 다른 2경기가 없어 조합을 만들지 않습니다.")
     elif "national_ranked" in st.session_state:
         st.info("기록 수집 실패로 분석 결과를 만들지 못했습니다. 아래 제외 사유를 확인하세요." if st.session_state.get("national_failures") else "선택 범위의 배당 또는 분석 가능한 후보가 없습니다.")
     if st.session_state.get("national_failures"):
@@ -432,7 +435,7 @@ with tabs[1]:
 with tabs[2]:
     st.subheader("⚾ KBO / NPB 완전자동 분석")
     st.write("The Odds API 배당 + KBO/NPB 공식 팀기록 + 예고/확정 선발 + 실제 라인업을 자동 수집해 최종 확률을 다시 계산합니다.")
-    st.caption("v2.9.2: NPB 선발 이름 매칭과 최근 팀 OPS 수집을 보강하고, 핵심 기록이 없으면 DATA PARTIAL로 표시합니다.")
+    st.caption("v2.9.3: NPB 선발 이름 매칭과 최근 팀 OPS 수집을 보강하고, 핵심 기록이 없으면 DATA PARTIAL로 표시합니다.")
 
     if not ODDS_KEY:
         st.warning("THE_ODDS_API_KEY가 필요합니다.")
