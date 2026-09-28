@@ -301,6 +301,7 @@ class NPBOfficialLive:
         if url not in self._pages:
             r = self.s.get(url, timeout=self.timeout)
             r.raise_for_status()
+            r.encoding = "utf-8"
             self._pages[url] = r.text
         return self._pages[url]
 

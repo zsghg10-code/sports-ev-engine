@@ -188,3 +188,19 @@ baseball rows are MEDIUM quality and the model caps aggressive grades.
 
 Only `FINAL` can receive an A grade. The KBO/NPB parlay builder defaults to FINAL-only.
 No new paid API key is required for starter/lineup collection.
+
+
+## v2.5.1 parser fix
+
+The `official stats table not found` error came from assuming that pandas.read_html()
+would always promote the NPB/KBO official table header into DataFrame column names.
+
+v2.5.1 no longer depends on that behavior.
+
+- NPB team batting/pitching: parse HTML `tr/th/td` rows directly.
+- NPB fallback uses the official fixed column order if a header row is unusual.
+- KBO team batting/pitching/standings: parse HTML rows directly.
+- Japanese NPB pages are forced to UTF-8.
+- Errors identify the exact league/table/source URL instead of only saying
+  `official stats table not found`.
+- Old baseball session results are cleared on this build.

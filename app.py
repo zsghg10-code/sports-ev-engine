@@ -16,9 +16,9 @@ from sports_ev_engine.providers.official_baseball import OfficialBaseballStats
 from sports_ev_engine.official_baseball_model import analyze_official_event
 from sports_ev_engine.providers.live_baseball import LiveBaseballContext
 
-st.set_page_config(page_title="Sports EV Engine v2.5",layout="wide")
-st.title("Sports EV Engine v2.5")
-st.caption("BUILD v2.5-starter-lineup-final · 2026-09-28")
+st.set_page_config(page_title="Sports EV Engine v2.5.1",layout="wide")
+st.title("Sports EV Engine v2.5.1")
+st.caption("BUILD v2.5.1-official-parser-fix · 2026-09-28")
 st.caption("종목 선택 → 배당 수집 → 상대전력 Elo + 최근폼 → 시장 prior 캘리브레이션 → BE/Edge/EV → 2~6폴")
 
 def secret(name):
@@ -32,7 +32,7 @@ ODDS_KEY=secret("THE_ODDS_API_KEY")
 FOOTBALL_KEY=secret("API_FOOTBALL_KEY")
 BASEBALL_KEY=None
 
-_BUILD_ID = "2.5-final"
+_BUILD_ID = "2.5.1-parser-fix"
 if st.session_state.get("_build_id") != _BUILD_ID:
     for _k in [
         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
@@ -195,7 +195,7 @@ with tabs[0]:
 with tabs[1]:
     st.subheader("⚾ KBO / NPB 완전자동 분석")
     st.write("The Odds API 배당 + KBO/NPB 공식 팀기록 + 예고/확정 선발 + 실제 라인업을 자동 수집해 최종 확률을 다시 계산합니다.")
-    st.caption("v2.5: KBO는 공식 GameCenter의 선발/라인업, NPB는 NPB.jp 예고선발/공식 경기속보의 오더를 사용합니다. FINAL일 때만 A등급을 허용합니다.")
+    st.caption("v2.5.1: NPB/KBO 공식 팀기록 파서를 HTML 행 직접 인식 방식으로 교체했습니다. KBO는 GameCenter 선발/라인업, NPB는 NPB.jp 예고선발/공식 경기속보 오더를 사용합니다. FINAL일 때만 A등급을 허용합니다.")
 
     if not ODDS_KEY:
         st.warning("THE_ODDS_API_KEY가 필요합니다.")
@@ -227,7 +227,10 @@ with tabs[1]:
                 live=LiveBaseballContext()
                 year=pd.Timestamp.now(tz="Asia/Seoul").year
                 stats=official.load(league,year)
-                st.write(f"기본 모델 데이터: {league} 공식 기록 팀 {len(stats)}개")
+                st.write(
+                    f"✅ 기본 모델 데이터 로드: {league} 공식 기록 팀 {len(stats)}개 "
+                    f"(마지막 소스: {official.last_source})"
+                )
 
                 all_rows=[]; failures=[]; metas=[]; live_rows=[]
                 groups=list(marketb.groupby("event_id"))
@@ -266,7 +269,11 @@ with tabs[1]:
                 st.session_state["baseball_live_rows"]=live_rows
                 status.update(label=f"완료 — Odds API 남은 요청량 {headers.get('x-requests-remaining')}",state="complete")
         except Exception as e:
-            st.error(f"야구 자동분석 실패: {e}")
+            st.session_state["baseball_ranked"]=pd.DataFrame()
+            st.session_state["baseball_failures"]=[]
+            st.session_state["baseball_live_rows"]=[]
+            st.error(f"야구 자동분석 실패: {type(e).__name__}: {e}")
+            st.caption("v2.5.1은 실패 지점을 소스 URL/파싱 단계까지 표시합니다. 이전 실행 결과는 자동 초기화됩니다.")
 
     if st.session_state.get("baseball_live_rows"):
         st.markdown("### 선발 / 라인업 자동수집 상태")
@@ -414,7 +421,7 @@ with tabs[6]:
             try:
                 from sports_ev_engine.telegram_notify import TelegramNotifier
                 TelegramNotifier(telegram_token,telegram_chat)(
-                    "✅ Sports EV Engine v2.5\nTelegram 알림 연결 테스트 성공"
+                    "✅ Sports EV Engine v2.5.1\nTelegram 알림 연결 테스트 성공"
                 )
                 st.success("테스트 알림을 보냈습니다.")
             except Exception as e:
