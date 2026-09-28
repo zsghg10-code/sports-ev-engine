@@ -1,5 +1,5 @@
-
 from __future__ import annotations
+from .adaptive_model import apply_adaptive_layer
 import math
 from datetime import datetime, timezone
 import pandas as pd
@@ -122,8 +122,12 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
     hl,al,context_unc,signal_ledger=apply_soccer_context(
         hl,al,deep_ctx,hf,af,international=international
     )
-    if not international and deep_ctx.get("lineup_confirmed"):
+    # Deep provider context can confirm the XI for both club and international matches.
+    # Previously A-match (international=True) ignored a valid API-Football startXI.
+    if deep_ctx.get("lineup_confirmed"):
         lineup_ok=True
+        if deep_ctx.get("lineup_source"):
+            evidence_note=(evidence_note + "; " if evidence_note else "") + f"확정 라인업 반영: {deep_ctx.get('lineup_source')}"
     matrix=score_matrix(hl,al)
     scenarios=scenario_matrices(hl,al) if international else []
 
@@ -231,6 +235,9 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
             "data_source":competition_pool.get("data_source","A매치 최근 기록") if international else "대회 기록",
             "evidence_note":evidence_note,
             "lineup_confirmed":lineup_ok,
+            "lineup_source":deep_ctx.get("lineup_source") or ("manual/public" if lineup_ok else None),
+            "lineup_status":deep_ctx.get("lineup_status") or ("CONFIRMED" if lineup_ok else "NOT_PUBLISHED"),
+            "fixture_id":deep_ctx.get("fixture_id"),
             "parlay_eligible":bool((lineup_ok or not international) and grade in {"A","B","C"} and ev.conservative_ev_roi>0 and sanity not in REVIEW_STATES),
         })
         if international:
@@ -277,7 +284,9 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
             d['parlay_eligible']=bool(d.get('parlay_eligible')) and bool(d['v3_parlay_eligible'])
         rows.append(d)
 
-    return pd.DataFrame(rows),{
+    _family="soccer_national" if international else "soccer_club"
+    _frame=apply_adaptive_layer(pd.DataFrame(rows),_family)
+    return _frame,{
         "status":"ok","home":home,"away":away,
         "home_form":hf,"away_form":af,
         "home_elo":he,"away_elo":ae,

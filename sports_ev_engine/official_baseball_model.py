@@ -7,6 +7,7 @@ from sports_ev_engine.reasoning_engine import (
     SignalLedger, build_counter_cases, scenario_assessment, baseball_scenarios, decision_fields
 )
 
+from .adaptive_model import apply_adaptive_layer
 
 def _nbinom_pmf(k, mean, dispersion=5.0):
     r=float(dispersion)
@@ -286,4 +287,6 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
                                  robust=robust,legacy_eligible=legacy_ok))
         d["parlay_eligible"]=bool(d["v3_parlay_eligible"]) and stage=="FINAL" and quality=="HIGH"
         rows.append(d)
-    return pd.DataFrame(rows),{"status":"ok","home":home,"away":away,"data_quality":quality,"stage":stage,"home_expected_runs":hm,"away_expected_runs":am,"source":context.get("source") or hs.get("source"),"context":context}
+    _family={"MLB":"baseball_mlb","KBO":"baseball_kbo","NPB":"baseball_npb"}.get(str(league).upper(),f"baseball_{str(league).lower()}")
+    _frame=apply_adaptive_layer(pd.DataFrame(rows),_family)
+    return _frame,{"status":"ok","home":home,"away":away,"data_quality":quality,"stage":stage,"home_expected_runs":hm,"away_expected_runs":am,"source":context.get("source") or hs.get("source"),"context":context}

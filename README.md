@@ -1,3 +1,61 @@
+# v3.3.1 A-match lineup fix
+
+- A-match history source and API-Football deep context are now independent. Free-history mode can still use API-Football for target-fixture xG, confirmed XI and injuries when the key is configured.
+- A valid API-Football `fixtures/lineups` startXI (11 + 11) now sets `lineup_confirmed=True` for international matches too.
+- The A-match status table reads the deep-context lineup state instead of only the free/manual context.
+- Confirmed player names and formations are exposed in a dedicated expander.
+- Third-party `Probable Lineups` remain provisional and are not mislabeled as confirmed XI.
+
+# Sports EV Engine v3.3.1 — A-match confirmed-lineup fix + Adaptive Research
+
+## v3.3 핵심
+
+1. **왜 픽이 바뀌었는지 변화 로그**
+   - 동일 event/market/selection의 불변 snapshot을 비교합니다.
+   - 시장 이동, PRE-LINEUP→FINAL, 라인업 확정, 선발 변경, 정밀신호 커버리지, calibration 변화 등을 관측된 이유로 표시합니다.
+   - 기여도는 감사용 설명이며, 저장되지 않은 정보의 인과효과를 지어내지 않습니다.
+
+2. **시장별 자동 Calibration**
+   - `sport_family × market`별 settled prediction으로 확률 calibration curve를 학습합니다.
+   - 같은 경기의 반복 smart-refresh snapshot은 한 표본으로 dedupe합니다.
+   - 40건 미만에서는 보정하지 않고, 수백 건이 쌓일수록 보정 강도를 높입니다.
+   - isotonic(PAVA) + shrinkage를 사용하고 한 번의 최종 이동은 기존 확률 대비 최대 ±5%p로 제한합니다.
+
+3. **멀티모델 앙상블**
+   - 독립 구조모델(Elo/Poisson 또는 runs model), 시장 no-vig, 최근폼 proxy, 정밀 context model을 합칩니다.
+   - 사용할 수 없는 component는 제외하며 MISSING을 숫자로 만들지 않습니다.
+   - 모델간 최대 차이가 14%p 이상이면 `REVIEW`, 9%p 이상이면 `CHECK`로 표시하고 REVIEW는 자동 다폴에서 제외합니다.
+   - 1X2/O-U/스프레드는 보정 후 mutually-exclusive probability coherence를 다시 맞춥니다.
+
+4. **Correlation-aware 다폴**
+   - 같은 경기 중복은 계속 금지합니다.
+   - settled candidate 기록에서 `sport_family × market` pair의 같은 날 동행성을 최소 20일 표본이 있을 때만 추정합니다.
+   - pair 표본이 부족하면 rho=0으로 두며 임의 상관을 만들지 않습니다.
+   - 오늘의 베스트 조합과 일반 다폴 모두 단순확률과 상관보정 확률을 비교할 수 있습니다.
+
+5. **과거 시점 Replay / Backtest**
+   - KST 날짜와 `킥오프 N분 전`을 선택해 그 시점 이전에 실제 저장됐던 snapshot만 재생합니다.
+   - 현재 데이터를 과거에 소급 삽입하지 않습니다(no-lookahead).
+   - 모델 버전별 ROI/Brier 비교를 지원합니다.
+   - 과거에 저장하지 않은 provider raw input을 완전히 재구성하는 historical-data replay는 아닙니다.
+
+6. **데이터 품질/신선도 Dashboard**
+   - 배당, 모델, 라인업, Statcast, 날씨, 부상/뉴스의 마지막 엔진 수집·확인 시각을 표시합니다.
+   - 표시 시간은 공급자의 발표 timestamp가 아니라 우리 엔진의 마지막 fetch/check 시간입니다.
+
+7. **자동 사후 원인 통계**
+   - MLB postgame classifier의 GOOD PICK + tail loss / 선발 조기붕괴 / 방향성 실패 등을 집계합니다.
+   - 한 실패유형이 충분한 표본에서 반복되면 ‘모델 수정 후보’로 표시합니다.
+   - 자동으로 가중치를 바꾸지는 않아 결과론적 과적합을 방지합니다.
+
+### 새 UI
+
+`🧪 모델 연구소` 탭에서 변화 로그 / Calibration / 신선도 / Replay / 버전 Backtest / 실패원인 통계 / 앙상블 진단을 확인합니다.
+
+> v3.2의 Supabase 영구 DB, CLV, smart refresh는 그대로 유지됩니다.
+
+---
+
 # Sports EV Engine v3.2.0 — Persistent DB + CLV + Smart Refresh
 
 ## v3.2 핵심

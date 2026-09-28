@@ -14,7 +14,7 @@ from itertools import product
 import math
 from typing import Callable, Iterable
 
-ENGINE_ID = "chatgpt-style-v3.1.0-mlb-deep"
+ENGINE_ID = "chatgpt-style-v3.3.0-adaptive"
 
 
 def clamp(v, lo, hi):

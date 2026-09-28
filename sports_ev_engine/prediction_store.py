@@ -20,7 +20,7 @@ import pandas as pd
 from .core.asian import settle_total_under, settle_total_over, settle_home_handicap
 from . import persistent_store
 
-MODEL_VERSION = "3.2.0"
+MODEL_VERSION = "3.3.0"
 DEFAULT_PREDICTIONS = "data/prediction_snapshots.jsonl"
 DEFAULT_SETTLED = "data/settled_predictions.jsonl"
 DEFAULT_MARKET_OBSERVATIONS = "data/market_observations.jsonl"
@@ -290,9 +290,17 @@ def record_frame(frame: pd.DataFrame, sport_key: str | None = None, sport_family
         "home_expected_runs", "away_expected_runs", "home_starter", "away_starter", "home_starter_expected_ip", "away_starter_expected_ip",
         "home_starter_recent_bb_pct", "away_starter_recent_bb_pct", "home_starter_recent_k_pct", "away_starter_recent_k_pct",
         "home_starter_recent_kbb_pct", "away_starter_recent_kbb_pct", "home_bullpen_pitches_last3", "away_bullpen_pitches_last3",
-        "lineup_confirmed", "reasoning_engine_id", "signal_coverage", "missing_signals", "counter_case_risk",
+        "lineup_confirmed", "lineup_source", "lineup_status", "fixture_id", "starter_confirmed", "reasoning_engine_id", "signal_coverage", "signal_summary", "missing_signals", "counter_case_risk",
         "counter_case_summary", "v3_decision_status", "robust_positive_ratio", "robust_ev_min", "robust_ev_p10", "robust_ev_max",
-        "robust_prob_min", "robust_prob_max", "robust_scenario_count", "v3_candidate", "v3_parlay_eligible", "odds_region",
+        "robust_prob_min", "robust_prob_max", "robust_scenario_count", "v3_candidate", "v3_parlay_eligible", "odds_region", "model_weight",
+        "pre_adaptive_model_win_prob", "ensemble_prob_cond", "calibrated_prob_cond", "adaptive_delta_pp", "calibration_delta_pp",
+        "calibration_n", "calibration_active", "calibration_reliability", "ensemble_disagreement_pp", "ensemble_gate", "ensemble_summary", "adaptive_gate",
+        "ensemble_independent_prob", "ensemble_independent_weight", "ensemble_market_prob", "ensemble_market_weight",
+        "ensemble_recent_form_prob", "ensemble_recent_form_weight", "ensemble_context_model_prob", "ensemble_context_model_weight",
+        "recent_form_used", "starter_recent_used", "velocity_used", "bullpen_used", "split_used", "weather_used",
+        "plate_discipline_used", "statcast_quality_used", "batted_ball_regression_used", "pitch_mix_used", "starter_workload_used",
+        "bullpen_exact_used", "lineup_platoon_exact_used", "pitch_matchup_used", "availability_news_used", "lineup_change_used",
+        "market_movement_used", "roof_used", "umpire_used", "travel_rest_used", "bvp_used", "bullpen_manager_used",
     ]
     for _, r in frame.iterrows():
         d = {k: _safe(r.get(k)) for k in keep if k in frame.columns}
@@ -300,6 +308,11 @@ def record_frame(frame: pd.DataFrame, sport_key: str | None = None, sport_family
         d["sport_family"] = sport_family
         d["model_version"] = MODEL_VERSION
         d["recorded_at"] = now
+        d["analysis_checked_at"] = now
+        d["lineup_checked_at"] = now if d.get("lineup_confirmed") else None
+        d["statcast_checked_at"] = now if d.get("statcast_quality_used") else None
+        d["weather_checked_at"] = now if d.get("weather_used") else None
+        d["news_checked_at"] = now if d.get("availability_news_used") else None
         raw = "|".join(str(d.get(k, "")) for k in (
             "event_id", "sport_key", "market", "selection", "point", "best_odds", "model_win_prob", "v3_decision_status",
             "stage", "data_quality", "lineup_confirmed", "counter_case_risk", "robust_positive_ratio", "missing_signals"

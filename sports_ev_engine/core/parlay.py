@@ -1,5 +1,6 @@
 
 import itertools, math
+from ..correlation_engine import correlation_adjusted_hit, historical_correlations
 
 def optimize_parlays(df, sizes=(2,3,4,5,6), top_n=10):
     results={}
@@ -13,13 +14,17 @@ def optimize_parlays(df, sizes=(2,3,4,5,6), top_n=10):
         ].copy()
 
     records=usable.to_dict("records")
+    corr_matrix=historical_correlations()
     for n in sizes:
         rows=[]
         for combo in itertools.combinations(records,n):
             if len({x["event_id"] for x in combo})<n:
                 continue
             odds=math.prod(float(x["best_odds"]) for x in combo)
-            hit=math.prod(float(x["model_win_prob"]) for x in combo)
+            _legs=[]
+            for x in combo:
+                y=dict(x);y["daily_adjusted_prob"]=float(x["model_win_prob"]);_legs.append(y)
+            hit,corr_meta=correlation_adjusted_hit(_legs,matrix=corr_matrix)
 
             # conservative haircut for same competition and model uncertainty
             if len({x.get("sport_key","") for x in combo})==1 and n>=4:
@@ -40,6 +45,9 @@ def optimize_parlays(df, sizes=(2,3,4,5,6), top_n=10):
                 "근사 적중확률":hit,
                 "근사 EV":ev,
                 "고괴리 픽 수":high_dis,
+                "상관보정 전 확률":corr_meta.get("naive",hit),
+                "상관표본 pair":corr_meta.get("pairs_used",0),
+                "평균 rho":corr_meta.get("avg_rho",0.0),
                 "점수":score,
             })
         rows.sort(key=lambda x:x["점수"],reverse=True)

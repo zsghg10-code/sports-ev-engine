@@ -211,15 +211,27 @@ def collect_deep_context(api,pool,home,away,kickoff_iso,season=None,horizon_hour
     try: lineups=api.lineups(fid) if fid else []
     except Exception: lineups=[]
     ids={"home":[],"away":[]}
+    lineup_names={"home":[],"away":[]}
+    formations={"home":None,"away":None}
     for r in lineups or []:
         tname=(r.get("team") or {}).get("name","")
         side="home" if norm_name(tname)==norm_name(home) else "away" if norm_name(tname)==norm_name(away) else None
         if not side:continue
         start=r.get("startXI") or []
-        pids=[(x.get("player") or {}).get("id") for x in start if (x.get("player") or {}).get("id")]
-        if len(set(pids))==11:ids[side]=pids
+        players=[(x.get("player") or {}) for x in start]
+        pids=[x.get("id") for x in players if x.get("id")]
+        pnames=[str(x.get("name") or "").strip() for x in players if str(x.get("name") or "").strip()]
+        if len(set(pids))==11:
+            ids[side]=pids
+            lineup_names[side]=pnames
+            formations[side]=r.get("formation")
     ctx["lineup_confirmed"]=len(ids["home"])==11 and len(ids["away"])==11
     ctx["lineup_source"]="API-Football fixtures/lineups"
+    ctx["home_lineup_players"]=lineup_names["home"]
+    ctx["away_lineup_players"]=lineup_names["away"]
+    ctx["home_formation"]=formations["home"]
+    ctx["away_formation"]=formations["away"]
+    ctx["lineup_status"]="CONFIRMED" if ctx["lineup_confirmed"] else ("PARTIAL" if ids["home"] or ids["away"] else "NOT_PUBLISHED")
 
     # Season player importance is optional and fail-soft. One/two pages per team.
     season=int(season or target_utc.year)

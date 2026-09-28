@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from .prediction_store import load_predictions
+from .correlation_engine import correlation_adjusted_hit, historical_correlations
 
 KST = ZoneInfo("Asia/Seoul")
 DEFAULT_PREDICTIONS = "data/prediction_snapshots.jsonl"
@@ -195,7 +196,11 @@ def prepare_daily_candidates(frame: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for _, r in frame.iterrows():
         status = str(r.get("v3_decision_status") or "").upper()
-        if status not in {"ROBUST", "SENSITIVE"} and not _truth(r.get("v3_candidate")):
+        if "v3_candidate" in r.index and not _truth(r.get("v3_candidate")):
+            continue
+        if status not in {"ROBUST", "SENSITIVE"}:
+            continue
+        if str(r.get("adaptive_gate") or "OK").upper() not in {"", "OK"}:
             continue
         odds = _num(r.get("best_odds"))
         model = _num(r.get("model_win_prob"))
@@ -261,7 +266,7 @@ def prepare_daily_candidates(frame: pd.DataFrame) -> pd.DataFrame:
     return out.sort_values(["daily_quality_score", "daily_adjusted_prob", "daily_adjusted_ev"], ascending=False).reset_index(drop=True)
 
 
-def _combo_row(combo: Iterable[dict]) -> dict | None:
+def _combo_row(combo: Iterable[dict], corr_matrix=None) -> dict | None:
     legs = list(combo)
     if not legs:
         return None
@@ -271,7 +276,7 @@ def _combo_row(combo: Iterable[dict]) -> dict | None:
     # underdogs can still be the strongest single but are not forced into a parlay.
     if len(legs) >= 2 and any(float(x["daily_adjusted_prob"]) < 0.50 for x in legs):
         return None
-    hit = math.prod(float(x["daily_adjusted_prob"]) for x in legs)
+    hit, corr_meta = correlation_adjusted_hit(legs, matrix=corr_matrix)
     odds = math.prod(float(x["best_odds"]) for x in legs)
     if len(legs) > 2:
         hit *= 0.985 ** (len(legs) - 2)
@@ -294,6 +299,10 @@ def _combo_row(combo: Iterable[dict]) -> dict | None:
         "estimated_hit_prob": hit,
         "estimated_ev": ev,
         "provisional_legs": provisional,
+        "naive_hit_prob": corr_meta.get("naive", hit),
+        "correlation_pairs_used": corr_meta.get("pairs_used", 0),
+        "correlation_coverage": corr_meta.get("coverage", 0.0),
+        "avg_pair_rho": corr_meta.get("avg_rho", 0.0),
         "score": score,
         "combo_label": " + ".join(f"[{x['sport_label']}] {x['pick_label']}" for x in legs),
     }
@@ -305,11 +314,12 @@ def best_combos(candidates: pd.DataFrame, sizes=(1, 2, 3), top_n=5) -> dict[int,
     # The first 24 candidates are enough for a daily best-combo search and keep
     # 3-leg combinations computationally cheap on Streamlit Cloud.
     records = candidates.head(24).to_dict("records")
+    corr_matrix = historical_correlations()
     out: dict[int, list[dict]] = {}
     for n in sizes:
         rows = []
         for combo in itertools.combinations(records, int(n)):
-            row = _combo_row(combo)
+            row = _combo_row(combo, corr_matrix=corr_matrix)
             if row is not None:
                 rows.append(row)
         rows.sort(key=lambda x: (x["score"], x["estimated_hit_prob"], x["estimated_ev"]), reverse=True)

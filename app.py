@@ -54,15 +54,20 @@ from sports_ev_engine.final_view import split_events, compact_table, event_summa
 from sports_ev_engine.kst_schedule import format_kst
 from sports_ev_engine.daily_combo import latest_snapshots_for_kst_date, prepare_daily_candidates, best_combos, combo_display_rows
 from sports_ev_engine.smart_refresh import run_smart_cycle
+from sports_ev_engine.change_log import change_logs
+from sports_ev_engine.adaptive_model import calibration_curve
+from sports_ev_engine.data_freshness import freshness_rows
+from sports_ev_engine.postgame_stats import failure_statistics
+from sports_ev_engine.replay_backtest import replay_day, version_backtest
 
-st.set_page_config(page_title="Sports EV Engine v3.2.0",layout="wide")
-st.title("Sports EV Engine v3.2.0")
-st.caption("BUILD v3.2.0-persistent-clv-smart-refresh · 2026-09-29")
+st.set_page_config(page_title="Sports EV Engine v3.3.1",layout="wide")
+st.title("Sports EV Engine v3.3.1")
+st.caption("BUILD v3.3.1-amatch-lineup-fix · 2026-09-29")
 if any(getattr(module,"PROVIDER_BUILD",None)!="3.0.0" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider,deep_soccer_provider)):
     st.error("앱과 수집 파일 버전이 다릅니다. ZIP의 sports_ev_engine 폴더까지 전부 반영한 뒤 Streamlit 앱을 Reboot하세요.")
     st.stop()
 FootballAccessError=football_provider.FootballAccessError
-st.caption("분석 백엔드 v3.2 · 영구기록/CLV/자동재분석 + MLB 정밀계층 + 자동 사후복기 + 전종목 일일 베스트조합")
+st.caption("분석 백엔드 v3.3 · 자동 calibration/앙상블 + 상관 다폴 + replay/backtest + 변화로그/신선도/실패통계")
 st.caption("독립 모델 → 정밀 컨텍스트 → 반증 검사 → 시장 캘리브레이션 → 27개 스트레스 시나리오 → EV/ROBUST 판정 → 기록·사후검증")
 
 def secret(name):
@@ -79,7 +84,7 @@ SUPABASE_KEY=secret("SUPABASE_SERVICE_ROLE_KEY") or secret("SUPABASE_KEY")
 configure_persistence(SUPABASE_URL,SUPABASE_KEY)
 BASEBALL_KEY=None
 
-_BUILD_ID = "3.2.0-persistent-clv-smart-refresh"
+_BUILD_ID = "3.3.1-amatch-lineup-fix"
 if st.session_state.get("_build_id") != _BUILD_ID:
     for _k in [
         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
@@ -207,7 +212,7 @@ def render_final_decision_layer(frame, key_prefix, title="🧠 v3 FINAL Decision
             rows.append({"경기":elabel,"모델 최우선":es['model_best'],"토탈 최우선":es['total_best'],"다폴":es['parlay'],"데이터 상태":es['data_status'],"Confidence":es['confidence']})
         st.dataframe(pd.DataFrame(rows),hide_index=True,use_container_width=True)
 
-tabs=st.tabs(["⚡ 완전자동 축구","🌍 축구 A매치","⚾ KBO/NPB 자동분석","실시간 배당","시장 가격","MLB","🏆 오늘의 베스트 조합","다폴","📡 모니터링","설정","📊 모델 검증"])
+tabs=st.tabs(["⚡ 완전자동 축구","🌍 축구 A매치","⚾ KBO/NPB 자동분석","실시간 배당","시장 가격","MLB","🏆 오늘의 베스트 조합","다폴","📡 모니터링","설정","📊 모델 검증","🧪 모델 연구소"])
 
 with tabs[0]:
     st.subheader("클럽 축구 자동분석")
@@ -416,8 +421,8 @@ with tabs[1]:
     )
     national_markets=st.multiselect("A매치 분석 마켓",["h2h","spreads","totals"],default=["h2h","totals"],key="national_markets")
     national_books=st.slider("A매치 최소 북메이커",1,6,2,key="national_books")
-    national_deep=st.checkbox("🧠 API-Football 선택 시 v3 정밀 컨텍스트 사용",value=True,key="national_deep",
-        help="경기 24시간 이내 xG/라인업/결장/선수 중요도를 추가 수집합니다. 무료 공개모드는 확보된 공개 데이터만 사용합니다.")
+    national_deep=st.checkbox("🧠 API-Football v3 정밀 컨텍스트 추가",value=True,key="national_deep",
+        help="기록 소스와 독립적으로 API-Football 키가 있으면 경기 24시간 이내 xG/확정 라인업/결장/선수 중요도를 추가 수집합니다. 예상(Probable) 라인업은 확정으로 취급하지 않습니다.")
     national_run=st.button("🌍 선택 대회 A매치 자동분석",type="primary",disabled=not(ODDS_KEY and (record_mode!="API-Football" or FOOTBALL_KEY) and national_label and national_markets))
     if national_run:
         try:
@@ -428,6 +433,7 @@ with tabs[1]:
                 records=[]; context_frame=None; public_events=[]
                 st.session_state["national_sources"]=[]
                 st.session_state["national_status"]=[]
+                st.session_state["national_lineups"]=[]
                 odds_api=TheOddsAPI(ODDS_KEY)
                 events=[]; headers={}; event_sports={}; competition_errors=[]
                 for sport_key in national_options[national_label]:
@@ -458,6 +464,9 @@ with tabs[1]:
                 if record_mode=="API-Football":st.caption("API-Football 요청은 한도 보호를 위해 간격을 두고 전송하며, 성공한 기록은 재사용합니다. 최초 전체 조회는 몇 분 걸릴 수 있습니다.")
                 if not market.empty:
                     foot=APIFootball(FOOTBALL_KEY) if record_mode=="API-Football" else None
+                    # History source and deep pre-match context are independent.
+                    # Free-history mode may still use API-Football for target fixture xG/lineup/injuries.
+                    context_api=foot if foot is not None else (APIFootball(FOOTBALL_KEY) if national_deep and FOOTBALL_KEY else None)
                     for idx,(eid,g) in enumerate(market.groupby("event_id"),1):
                         home,away=g.iloc[0][["home_team","away_team"]]
                         st.write(f"[{idx}/{market['event_id'].nunique()}] {match_label_kst(home,away,g.iloc[0]['commence_time'])}")
@@ -477,15 +486,25 @@ with tabs[1]:
                                     except Exception as exc:st.session_state['national_sources'].append({'소스':f'{home} - {away} 라인업','상태':'수집 실패','이유':str(exc)})
                             for side,info in pool.get("evidence",{}).items():
                                 st.session_state["national_evidence"].append({"경기":f"{home} - {away}","팀":home if side=="home" else away,**info})
-                            if foot and national_deep:
+                            if context_api and national_deep:
                                 try:
                                     pool["event_context"]=collect_deep_context(
-                                        foot,pool,home,away,kickoff,season=pd.Timestamp(kickoff).year,horizon_hours=24
+                                        context_api,pool,home,away,kickoff,season=pd.Timestamp(kickoff).year,horizon_hours=24
                                     )
                                 except Exception as deep_error:
-                                    pool["event_context"]={"deep_context_attempted":True,"deep_context_reason":f"collector failed: {type(deep_error).__name__}: {deep_error}"}
+                                    pool["event_context"]={"deep_context_attempted":True,"deep_context_reason":f"collector failed: {type(deep_error).__name__}: {deep_error}","lineup_confirmed":False,"lineup_status":"ERROR"}
                             else:
-                                pool["event_context"]={"deep_context_attempted":False,"deep_context_reason":"free-source mode or deep context disabled"}
+                                pool["event_context"]={"deep_context_attempted":False,"deep_context_reason":"API-Football key missing or deep context disabled","lineup_confirmed":False,"lineup_status":"NOT_CHECKED"}
+                            deep=pool.get("event_context") or {}
+                            if deep.get("lineup_confirmed"):
+                                st.session_state["national_lineups"].append({
+                                    "경기":match_label,
+                                    "홈 포메이션":deep.get("home_formation") or "—",
+                                    "홈 선발":" · ".join(deep.get("home_lineup_players") or []),
+                                    "원정 포메이션":deep.get("away_formation") or "—",
+                                    "원정 선발":" · ".join(deep.get("away_lineup_players") or []),
+                                    "소스":deep.get("lineup_source") or "API-Football"
+                                })
                             analyzed,meta=analyze_event(g,pool,recent_n=national_recent)
                             if analyzed.empty:
                                 failures.append({"경기":match_label,"이유":meta.get("reason","기록 부족")})
@@ -494,7 +513,23 @@ with tabs[1]:
                                 analyzed["sport_key"]=event_sports.get(eid,"")
                                 analyzed["kickoff_kst"]=format_kst(kickoff)
                                 all_rows.append(analyzed)
-                                st.session_state["national_status"].append({"경기":match_label,"경기시간(KST)":format_kst(kickoff),"상태":"분석 가능","이유":"기록 기준 충족 · xG/결장 미수집", "라인업":"양 팀 확인" if pool.get("manual_context",{}).get("home",{}).get("confirmed") and pool.get("manual_context",{}).get("away",{}).get("confirmed") else "미확인"})
+                                deep=pool.get("event_context") or {}
+                                manual_ok=pool.get("manual_context",{}).get("home",{}).get("confirmed") and pool.get("manual_context",{}).get("away",{}).get("confirmed")
+                                lineup_ok=bool(manual_ok or deep.get("lineup_confirmed"))
+                                lineup_label="확정 (API-Football)" if deep.get("lineup_confirmed") else ("확정 (공개소스)" if manual_ok else ("부분 게시" if deep.get("lineup_status")=="PARTIAL" else "미확인"))
+                                deep_bits=[]
+                                if deep.get("deep_context_attempted"):
+                                    deep_bits.append("정밀 컨텍스트 조회")
+                                    deep_bits.append("xG 반영" if deep.get("home_xg_for") is not None and deep.get("away_xg_for") is not None else "xG 미수집")
+                                    deep_bits.append("라인업 확정" if lineup_ok else "확정 라인업 미게시")
+                                else:
+                                    deep_bits.append("정밀 컨텍스트 미조회")
+                                st.session_state["national_status"].append({
+                                    "경기":match_label,"경기시간(KST)":format_kst(kickoff),"상태":"분석 가능",
+                                    "이유":"기록 기준 충족 · " + " · ".join(deep_bits),
+                                    "라인업":lineup_label,
+                                    "라인업 소스":deep.get("lineup_source") or ("공개소스" if manual_ok else "—")
+                                })
                         except DataHold as e:
                             failures.append({"경기":match_label_kst(home,away,g.iloc[0]["commence_time"]),"이유":str(e)})
                             st.session_state["national_status"].append({"경기":match_label_kst(home,away,g.iloc[0]["commence_time"]),"경기시간(KST)":format_kst(g.iloc[0]["commence_time"]),"상태":"자료 부족 · 분석 보류","이유":str(e)})
@@ -525,6 +560,10 @@ with tabs[1]:
     if st.session_state.get("national_status"):
         st.markdown("#### 경기별 수집·분석 가능 여부 — 추천 여부와 별개")
         st.dataframe(pd.DataFrame(st.session_state["national_status"]),hide_index=True)
+    if st.session_state.get("national_lineups"):
+        with st.expander("✅ API-Football 확정 선발 11명 보기", expanded=False):
+            st.caption("여기에는 API-Football startXI에서 양 팀 11명이 모두 확인된 경기만 표시합니다. 제3자 Probable Lineups는 확정으로 승격하지 않습니다.")
+            st.dataframe(pd.DataFrame(st.session_state["national_lineups"]),hide_index=True,use_container_width=True)
     if st.session_state.get("national_sources"):
         with st.expander("실제 수집 결과 · 소스 진단"):
             st.dataframe(pd.DataFrame(st.session_state["national_sources"]),hide_index=True)
@@ -858,7 +897,7 @@ with tabs[4]:
 with tabs[5]:
     st.subheader("⚾ MLB 완전자동 분석")
     st.write("The Odds API 배당 + MLB Stats API 일정/팀기록/예고선발/라인업을 결합해 승패·런라인·언더오버 확률과 EV를 계산합니다.")
-    st.caption("v3.2.0: MLB 정밀계층은 Statcast xwOBA/Barrel/HardHit, Whiff/Chase/Zone/Contact, 구종/구사율, 선발 workload, 불펜 정확한 최근 3일 투구수, 확정 라인업 좌우 스플릿, 구종 상성, 부상·복귀/뉴스, 라인업 변화, 시장 이동, roof/심판, 이동·휴식, BvP, 불펜 운용 패턴까지 실제 수집된 경우에만 반영합니다.")
+    st.caption("v3.3.0: MLB 정밀계층은 Statcast xwOBA/Barrel/HardHit, Whiff/Chase/Zone/Contact, 구종/구사율, 선발 workload, 불펜 정확한 최근 3일 투구수, 확정 라인업 좌우 스플릿, 구종 상성, 부상·복귀/뉴스, 라인업 변화, 시장 이동, roof/심판, 이동·휴식, BvP, 불펜 운용 패턴까지 실제 수집된 경우에만 반영합니다.")
     st.info("MLB 모델도 채팅 분석 체크리스트를 최대한 자동화한 별도 정량 엔진입니다. 확보하지 못한 신호는 MISSING으로 남기며 평균값을 임의로 채우지 않습니다.")
 
     if not ODDS_KEY:
@@ -1109,6 +1148,12 @@ with tabs[6]:
                 c3.metric("근사 적중확률",f"{final_combo['estimated_hit_prob']*100:.1f}%")
                 c4.metric("근사 EV",f"{final_combo['estimated_ev']*100:+.1f}%")
                 st.dataframe(combo_display_rows(final_combo),use_container_width=True,hide_index=True)
+                if final_combo.get("folder_count",1)>1:
+                    _naive=final_combo.get("naive_hit_prob")
+                    _cov=final_combo.get("correlation_coverage",0.0)
+                    _rho=final_combo.get("avg_pair_rho",0.0)
+                    if _naive is not None:
+                        st.caption(f"상관보정: 단순독립 {_naive*100:.1f}% → 보정후 {final_combo['estimated_hit_prob']*100:.1f}% · 역사적 pair 커버리지 {_cov*100:.0f}% · 평균 ρ {_rho:+.3f}")
                 if final_combo.get("provisional_legs",0):
                     st.warning(f"현재 조합에는 라인업/선발이 완전히 확정되지 않은 잠정 픽 {final_combo['provisional_legs']}개가 있습니다. 해당 경기 라인업 발표 후 종목 탭을 다시 분석하면 이 조합도 자동 재평가됩니다.")
                 else:
@@ -1252,7 +1297,7 @@ with tabs[8]:
             try:
                 from sports_ev_engine.telegram_notify import TelegramNotifier
                 TelegramNotifier(telegram_token,telegram_chat)(
-                    "✅ Sports EV Engine v3.2.0\nTelegram 알림 연결 테스트 성공"
+                    "✅ Sports EV Engine v3.3.1\nTelegram 알림 연결 테스트 성공"
                 )
                 st.success("테스트 알림을 보냈습니다.")
             except Exception as e:
@@ -1458,3 +1503,109 @@ with tabs[10]:
 
     _pst=persistence_status()
     st.caption("운영 기록: prediction snapshots / market observations(CLV) / settled predictions / MLB postgame reviews. "+("Supabase + 로컬 이중저장 활성화" if _pst.get("enabled") else "현재 로컬 JSONL 저장 — Supabase 연결 시 재배포 후에도 영구 보존")+".")
+
+
+with tabs[11]:
+    st.subheader("🧪 v3.3 모델 연구소")
+    st.write("확률이 왜 바뀌었는지, calibration이 실제로 필요한지, 다폴 상관보정이 얼마나 적용됐는지, 과거 시점에서 결과를 모른 채 어떤 판단을 했는지를 검증하는 연구/감사 탭입니다.")
+
+    st.markdown("### 1) 🔄 픽 변화 로그")
+    _changes=change_logs(limit=200)
+    if not _changes:
+        st.info("같은 픽의 재분석 스냅샷이 2개 이상 쌓이면 변화 로그가 표시됩니다.")
+    else:
+        _cdf=pd.DataFrame(_changes)
+        _show=pd.DataFrame()
+        _show["변경시각"] = pd.to_datetime(_cdf["recorded_at"],utc=True,errors="coerce").dt.tz_convert(KST).dt.strftime("%m/%d %H:%M")
+        _show["경기"]=_cdf["away_team"].astype(str)+" @ "+_cdf["home_team"].astype(str)
+        _show["픽"]=_cdf["selection"].astype(str)
+        _show["이전확률"]=(pd.to_numeric(_cdf["old_prob"],errors="coerce")*100).round(1)
+        _show["현재확률"]=(pd.to_numeric(_cdf["new_prob"],errors="coerce")*100).round(1)
+        _show["변화(%p)"]=pd.to_numeric(_cdf["delta_pp"],errors="coerce").round(1)
+        _show["관측된 원인"]=_cdf["reason"]
+        st.dataframe(_show,use_container_width=True,hide_index=True)
+        st.caption("원인 분해는 저장된 시장·라인업·선발·신호·calibration 변화에 근거한 감사용 설명입니다. 인과 Shapley 분해처럼 정확한 기여도 합산을 가장하지 않습니다.")
+
+    st.markdown("### 2) 🎯 시장별 자동 Calibration")
+    _settled=load_settled()
+    _groups=sorted({(str(x.get("sport_family") or ""),str(x.get("market") or "")) for x in _settled if x.get("sport_family") and x.get("market")})
+    _calrows=[]
+    for fam,mkt in _groups:
+        c=calibration_curve(_settled,fam,mkt)
+        _calrows.append({"종목":fam,"마켓":mkt,"표본":c.get("n",0),"활성":"ON" if c.get("active") else "대기","보정강도":round(float(c.get("reliability") or 0)*100,1),"상태":c.get("reason")})
+    if _calrows:
+        st.dataframe(pd.DataFrame(_calrows),use_container_width=True,hide_index=True)
+    else:
+        st.info("정산 표본이 쌓이면 종목×마켓별 calibration이 자동 학습됩니다. 40건 미만에서는 확률을 건드리지 않습니다.")
+    st.caption("v3.3 최종확률 = 독립모델/시장/최근폼/정밀컨텍스트 앙상블 → 과거 정산표본 calibration. 한 번의 보정은 기존 확률 대비 최대 ±5%p로 제한됩니다.")
+
+    st.markdown("### 3) ⏱️ 데이터 품질·신선도")
+    _fresh=freshness_rows()
+    if _fresh:
+        _fdf=pd.DataFrame(_fresh)
+        _fdf["경기시간(KST)"]=pd.to_datetime(_fdf["commence_time"],utc=True,errors="coerce").dt.tz_convert(KST).dt.strftime("%m/%d %H:%M")
+        st.dataframe(_fdf[[c for c in ["경기시간(KST)","경기","sport_family","배당","모델","라인업","Statcast","날씨","부상/뉴스","freshness_risk"] if c in _fdf]],use_container_width=True,hide_index=True)
+        st.caption("여기 시간은 공급자가 데이터를 발표한 시각이 아니라 우리 엔진이 마지막으로 가져오거나 확인한 시각입니다.")
+    else:
+        st.info("예정 경기 분석 스냅샷이 생기면 마지막 수집/확인 시각을 표시합니다.")
+
+    st.markdown("### 4) 🕰️ 과거 시점 Replay / Backtest")
+    _r1,_r2,_r3=st.columns(3)
+    _replay_date=_r1.date_input("Replay 날짜(KST)",value=datetime.now(KST).date()-timedelta(days=1),key="replay_date")
+    _before=_r2.selectbox("킥오프 몇 분 전 상태?",[0,5,15,30,60,120,360],index=3,key="replay_before")
+    _versions=sorted({str(x.get("model_version")) for x in load_settled() if x.get("model_version")})
+    _ver=_r3.selectbox("모델 버전",["전체"]+_versions,index=0,key="replay_version")
+    _rep=replay_day(_replay_date,_before,None if _ver=="전체" else _ver)
+    rc1,rc2,rc3=st.columns(3)
+    rc1.metric("당시 후보",len(_rep.get("candidates",[])))
+    rc2.metric("정산 연결",_rep.get("settled_n",0))
+    _sr=_rep.get("single_roi")
+    rc3.metric("후보 평균 실제 ROI",("—" if _sr is None or pd.isna(_sr) else f"{_sr*100:+.1f}%"))
+    if _rep.get("best_two"):
+        st.write("**당시 기준 2폴:**",_rep["best_two"]["combo_label"])
+        _cr=_rep.get("best_two_realized_roi")
+        st.caption("실제 조합 ROI: "+("아직 미정산" if _cr is None else f"{_cr*100:+.1f}%"))
+    st.caption("Replay는 저장된 불변 스냅샷만 사용합니다. 당시 저장하지 않았던 과거 provider 입력을 현재 데이터로 소급해 만들어내지 않으므로 no-lookahead를 지킵니다.")
+
+    _b1,_b2=st.columns(2)
+    _start=_b1.date_input("버전 비교 시작",value=datetime.now(KST).date()-timedelta(days=30),key="bt_start")
+    _end=_b2.date_input("버전 비교 종료",value=datetime.now(KST).date(),key="bt_end")
+    _vb=pd.DataFrame(version_backtest(_start,_end))
+    if not _vb.empty:
+        _vb["ROI(%)"]=(pd.to_numeric(_vb["roi"],errors="coerce")*100).round(2);_vb["Brier"]=pd.to_numeric(_vb["brier"],errors="coerce").round(4)
+        st.dataframe(_vb[["model_version","n","ROI(%)","Brier"]],use_container_width=True,hide_index=True)
+
+    st.markdown("### 5) 🧯 자동 사후 원인 통계")
+    _fs=failure_statistics()
+    if not _fs.get("losses"):
+        st.info("MLB 자동복기 미적중 표본이 쌓이면 실패유형 비중과 반복 패턴을 집계합니다.")
+    else:
+        st.metric("자동복기 미적중 표본",_fs["losses"])
+        _cause=pd.DataFrame(_fs["rows"])
+        if not _cause.empty:
+            _cause["비중(%)"]=(pd.to_numeric(_cause["share"],errors="coerce")*100).round(1)
+            st.dataframe(_cause.rename(columns={"market":"마켓","cause":"원인","n":"건수","market_losses":"마켓 미적중"}),use_container_width=True,hide_index=True)
+        if _fs.get("hints"):
+            st.markdown("#### 반복 실패 → 모델 수정 후보")
+            for h in _fs["hints"]:
+                st.write(f"- **{h['cause']}** {h['n']}건 ({h['share']*100:.1f}%) → {h['suggestion']}")
+        st.caption("이 영역은 가중치를 자동으로 바꾸지 않습니다. 표본이 반복되는 실패유형만 ‘수정 후보’로 올려 과적합을 막습니다.")
+
+    st.markdown("### 6) 🧩 앙상블 진단")
+    _pred=latest_snapshots_for_kst_date(datetime.now(KST).date())
+    if _pred.empty or "ensemble_summary" not in _pred.columns:
+        st.info("v3.3으로 새 분석을 실행하면 독립모델·시장·최근폼·정밀 컨텍스트의 의견 차이가 여기에 표시됩니다.")
+    else:
+        _ed=_pred[_pred["ensemble_summary"].notna()].copy()
+        if not _ed.empty:
+            _ev=pd.DataFrame({
+                "경기":_ed.get("away_team","").astype(str)+" @ "+_ed.get("home_team","").astype(str),
+                "픽":_ed.get("selection","").astype(str),
+                "앙상블":_ed.get("ensemble_summary",""),
+                "모델간 최대차이(%p)":pd.to_numeric(_ed.get("ensemble_disagreement_pp"),errors="coerce").round(1),
+                "Calibration 표본":pd.to_numeric(_ed.get("calibration_n"),errors="coerce"),
+                "최종 보정(%p)":pd.to_numeric(_ed.get("adaptive_delta_pp"),errors="coerce").round(1),
+                "Gate":_ed.get("ensemble_gate",""),
+            })
+            st.dataframe(_ev.head(200),use_container_width=True,hide_index=True)
+    st.caption("모델끼리 크게 충돌하면 REVIEW로 보내 자동 다폴에서 제외합니다. 같은 경기 두 옵션 조합 금지와 별개로, 다폴 확률은 정산 데이터에서 추정된 pair 상관을 사용할 수 있을 때 단순 곱셈을 보정합니다.")
