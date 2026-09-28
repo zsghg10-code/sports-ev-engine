@@ -19,6 +19,8 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from .prediction_store import load_predictions
+
 KST = ZoneInfo("Asia/Seoul")
 DEFAULT_PREDICTIONS = "data/prediction_snapshots.jsonl"
 
@@ -91,7 +93,7 @@ def _identity(row: dict) -> tuple:
 def latest_snapshots_for_kst_date(selected_date: date, path: str | Path = DEFAULT_PREDICTIONS) -> pd.DataFrame:
     """Latest immutable snapshot per pick for one KST calendar date."""
     rows = []
-    for row in _read_jsonl(path):
+    for row in load_predictions(path):
         kst = _kickoff_kst(row.get("commence_time"))
         if pd.isna(kst) or kst.date() != selected_date:
             continue

@@ -48,20 +48,21 @@ from sports_ev_engine import free_national as free_provider
 from sports_ev_engine.providers import baseball_advanced as advanced_provider, the_odds_api as odds_provider
 from sports_ev_engine.deep_soccer_context import collect_deep_context
 from sports_ev_engine import deep_soccer_context as deep_soccer_provider
-from sports_ev_engine.prediction_store import record_frame, auto_settle, evaluation, pending_sport_keys
+from sports_ev_engine.prediction_store import record_frame, auto_settle, evaluation, pending_sport_keys, configure_persistence, persistence_status, refresh_events, load_market_observations, load_settled
 from sports_ev_engine.providers.mlb_postgame import analyze_settled_mlb, postgame_reviews
 from sports_ev_engine.final_view import split_events, compact_table, event_summary
 from sports_ev_engine.kst_schedule import format_kst
 from sports_ev_engine.daily_combo import latest_snapshots_for_kst_date, prepare_daily_candidates, best_combos, combo_display_rows
+from sports_ev_engine.smart_refresh import run_smart_cycle
 
-st.set_page_config(page_title="Sports EV Engine v3.1.2",layout="wide")
-st.title("Sports EV Engine v3.1.2")
-st.caption("BUILD v3.1.2-daily-best-combo · 2026-09-29")
+st.set_page_config(page_title="Sports EV Engine v3.2.0",layout="wide")
+st.title("Sports EV Engine v3.2.0")
+st.caption("BUILD v3.2.0-persistent-clv-smart-refresh · 2026-09-29")
 if any(getattr(module,"PROVIDER_BUILD",None)!="3.0.0" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider,deep_soccer_provider)):
     st.error("앱과 수집 파일 버전이 다릅니다. ZIP의 sports_ev_engine 폴더까지 전부 반영한 뒤 Streamlit 앱을 Reboot하세요.")
     st.stop()
 FootballAccessError=football_provider.FootballAccessError
-st.caption("분석 백엔드 v3.1 MLB 정밀계층 + 자동 사후복기 + 전종목 일일 베스트조합 · FINAL UI v3.1.2")
+st.caption("분석 백엔드 v3.2 · 영구기록/CLV/자동재분석 + MLB 정밀계층 + 자동 사후복기 + 전종목 일일 베스트조합")
 st.caption("독립 모델 → 정밀 컨텍스트 → 반증 검사 → 시장 캘리브레이션 → 27개 스트레스 시나리오 → EV/ROBUST 판정 → 기록·사후검증")
 
 def secret(name):
@@ -73,9 +74,12 @@ def secret(name):
 
 ODDS_KEY=secret("THE_ODDS_API_KEY")
 FOOTBALL_KEY=secret("API_FOOTBALL_KEY")
+SUPABASE_URL=secret("SUPABASE_URL")
+SUPABASE_KEY=secret("SUPABASE_SERVICE_ROLE_KEY") or secret("SUPABASE_KEY")
+configure_persistence(SUPABASE_URL,SUPABASE_KEY)
 BASEBALL_KEY=None
 
-_BUILD_ID = "3.1.2-daily-best-combo"
+_BUILD_ID = "3.2.0-persistent-clv-smart-refresh"
 if st.session_state.get("_build_id") != _BUILD_ID:
     for _k in [
         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
@@ -311,6 +315,7 @@ with tabs[0]:
                     _v3_order={"ROBUST":0,"SENSITIVE":1,"REVIEW":2,"FRAGILE":3,"PASS":4,"DATA_HOLD":5}
                     ranked["_v3_order"]=ranked["v3_decision_status"].map(_v3_order).fillna(9)
                     ranked=ranked.sort_values(["_v3_order","robust_ev_p10","conservative_ev_roi"],ascending=[True,False,False]).drop(columns=["_v3_order"])
+                    ranked["odds_region"]=region
                     saved=record_frame(ranked,sport_key=sport_key,sport_family="soccer_club")
                     settle_info=auto_settle(odds_api,sport_key)
                     st.caption(f"v3 불변 예측 스냅샷 {saved}개 추가 · 자동 정산 {settle_info.get('settled',0)}개" + (f" · 정산 오류: {settle_info.get('error')}" if settle_info.get('error') else ""))
@@ -505,6 +510,7 @@ with tabs[1]:
                 ranked=pd.concat(all_rows,ignore_index=True) if all_rows else pd.DataFrame()
                 if not ranked.empty:
                     ranked=ranked.sort_values(["robust_positive_ratio","robust_ev_p10","scenario_ev_min","point_ev_roi"],ascending=False)
+                    ranked["odds_region"]=national_region
                     saved=record_frame(ranked,sport_family="soccer_national")
                     settled_total=0; settlement_errors=[]
                     for sk in sorted(x for x in ranked.get("sport_key",pd.Series(dtype=str)).dropna().unique() if x):
@@ -727,6 +733,7 @@ with tabs[2]:
                 if not rankedb.empty:
                     rankedb["sport_key"]=baseball_key
                     rankedb=rankedb.sort_values(["robust_positive_ratio","robust_ev_p10","conservative_ev_roi"],ascending=False)
+                    rankedb["odds_region"]=bregion
                     saved=record_frame(rankedb,sport_key=baseball_key,sport_family=f"baseball_{league.lower()}")
                     settle_info=auto_settle(odds_api,baseball_key)
                     st.caption(f"v3 불변 예측 스냅샷 {saved}개 추가 · 자동 정산 {settle_info.get('settled',0)}개" + (f" · 정산 오류: {settle_info.get('error')}" if settle_info.get('error') else ""))
@@ -851,7 +858,7 @@ with tabs[4]:
 with tabs[5]:
     st.subheader("⚾ MLB 완전자동 분석")
     st.write("The Odds API 배당 + MLB Stats API 일정/팀기록/예고선발/라인업을 결합해 승패·런라인·언더오버 확률과 EV를 계산합니다.")
-    st.caption("v3.1.2: MLB 정밀계층은 Statcast xwOBA/Barrel/HardHit, Whiff/Chase/Zone/Contact, 구종/구사율, 선발 workload, 불펜 정확한 최근 3일 투구수, 확정 라인업 좌우 스플릿, 구종 상성, 부상·복귀/뉴스, 라인업 변화, 시장 이동, roof/심판, 이동·휴식, BvP, 불펜 운용 패턴까지 실제 수집된 경우에만 반영합니다.")
+    st.caption("v3.2.0: MLB 정밀계층은 Statcast xwOBA/Barrel/HardHit, Whiff/Chase/Zone/Contact, 구종/구사율, 선발 workload, 불펜 정확한 최근 3일 투구수, 확정 라인업 좌우 스플릿, 구종 상성, 부상·복귀/뉴스, 라인업 변화, 시장 이동, roof/심판, 이동·휴식, BvP, 불펜 운용 패턴까지 실제 수집된 경우에만 반영합니다.")
     st.info("MLB 모델도 채팅 분석 체크리스트를 최대한 자동화한 별도 정량 엔진입니다. 확보하지 못한 신호는 MISSING으로 남기며 평균값을 임의로 채우지 않습니다.")
 
     if not ODDS_KEY:
@@ -981,6 +988,7 @@ with tabs[5]:
                 ranked=pd.concat(all_rows,ignore_index=True) if all_rows else pd.DataFrame()
                 if not ranked.empty:
                     ranked=ranked.sort_values(["robust_positive_ratio","robust_ev_p10","conservative_ev_roi"],ascending=False)
+                    ranked["odds_region"]=mlb_region
                     saved=record_frame(ranked,sport_key="baseball_mlb",sport_family="baseball_mlb")
                     settle_info=auto_settle(odds_api,"baseball_mlb")
                     review_info=analyze_settled_mlb()
@@ -1211,12 +1219,40 @@ with tabs[8]:
         "KBO/NPB 데이터":"공식 팀기록 + KBO GameCenter / NPB.jp 선발·라인업 — 별도 키 불필요",
     })
 
+    pst=persistence_status()
+    st.markdown("### v3.2 영구기록 · CLV · 스마트 자동재분석")
+    st.write({
+        "영구 DB": "Supabase + 로컬 이중저장" if pst.get("enabled") else "로컬 JSONL만 사용",
+        "DB 호스트": pst.get("url") or "미설정",
+        "최근 DB 오류": pst.get("last_error") or "없음",
+    })
+    if not pst.get("enabled"):
+        st.info("Supabase를 연결하지 않아도 앱은 정상 작동합니다. 재배포 후에도 예측/정산/CLV 기록을 영구 보존하려면 설정 탭 안내대로 DB를 연결하세요.")
+    if ODDS_KEY and st.button("🔄 스마트 자동화 1회 실행",key="smart_refresh_once_ui"):
+        try:
+            with st.spinner("저장된 예정경기의 배당·라인업/선발 변화를 확인하고 자동 재분석/정산 중..."):
+                rr=run_smart_cycle(ODDS_KEY,FOOTBALL_KEY,region="eu")
+            st.success(f"시장 관측 {rr.get('observations',0)}개 · 재분석 {rr.get('reanalyzed',0)}경기 · 정산 {rr.get('settled',0)}개")
+            if rr.get("errors"):
+                st.warning("일부 자동화 보류: "+" / ".join(rr.get("errors",[])[:8]))
+            with st.expander("이번 자동화 상세"):
+                st.json(rr)
+        except Exception as e:
+            st.error(f"스마트 자동화 실행 실패: {type(e).__name__}: {e}")
+    st.caption("백그라운드에서는 smart_worker.py를 15분 주기로 실행하면 마감 직전 배당이 계속 저장되어 CLV가 계산되고, 시장/라인업/선발 변화 시 최신 분석이 베스트조합에 자동 반영됩니다.")
+    _refresh=refresh_events()
+    if _refresh:
+        with st.expander("최근 자동 재분석 로그",expanded=False):
+            _rf=pd.DataFrame(sorted(_refresh,key=lambda r:str(r.get("recorded_at") or ""),reverse=True)[:100])
+            _cols=[c for c in ["recorded_at","sport_family","home_team","away_team","reason","saved_snapshots"] if c in _rf.columns]
+            st.dataframe(_rf[_cols],use_container_width=True,hide_index=True)
+
     if telegram_token and telegram_chat:
         if st.button("📨 Telegram 테스트 알림 보내기"):
             try:
                 from sports_ev_engine.telegram_notify import TelegramNotifier
                 TelegramNotifier(telegram_token,telegram_chat)(
-                    "✅ Sports EV Engine v3.1.2\nTelegram 알림 연결 테스트 성공"
+                    "✅ Sports EV Engine v3.2.0\nTelegram 알림 연결 테스트 성공"
                 )
                 st.success("테스트 알림을 보냈습니다.")
             except Exception as e:
@@ -1228,18 +1264,14 @@ with tabs[8]:
 ### 백그라운드 실행
 Streamlit Community Cloud 화면 자체는 스마트폰을 닫은 뒤 계속 감시하는 용도로는 적합하지 않습니다.
 
-축구는 **`monitor.py`**, KBO/NPB는 **`monitor_baseball.py`**가 실제 백그라운드 감시 프로그램입니다.
+v3.2부터는 **`smart_worker.py`**가 권장 통합 worker입니다. 저장된 예정 경기 전체(축구/A매치/KBO/NPB/MLB)의 시장을 관측하고, 가능한 종목은 라인업·선발 변화까지 재확인한 뒤 자동 재분석·정산합니다.
 Railway / Render / VPS 같은 항상 실행되는 Python worker에서:
 
 ```bash
-python monitor.py
-# KBO + NPB는 별도 worker
-python monitor_baseball.py
+python smart_worker.py
 ```
 
-를 실행하면 휴대폰과 Streamlit을 닫아도 계속 감시합니다.
-
-`monitor_once.py`는 cron/스케줄러에서 한 번만 실행할 때 사용합니다.
+한 번만 돌리는 cron/스케줄러라면 `python smart_once.py`를 사용합니다. 기존 `monitor.py` / `monitor_baseball.py`도 남겨두었지만 CLV와 전종목 통합 자동화는 smart worker가 기준입니다.
 """)
 
 with tabs[9]:
@@ -1256,7 +1288,13 @@ THE_ODDS_API_KEY = "..."
 API_FOOTBALL_KEY = "..."
 TELEGRAM_BOT_TOKEN = "..."
 TELEGRAM_CHAT_ID = "..."
+
+# 선택: v3.2 영구 DB
+SUPABASE_URL = "https://YOUR_PROJECT.supabase.co"
+SUPABASE_SERVICE_ROLE_KEY = "..."
 ```
+
+영구 DB를 쓸 경우 ZIP의 **`supabase_schema.sql`**을 Supabase SQL Editor에서 한 번 실행하세요. 서비스 역할 키는 반드시 Streamlit Secrets/서버 환경변수에만 저장하고 GitHub 코드에는 올리지 마세요.
 
 **v2.5 선발/라인업 FINAL 모델**
 - KBO 공식 GameCenter에서 예고/확정 선발 자동수집
@@ -1346,17 +1384,40 @@ with tabs[10]:
         st.info("아직 정산된 표본이 없습니다. 경기 전 분석을 실행하면 예측이 저장되고, 경기 종료 뒤 이 탭의 `최근 종료 경기 지금 자동 정산 + MLB 자동복기` 버튼을 누르면 결과가 연결됩니다. `python settle_once.py`는 별도 서버/스케줄러에서 같은 작업을 자동 실행할 때 쓰는 명령입니다. Streamlit 화면에 입력하는 명령은 아닙니다.")
     else:
         overall=report["overall"]
-        c1,c2,c3,c4=st.columns(4)
+        c1,c2,c3,c4,c5=st.columns(5)
         c1.metric("확률 검증 표본",overall["n"])
         c2.metric("Brier",f"{overall['brier']:.4f}" if overall["n"] else "—")
         c3.metric("Log loss",f"{overall['log_loss']:.4f}" if overall["n"] else "—")
         c4.metric(f"평균 ROI ({overall['roi_n']}건)",f"{overall['roi']*100:.2f}%")
+        _clv=overall.get("avg_clv_prob_pp")
+        c5.metric(f"평균 CLV ({overall.get('clv_n',0)}건)",(f"{_clv:+.2f}%p" if overall.get('clv_n') and pd.notna(_clv) else "—"))
         groups=pd.DataFrame(report.get("groups",[]))
         if not groups.empty:
             groups["roi"]=(groups["roi"]*100).round(2);groups["hit_rate"]=(groups["hit_rate"]*100).round(2)
             groups[["brier","log_loss"]]=groups[["brier","log_loss"]].round(4)
-            st.dataframe(groups.rename(columns={"sport_family":"종목","market":"마켓","decision":"v3 판정","n":"확률표본","roi_n":"ROI표본","brier":"Brier","log_loss":"Log loss","roi":"ROI(%)","hit_rate":"적중률(%)"}),hide_index=True,use_container_width=True)
-        st.caption("Brier/Log loss는 낮을수록 좋습니다. 아시안 쿼터라인의 부분 적특은 ROI에는 포함하지만 Bernoulli 확률검증에서는 제외합니다. 충분한 표본 전에는 특정 상태/리그가 우월하다고 결론내리지 않습니다.")
+            if "avg_clv_prob_pp" in groups:groups["avg_clv_prob_pp"]=pd.to_numeric(groups["avg_clv_prob_pp"],errors="coerce").round(2)
+            st.dataframe(groups.rename(columns={"sport_family":"종목","market":"마켓","decision":"v3 판정","n":"확률표본","roi_n":"ROI표본","clv_n":"CLV표본","brier":"Brier","log_loss":"Log loss","roi":"ROI(%)","hit_rate":"적중률(%)","avg_clv_prob_pp":"평균 CLV(%p)"}),hide_index=True,use_container_width=True)
+        st.caption("Brier/Log loss는 낮을수록 좋습니다. CLV는 분석 당시 가격보다 마감 시장이 해당 픽 방향으로 얼마나 이동했는지(%p)이며 양수일수록 좋은 가격을 선점한 것입니다. smart_worker가 마감 전 시장을 반복 관측해야 계산됩니다. 아시안 쿼터라인의 부분 적특은 ROI에는 포함하지만 Bernoulli 확률검증에서는 제외합니다.")
+    st.markdown("### 📈 최근 CLV")
+    _settled_rows=load_settled()
+    _clv_rows=[r for r in _settled_rows if r.get("closing_observed_at")]
+    if not _clv_rows:
+        st.info("아직 closing line 관측이 연결된 정산 표본이 없습니다. smart_worker를 경기 전 계속 실행하면 마감 직전 가격이 저장되고 정산 후 CLV가 표시됩니다.")
+    else:
+        _clv_rows=sorted(_clv_rows,key=lambda r:str(r.get("settled_at") or ""),reverse=True)[:100]
+        _clv_df=pd.DataFrame(_clv_rows)
+        _clv_show=pd.DataFrame()
+        _clv_show["경기"]=_clv_df.get("away_team","").astype(str)+" @ "+_clv_df.get("home_team","").astype(str)
+        _clv_show["픽"]=_clv_df.get("selection","").astype(str)
+        _clv_show["진입배당"]=pd.to_numeric(_clv_df.get("best_odds"),errors="coerce")
+        _clv_show["마감배당"]=pd.to_numeric(_clv_df.get("closing_odds"),errors="coerce")
+        _clv_show["진입라인"]=pd.to_numeric(_clv_df.get("point"),errors="coerce")
+        _clv_show["마감라인"]=pd.to_numeric(_clv_df.get("closing_point"),errors="coerce")
+        _clv_show["CLV 시장확률(%p)"]=pd.to_numeric(_clv_df.get("clv_market_prob_pp"),errors="coerce").round(2)
+        _clv_show["CLV 라인(points)"]=pd.to_numeric(_clv_df.get("clv_line_points"),errors="coerce").round(2)
+        _clv_show["결과 ROI(%)"]=(pd.to_numeric(_clv_df.get("realized_roi"),errors="coerce")*100).round(1)
+        st.dataframe(_clv_show,use_container_width=True,hide_index=True)
+
     st.markdown("### ⚾ MLB 자동 사후복기")
     reviews=postgame_reviews()
     if not reviews:
@@ -1395,4 +1456,5 @@ with tabs[10]:
                         st.write(f"**BB%:** 사전 최근 {('—' if exp is None else f'{float(exp)*100:.1f}%')} → 실제 {('—' if act is None else f'{float(act)*100:.1f}%')}")
         st.caption("GOOD PICK 표시는 결과가 아쉬웠다는 이유만으로 붙이지 않습니다. 7~9회 리드 후 역전, 정규 후반까지 언더 유지 후 late crossing, 연장 승부, 높은 출루/잔루 등 코드로 확인 가능한 조건이 있을 때만 표시합니다. 그 외는 REVIEW 또는 모델 미스 후보로 남깁니다.")
 
-    st.caption("운영 파일: data/prediction_snapshots.jsonl (append-only 예측) / data/settled_predictions.jsonl (정산 결과) / data/postgame_reviews.jsonl (MLB 자동복기). Streamlit 재배포에도 보존하려면 worker의 영구 디스크나 외부 저장소에 data 경로를 마운트하세요.")
+    _pst=persistence_status()
+    st.caption("운영 기록: prediction snapshots / market observations(CLV) / settled predictions / MLB postgame reviews. "+("Supabase + 로컬 이중저장 활성화" if _pst.get("enabled") else "현재 로컬 JSONL 저장 — Supabase 연결 시 재배포 후에도 영구 보존")+".")

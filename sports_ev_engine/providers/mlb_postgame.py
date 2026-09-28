@@ -19,6 +19,8 @@ import pandas as pd
 import requests
 
 from .mlb_statsapi import schedule_kst, match_schedule
+from ..prediction_store import load_settled
+from .. import persistent_store
 
 BASE="https://statsapi.mlb.com/api/v1"
 LIVE_BASE="https://statsapi.mlb.com/api/v1.1"
@@ -71,6 +73,7 @@ def _append_jsonl(path,rows):
     p=Path(path);p.parent.mkdir(parents=True,exist_ok=True)
     with p.open("a",encoding="utf-8") as f:
         for row in rows:f.write(json.dumps(row,ensure_ascii=False,sort_keys=True,default=str)+"\n")
+    persistent_store.mirror("postgame_review", rows, id_field="fingerprint")
 
 
 def _side_for_selection(snapshot):
@@ -331,9 +334,15 @@ def build_review_row(snapshot,evidence,classification,game_row=None):
     }
 
 
+def _load_reviews(path="data/postgame_reviews.jsonl"):
+    local=_load_jsonl(path)
+    if not persistent_store.enabled():return local
+    remote=persistent_store.load("postgame_review")
+    return persistent_store.merge(local,remote,id_field="fingerprint")
+
 def analyze_settled_mlb(settled_path="data/settled_predictions.jsonl",review_path="data/postgame_reviews.jsonl",provider=None):
-    settled=[x for x in _load_jsonl(settled_path) if x.get("sport_key")=="baseball_mlb"]
-    existing=_load_jsonl(review_path);done={x.get("fingerprint") for x in existing}
+    settled=[x for x in load_settled(settled_path) if x.get("sport_key")=="baseball_mlb"]
+    existing=_load_reviews(review_path);done={x.get("fingerprint") for x in existing}
     provider=provider or MLBPostgameProvider()
     cache={};match_cache={};out=[];errors=[]
     for s in settled:
@@ -358,4 +367,4 @@ def analyze_settled_mlb(settled_path="data/settled_predictions.jsonl",review_pat
 
 
 def postgame_reviews(path="data/postgame_reviews.jsonl"):
-    return _load_jsonl(path)
+    return _load_reviews(path)

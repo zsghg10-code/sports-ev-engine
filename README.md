@@ -1,3 +1,57 @@
+# Sports EV Engine v3.2.0 — Persistent DB + CLV + Smart Refresh
+
+## v3.2 핵심
+
+1. **영구 DB(선택)**
+   - 기본은 기존 JSONL 로컬 저장으로 즉시 동작합니다.
+   - `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`를 설정하면 예측/시장관측/정산/MLB 복기를 Supabase PostgreSQL에도 이중 저장합니다.
+   - ZIP의 `supabase_schema.sql`을 Supabase SQL Editor에서 한 번 실행하세요.
+   - DB 장애 시에도 로컬 분석/저장은 계속됩니다.
+
+2. **CLV(Closing Line Value)**
+   - 분석 당시 가격을 immutable snapshot으로 보존합니다.
+   - `smart_worker.py`가 킥오프 전 시장을 반복 관측해 마지막 pregame 가격을 closing line으로 사용합니다.
+   - 동일 라인은 `closing_odds`, `CLV implied probability`, `market probability move`를 저장합니다.
+   - 핸디/토탈 line 자체가 바뀌면 `clv_line_points`로 별도 기록합니다. 서로 다른 라인의 배당을 억지로 비교하지 않습니다.
+
+3. **라인업/선발/배당변동 자동 재분석**
+   - 저장된 예정 경기 전체를 `smart_worker.py`가 감시합니다.
+   - 시장확률 이동(킥오프까지 시간에 따라 1.0~2.0%p), 4%p 급변, 핸디/토탈 0.25 이동을 감지합니다.
+   - 킥오프 150분 이내에는 15분 간격으로 라인업/선발 상태를 다시 확인합니다.
+   - 변화가 확인되면 각 탭과 동일한 기존 분석 함수를 다시 호출해 새 immutable snapshot을 저장합니다.
+   - `🏆 오늘의 베스트 조합`은 최신 snapshot만 쓰므로 자동으로 갱신됩니다.
+
+4. **자동 정산**
+   - smart worker 매 cycle마다 종료 경기 정산을 시도합니다.
+   - MLB는 정산 뒤 기존 postgame classifier까지 이어서 실행합니다.
+
+### 권장 백그라운드 실행
+
+```bash
+python smart_worker.py
+```
+
+cron/스케줄러에서 한 번만 실행할 때:
+
+```bash
+python smart_once.py
+```
+
+Streamlit의 `📡 모니터링` 탭에서도 **스마트 자동화 1회 실행** 버튼으로 같은 cycle을 수동 테스트할 수 있습니다.
+
+### Streamlit Secrets 예시
+
+```toml
+THE_ODDS_API_KEY = "..."
+API_FOOTBALL_KEY = "..."
+SUPABASE_URL = "https://YOUR_PROJECT.supabase.co"
+SUPABASE_SERVICE_ROLE_KEY = "..."
+```
+
+> Supabase는 선택입니다. 연결 전에도 v3.2는 기존 로컬 JSONL 방식으로 정상 동작합니다. 서비스 역할 키는 GitHub에 커밋하지 마세요.
+
+---
+
 # Sports EV Engine v3.1.2 — Daily Best Combo + MLB Deep/Postgame
 
 
