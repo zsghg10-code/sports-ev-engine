@@ -155,6 +155,7 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
         resolved=max(1e-9,1-rp); final_gap=(fw/resolved-mp)*100
         sanity="OUTLIER_SHRUNK" if abs(raw_gap)>18 else "HIGH_DISAGREEMENT" if abs(raw_gap)>12 else "CHECK" if abs(raw_gap)>8 else "OK"
         grade=ev.grade
+        if quality!="HIGH" and grade=="A":grade="B"
         if stage!="FINAL" and grade=="A":grade="B"
         if stage=="PRE-LINEUP" and grade in {"A","B"}:grade="C"
         if sanity=="OUTLIER_SHRUNK":grade="REVIEW"

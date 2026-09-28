@@ -1,4 +1,24 @@
-# Sports EV Engine v2.4.2 — Soccer + KBO/NPB + 20K Monitor
+# Sports EV Engine v2.6.1 — Soccer + KBO/NPB + 20K Monitor
+
+The Streamlit entry point is `app.py` at the repository root. Upload the
+contents of this ZIP to the repository root, preserving the
+`sports_ev_engine/` subdirectory. The heading and BUILD caption in the app
+must show v2.6.1 after deployment.
+
+The baseball tab now calls `AdvancedBaseballSignals.collect()` for each game,
+passes its output through `analyze_official_event()`, and displays signal
+availability and the resulting uncertainty. Automatic parlays require FINAL
+status and HIGH data quality by default.
+
+Live KBO/NPB/Open-Meteo retrieval requires network access from the deployed
+environment; this package was verified offline with synthetic inputs. The
+UI lists available signals per event. Do not interpret a missing signal as a
+measured league-average result. KBO bullpen load is schedule based and does
+not report actual reliever pitches; NPB player handedness splits and recent
+pitch velocity remain unavailable from the wired public sources.
+
+The version history below documents earlier builds; older source descriptions
+are historical and do not describe the active v2.6.1 provider.
 
 v2.3 adds background odds/lineup monitoring to the v2.2 model.
 

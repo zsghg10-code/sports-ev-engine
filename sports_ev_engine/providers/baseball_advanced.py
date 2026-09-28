@@ -324,7 +324,10 @@ class KBOAdvanced:
         result={"source":"KBO official advanced","notes":[]}
         try:g=self.live._match_game(home,away,commence_iso)
         except Exception:g=None
-        home_pid=self._pid_from_game(g,True); away_pid=self._pid_from_game(g,False)
+        # The live GameCenter parser already resolves the starter IDs from
+        # the scheduled game. Reuse them when the advanced lookup has no match.
+        home_pid=self._pid_from_game(g,True) or ctx.get("home_starter_id")
+        away_pid=self._pid_from_game(g,False) or ctx.get("away_starter_id")
         result["home_starter_recent"]=self.pitcher_recent(home_pid,5)
         result["away_starter_recent"]=self.pitcher_recent(away_pid,5)
 
@@ -571,8 +574,10 @@ class AdvancedBaseballSignals:
                     hform=max(.97,min(1.03,1+(hr/avg-1)*.20))
                     aform=max(.97,min(1.03,1+(ar/avg-1)*.20))
 
-        hbp=(data.get("home_bullpen") or {}).get("score")
-        abp=(data.get("away_bullpen") or {}).get("score")
+        home_bp=data.get("home_bullpen") or {}
+        away_bp=data.get("away_bullpen") or {}
+        hbp=home_bp.get("score") if home_bp.get("available") else None
+        abp=away_bp.get("score") if away_bp.get("available") else None
         # A fatigued opponent bullpen increases your offense, capped at +4%.
         home_vs_bullpen=1+min(.04,.04*float(abp)) if abp is not None else None
         away_vs_bullpen=1+min(.04,.04*float(hbp)) if hbp is not None else None
@@ -612,4 +617,6 @@ class AdvancedBaseballSignals:
         data["advanced_completeness"]=used/len(statuses)
         # Missing factors increase uncertainty, never silently become neutral confidence.
         data["extra_uncertainty_pp"]=(len(statuses)-used)*.30 + float(weather.get("uncertainty_pp") or 0)
+        if lg=="KBO" and statuses["bullpen"]:
+            data.setdefault("notes",[]).append("불펜은 최근 일정 기반 대리지표이며 투수별 실제 투구량은 미확인")
         return data

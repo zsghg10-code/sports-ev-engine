@@ -15,10 +15,11 @@ from sports_ev_engine.core.parlay import optimize_parlays
 from sports_ev_engine.providers.official_baseball import OfficialBaseballStats
 from sports_ev_engine.official_baseball_model import analyze_official_event
 from sports_ev_engine.providers.live_baseball import LiveBaseballContext
+from sports_ev_engine.providers.baseball_advanced import AdvancedBaseballSignals
 
-st.set_page_config(page_title="Sports EV Engine v2.5.1",layout="wide")
-st.title("Sports EV Engine v2.5.1")
-st.caption("BUILD v2.5.1-official-parser-fix · 2026-09-28")
+st.set_page_config(page_title="Sports EV Engine v2.6.1",layout="wide")
+st.title("Sports EV Engine v2.6.1")
+st.caption("BUILD v2.6.1-advanced-baseball · 2026-09-28")
 st.caption("종목 선택 → 배당 수집 → 상대전력 Elo + 최근폼 → 시장 prior 캘리브레이션 → BE/Edge/EV → 2~6폴")
 
 def secret(name):
@@ -32,7 +33,7 @@ ODDS_KEY=secret("THE_ODDS_API_KEY")
 FOOTBALL_KEY=secret("API_FOOTBALL_KEY")
 BASEBALL_KEY=None
 
-_BUILD_ID = "2.5.1-parser-fix"
+_BUILD_ID = "2.6.1-advanced-baseball"
 if st.session_state.get("_build_id") != _BUILD_ID:
     for _k in [
         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
@@ -195,7 +196,7 @@ with tabs[0]:
 with tabs[1]:
     st.subheader("⚾ KBO / NPB 완전자동 분석")
     st.write("The Odds API 배당 + KBO/NPB 공식 팀기록 + 예고/확정 선발 + 실제 라인업을 자동 수집해 최종 확률을 다시 계산합니다.")
-    st.caption("v2.5.1: NPB/KBO 공식 팀기록 파서를 HTML 행 직접 인식 방식으로 교체했습니다. KBO는 GameCenter 선발/라인업, NPB는 NPB.jp 예고선발/공식 경기속보 오더를 사용합니다. FINAL일 때만 A등급을 허용합니다.")
+    st.caption("v2.6.1: 공식 선발·라인업에 최근 선발/타선, 좌우 스플릿, 불펜 부담, 구장 날씨를 가능한 범위에서 연결합니다. 확인되지 않은 값은 사용하지 않고 불확실성을 높입니다.")
 
     if not ODDS_KEY:
         st.warning("THE_ODDS_API_KEY가 필요합니다.")
@@ -203,7 +204,7 @@ with tabs[1]:
     league=b1.selectbox("리그",["KBO","NPB"],index=0)
     baseball_key={"KBO":"baseball_kbo","NPB":"baseball_npb"}[league]
     bregion=b2.selectbox("배당 지역",["eu","uk","us","au"],index=0,key="baseball_region")
-    brecent=b3.selectbox("최근 경기 반영",[6,8,10,12],index=2,help="v2.5 공식 팀기록 모델에서는 UI 호환용입니다. KBO 최근10 폼과 현재 시즌 기록을 자동 반영합니다.")
+    brecent=b3.selectbox("최근 경기 반영",[6,8,10,12],index=2,help="확인 가능한 최근 팀/타선 기록 수입니다. 선발은 최근 최대 5경기를 조회합니다.")
     bbooks=b4.slider("최소 북메이커",1,5,2,key="baseball_books")
     bmarkets=st.multiselect("야구 분석 마켓",["h2h","spreads","totals"],default=["h2h","spreads","totals"],key="baseball_markets")
     brun=st.button("⚾ 선택 리그 전체 자동분석",type="primary",disabled=not ODDS_KEY)
@@ -225,6 +226,7 @@ with tabs[1]:
                 st.session_state["baseball_market"]=marketb
                 official=OfficialBaseballStats()
                 live=LiveBaseballContext()
+                advanced=AdvancedBaseballSignals(live)
                 year=pd.Timestamp.now(tz="Asia/Seoul").year
                 stats=official.load(league,year)
                 st.write(
@@ -239,6 +241,17 @@ with tabs[1]:
                     st.write(f"[{i}/{len(groups)}] {home} - {away}")
                     try:
                         ctx=live.context(league,home,away,g.iloc[0]["commence_time"])
+                        try:
+                            ctx["advanced"]=advanced.collect(
+                                league,home,away,g.iloc[0]["commence_time"],ctx,recent_n=brecent
+                            )
+                        except Exception as advanced_error:
+                            ctx["advanced"]={
+                                "advanced_used":0,"advanced_total":7,"advanced_completeness":0.0,
+                                "extra_uncertainty_pp":2.1,
+                                "statuses":{},"notes":[f"advanced collection failed: {type(advanced_error).__name__}: {advanced_error}"],
+                            }
+                        adv=ctx["advanced"]
                         live_rows.append({
                             "경기":f"{home} - {away}",
                             "단계":ctx.get("stage"),
@@ -246,10 +259,29 @@ with tabs[1]:
                             "홈 선발":ctx.get("home_starter") or "미확인",
                             "선발확인":bool(ctx.get("starter_confirmed")),
                             "라인업":("확정" if ctx.get("lineup_confirmed") else "미확정"),
+                            "Advanced":f'{adv.get("advanced_used",0)}/{adv.get("advanced_total",7)}',
+                            "최근 타선":bool((adv.get("statuses") or {}).get("recent_form")),
+                            "선발 최근":bool((adv.get("statuses") or {}).get("starter_recent")),
+                            "불펜":bool((adv.get("statuses") or {}).get("bullpen")),
+                            "좌우":bool((adv.get("statuses") or {}).get("split")),
+                            "구속":bool((adv.get("statuses") or {}).get("velocity")),
+                            "날씨":bool((adv.get("statuses") or {}).get("weather")),
+                            "홈 선발 최근 경기":(adv.get("home_starter_recent") or {}).get("games"),
+                            "홈 선발 최근 K%":(adv.get("home_starter_recent") or {}).get("k_pct"),
+                            "홈 선발 최근 BB%":(adv.get("home_starter_recent") or {}).get("bb_pct"),
+                            "홈 선발 최근 K-BB%":(adv.get("home_starter_recent") or {}).get("kbb_pct"),
+                            "원정 선발 최근 경기":(adv.get("away_starter_recent") or {}).get("games"),
+                            "원정 선발 최근 K-BB%":(adv.get("away_starter_recent") or {}).get("kbb_pct"),
+                            "홈 타선 최근 OPS":(adv.get("home_lineup_form") or {}).get("recent10_ops"),
+                            "원정 타선 최근 OPS":(adv.get("away_lineup_form") or {}).get("recent10_ops"),
+                            "홈 최근 OBP 대리값":(adv.get("home_recent") or {}).get("obp_proxy"),
+                            "원정 최근 OBP 대리값":(adv.get("away_recent") or {}).get("obp_proxy"),
+                            "홈 불펜 최근 구원 이닝":(adv.get("home_bullpen") or {}).get("relief_ip_last3"),
+                            "원정 불펜 최근 구원 이닝":(adv.get("away_bullpen") or {}).get("relief_ip_last3"),
                             "원정 1~9":", ".join(x.get("name","") for x in ctx.get("away_lineup",[])[:9]) or "-",
                             "홈 1~9":", ".join(x.get("name","") for x in ctx.get("home_lineup",[])[:9]) or "-",
                             "소스":ctx.get("source"),
-                            "비고":ctx.get("note","")
+                            "비고":"; ".join(filter(None,[ctx.get("note",""),*(adv.get("notes") or [])]))
                         })
                         analyzed,meta=analyze_official_event(g,stats,league,ctx)
                         metas.append(meta)
@@ -273,7 +305,7 @@ with tabs[1]:
             st.session_state["baseball_failures"]=[]
             st.session_state["baseball_live_rows"]=[]
             st.error(f"야구 자동분석 실패: {type(e).__name__}: {e}")
-            st.caption("v2.5.1은 실패 지점을 소스 URL/파싱 단계까지 표시합니다. 이전 실행 결과는 자동 초기화됩니다.")
+            st.caption("수집 실패 지점과 소스 오류를 확인하세요. 이전 실행 결과는 자동 초기화됩니다.")
 
     if st.session_state.get("baseball_live_rows"):
         st.markdown("### 선발 / 라인업 자동수집 상태")
@@ -288,6 +320,8 @@ with tabs[1]:
             "grade","stage","data_quality","sanity","display_pick","best_book","best_odds","books",
             "consensus_prob","raw_independent_prob","model_win_prob","push_prob","break_even",
             "edge_pp","conservative_ev_roi","uncertainty_pp","starter_confirmed","lineup_confirmed",
+            "advanced_completeness","advanced_used","recent_form_used","starter_recent_used",
+            "bullpen_used","split_used","velocity_used","weather_used",
             "away_starter","away_starter_era","away_starter_whip",
             "home_starter","home_starter_era","home_starter_whip",
             "away_recent_rf","away_recent_ra","home_recent_rf","home_recent_ra",
@@ -301,14 +335,14 @@ with tabs[1]:
         for c in ["edge_pp","uncertainty_pp","away_recent_rf","away_recent_ra","home_recent_rf","home_recent_ra","away_expected_runs","home_expected_runs","away_starter_era","home_starter_era","away_starter_whip","home_starter_whip"]:
             if c in vb: vb[c]=pd.to_numeric(vb[c],errors="coerce").round(2)
         st.dataframe(vb.head(100),use_container_width=True,hide_index=True)
-        st.caption("PRE-LINEUP은 C 이하, STARTER/LINEUP CONFIRMED는 A 제한, FINAL(양팀 선발+공식 라인업)만 A 허용. FINAL은 불확실성을 3.5%p로 낮춥니다.")
+        st.caption("FINAL은 선발과 라인업이 모두 공식 확인된 상태입니다. Advanced 결측은 불확실성에 가산되며, 7개 신호 중 실제 확인된 개수를 표시합니다. 구속·NPB 좌우 스플릿 등 확인 불가 자료는 자동 보정하지 않습니다.")
 
         st.markdown("### 야구 2~6폴")
         sizesb=st.multiselect("야구 폴더 수",[2,3,4,5,6],default=[2,3],key="baseball_parlay_sizes")
         final_only=st.checkbox("자동 다폴은 FINAL 경기만 사용",value=True,key="baseball_final_only")
         rb_parlay=rb.copy()
         if final_only and "stage" in rb_parlay:
-            rb_parlay=rb_parlay[rb_parlay["stage"]=="FINAL"]
+            rb_parlay=rb_parlay[(rb_parlay["stage"]=="FINAL") & (rb_parlay["data_quality"]=="HIGH")]
         elif "data_quality" in rb_parlay:
             rb_parlay=rb_parlay[rb_parlay["data_quality"].isin(["HIGH","MEDIUM"])]
         resb=optimize_parlays(rb_parlay,sizes=sizesb,top_n=10) if not rb_parlay.empty else {n:[] for n in sizesb}
@@ -421,7 +455,7 @@ with tabs[6]:
             try:
                 from sports_ev_engine.telegram_notify import TelegramNotifier
                 TelegramNotifier(telegram_token,telegram_chat)(
-                    "✅ Sports EV Engine v2.5.1\nTelegram 알림 연결 테스트 성공"
+                    "✅ Sports EV Engine v2.6.1\nTelegram 알림 연결 테스트 성공"
                 )
                 st.success("테스트 알림을 보냈습니다.")
             except Exception as e:
