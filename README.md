@@ -1,4 +1,4 @@
-# Sports EV Engine v2.3 — 20K Monitor
+# Sports EV Engine v2.4 — Soccer + KBO/NPB + 20K Monitor
 
 v2.3 adds background odds/lineup monitoring to the v2.2 model.
 
@@ -65,3 +65,38 @@ Default:
 - auto monitor stops before eating into the reserve
 
 The actual provider response header is recorded as `credits_remaining`.
+
+
+## v2.4 KBO / NPB
+
+The Odds API keys:
+- `baseball_kbo`
+- `baseball_npb`
+
+Automatic baseball data source:
+- SofaScore public baseball endpoints (no extra API key)
+- recent league results
+- event matching
+- starting lineups when available
+- starting pitcher identification when available
+- season pitcher statistics when the provider exposes them
+
+Model:
+- recent runs scored / allowed
+- opponent-strength adjustment
+- home-field adjustment
+- starting-pitcher ERA / WHIP / K-BB adjustment when available
+- Negative Binomial run distribution
+- market-prior calibration + outlier shrinkage
+- data quality HIGH / MEDIUM / LOW
+- LOW-quality events are excluded from automatic parlays
+
+Run KBO+NPB monitor:
+```bash
+python monitor_baseball.py
+```
+
+Important:
+SofaScore is an unofficial public-data dependency. Its response shape can change.
+The app fails soft: missing lineup/starter data increases uncertainty and caps grades
+instead of pretending that the data exists.
