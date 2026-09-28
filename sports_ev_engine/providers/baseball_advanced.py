@@ -17,6 +17,8 @@ from bs4 import BeautifulSoup
 from sports_ev_engine.providers.official_baseball import canonical_english
 from sports_ev_engine.providers.live_baseball import _kst_dt, _norm, _clean, _num, _npb_ip, _same_team, NPB_FULL_MAP
 
+PROVIDER_BUILD = "2.7.2"
+
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0 Safari/537.36"

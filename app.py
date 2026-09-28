@@ -17,10 +17,17 @@ from sports_ev_engine.providers.official_baseball import OfficialBaseballStats
 from sports_ev_engine.official_baseball_model import analyze_official_event
 from sports_ev_engine.providers.live_baseball import LiveBaseballContext
 from sports_ev_engine.providers.baseball_advanced import AdvancedBaseballSignals
+from sports_ev_engine.providers import live_baseball as live_provider
+from sports_ev_engine import national_soccer as national_provider
+from sports_ev_engine.providers import baseball_advanced as advanced_provider, the_odds_api as odds_provider
 
-st.set_page_config(page_title="Sports EV Engine v2.7.1",layout="wide")
-st.title("Sports EV Engine v2.7.1")
-st.caption("BUILD v2.7.1-npb-data · 2026-09-28")
+st.set_page_config(page_title="Sports EV Engine v2.7.2",layout="wide")
+st.title("Sports EV Engine v2.7.2")
+st.caption("BUILD v2.7.2-live-status · 2026-09-28")
+if any(getattr(module,"PROVIDER_BUILD",None)!="2.7.2" for module in (live_provider,national_provider,advanced_provider,odds_provider)):
+    st.error("앱과 수집 파일 버전이 다릅니다. ZIP의 sports_ev_engine 폴더까지 전부 반영한 뒤 Streamlit 앱을 Reboot하세요.")
+    st.stop()
+st.caption("수집 모듈 v2.7.2 확인 완료")
 st.caption("종목 선택 → 배당 수집 → 상대전력 Elo + 최근폼 → 시장 prior 캘리브레이션 → BE/Edge/EV → 2~6폴")
 
 def secret(name):
@@ -34,7 +41,7 @@ ODDS_KEY=secret("THE_ODDS_API_KEY")
 FOOTBALL_KEY=secret("API_FOOTBALL_KEY")
 BASEBALL_KEY=None
 
-_BUILD_ID = "2.7.1-npb-data"
+_BUILD_ID = "2.7.2-live-status"
 if st.session_state.get("_build_id") != _BUILD_ID:
     for _k in [
         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
@@ -66,7 +73,7 @@ with tabs[0]:
     else:
         options={"UEFA Nations League":"soccer_uefa_nations_league"}
     label=c1.selectbox("종목",list(options.keys()),index=0)
-    sport_key=options[label]
+    sport_key=options.get(label)
     region=c2.selectbox("배당 지역",["eu","uk","us","au"],index=0)
     recent_n=c3.selectbox("최근 경기 반영", [4,5,6,8,10], index=2)
 
@@ -79,7 +86,7 @@ with tabs[0]:
 
     markets=st.multiselect("분석 마켓",["h2h","spreads","totals"],default=["h2h","spreads","totals"])
     min_books=st.slider("컨센서스 최소 북메이커 수",2,6,3)
-    run=st.button("🚀 선택 종목 전체 자동분석",type="primary",disabled=not(ODDS_KEY and FOOTBALL_KEY))
+    run=st.button("🚀 선택 종목 전체 자동분석",type="primary",disabled=not(ODDS_KEY and FOOTBALL_KEY and sport_key))
 
     if run:
         try:
@@ -200,8 +207,16 @@ with tabs[1]:
     if not ODDS_KEY or not FOOTBALL_KEY:
         st.warning("THE_ODDS_API_KEY와 API_FOOTBALL_KEY가 모두 필요합니다.")
     try:
-        national_sports=[s for s in TheOddsAPI(ODDS_KEY).sports() if is_senior_international(s)] if ODDS_KEY else []
-        national_options={f'{s.get("title",s["key"])} — {s["key"]}':s["key"] for s in national_sports}
+        national_catalog=[s for s in TheOddsAPI(ODDS_KEY).sports(all_sports=True) if is_senior_international(s,include_inactive=True)] if ODDS_KEY else []
+        national_sports=[s for s in national_catalog if s.get("active",True)]
+        national_options={f'{s.get("title",s["key"])} — {s["key"]}':[s["key"]] for s in national_sports}
+        if national_sports:
+            national_options={"전체 활성 A매치 대회":[s["key"] for s in national_sports],**national_options}
+        with st.expander("A매치 대회 제공 상태",expanded=True):
+            st.caption("선택 목록은 배당 제공사가 활성화한 대회입니다. 친선전·예선 등도 제공 여부에 따라 달라집니다. 비활성 또는 미지원 대회는 자동 배당 분석이 불가능합니다.")
+            st.dataframe(pd.DataFrame([{"대회":s.get("title",s["key"]),"제공 상태":"활성" if s.get("active",True) else "비활성(현재 배당 조회 대상 아님)","코드":s["key"]} for s in national_catalog]),hide_index=True,use_container_width=True)
+            if not any("friendl" in (s["key"]+str(s.get("title",""))).lower() for s in national_catalog):
+                st.info("국가대표 친선전이 배당 제공사의 대회 목록에 없습니다. 현재 연결된 자동 배당 소스로는 조회할 수 없습니다.")
     except Exception as e:
         national_options={}
         st.warning(f"국가대표 대회 목록을 읽지 못했습니다: {e}")
@@ -220,8 +235,14 @@ with tabs[1]:
         try:
             with st.status("국가대표 배당과 최근 A매치 기록을 분석 중...",expanded=True) as status:
                 odds_api=TheOddsAPI(ODDS_KEY)
-                sport_key=national_options[national_label]
-                events,headers=odds_api.odds(sport_key,national_region,",".join(national_markets))
+                events=[]; headers={}; event_sports={}; competition_errors=[]
+                for sport_key in national_options[national_label]:
+                    try:
+                        batch,headers=odds_api.odds(sport_key,national_region,",".join(national_markets))
+                        events.extend(batch)
+                        event_sports.update({e["id"]:sport_key for e in batch})
+                    except Exception as e:
+                        competition_errors.append({"경기":sport_key,"이유":str(e)})
                 raw=clean_odds(odds_api.flatten(events))
                 if not raw.empty:
                     ts=pd.to_datetime(raw["commence_time"],utc=True,errors="coerce").dt.tz_convert(ZoneInfo("Asia/Seoul"))
@@ -235,7 +256,7 @@ with tabs[1]:
                         mask &= ts<=now+timedelta(days=7)
                     raw=raw[mask].copy()
                 market=consensus(raw,min_books=national_books) if not raw.empty else pd.DataFrame()
-                all_rows=[]; failures=[]; cache={}
+                all_rows=[]; failures=list(competition_errors); cache={}
                 if not market.empty:
                     foot=APIFootball(FOOTBALL_KEY)
                     for idx,(eid,g) in enumerate(market.groupby("event_id"),1):
@@ -247,7 +268,7 @@ with tabs[1]:
                             if analyzed.empty:
                                 failures.append({"경기":f"{home} - {away}","이유":meta.get("reason","기록 부족")})
                             else:
-                                analyzed["sport_key"]=sport_key
+                                analyzed["sport_key"]=event_sports.get(eid,"")
                                 all_rows.append(analyzed)
                         except Exception as e:
                             failures.append({"경기":f"{home} - {away}","이유":str(e)})
@@ -278,7 +299,7 @@ with tabs[1]:
 with tabs[2]:
     st.subheader("⚾ KBO / NPB 완전자동 분석")
     st.write("The Odds API 배당 + KBO/NPB 공식 팀기록 + 예고/확정 선발 + 실제 라인업을 자동 수집해 최종 확률을 다시 계산합니다.")
-    st.caption("v2.7.1: NPB 선발 이름 매칭과 최근 팀 OPS 수집을 보강하고, 핵심 기록이 없으면 DATA PARTIAL로 표시합니다.")
+    st.caption("v2.7.2: NPB 선발 이름 매칭과 최근 팀 OPS 수집을 보강하고, 핵심 기록이 없으면 DATA PARTIAL로 표시합니다.")
 
     if not ODDS_KEY:
         st.warning("THE_ODDS_API_KEY가 필요합니다.")
@@ -323,6 +344,15 @@ with tabs[2]:
                     st.write(f"[{i}/{len(groups)}] {home} - {away}")
                     try:
                         ctx=live.context(league,home,away,g.iloc[0]["commence_time"])
+                        started=pd.Timestamp(g.iloc[0]["commence_time"])<=pd.Timestamp.now(tz="UTC")
+                        if started:
+                            live_rows.append({"경기":f"{home} - {away}","단계":"시작시간 경과·사전분석 제외",
+                                "라인업":ctx.get("lineup_label") or ("확인" if ctx.get("lineup_confirmed") else "원본 미수집"),
+                                "선발 오더 여부":ctx.get("lineup_kind")=="starting",
+                                "원정 1~9":", ".join(x.get("name","") for x in ctx.get("away_lineup",[])),
+                                "홈 1~9":", ".join(x.get("name","") for x in ctx.get("home_lineup",[])),
+                                "비고":"시작 예정시간이 지났습니다. 최신 오더는 교체 선수를 포함할 수 있으며 사전 모델로 라이브 배당을 분석하지 않습니다."})
+                            continue
                         try:
                             ctx["advanced"]=advanced.collect(
                                 league,home,away,g.iloc[0]["commence_time"],ctx,recent_n=brecent
@@ -346,7 +376,7 @@ with tabs[2]:
                             "원정 선발":ctx.get("away_starter") or "미확인",
                             "홈 선발":ctx.get("home_starter") or "미확인",
                             "선발확인":bool(ctx.get("starter_confirmed")),
-                            "라인업":("확정" if ctx.get("lineup_confirmed") else "미확정"),
+                            "라인업":(ctx.get("lineup_label") or ("확정" if ctx.get("lineup_confirmed") else "원본 미수집")),
                             "Advanced":f'{adv.get("advanced_used",0)}/{adv.get("advanced_total",7)}',
                             "최근 타선":bool((adv.get("statuses") or {}).get("recent_form")),
                             "선발 최근":bool((adv.get("statuses") or {}).get("starter_recent")),
@@ -455,7 +485,9 @@ with tabs[2]:
             st.dataframe(f,use_container_width=True,hide_index=True)
     elif "baseball_ranked" in st.session_state:
         partial=sum(x.get("단계")=="DATA PARTIAL" for x in st.session_state.get("baseball_live_rows",[]))
-        if partial:
+        if any(x.get("단계")=="시작시간 경과·사전분석 제외" for x in st.session_state.get("baseball_live_rows",[])):
+            st.info("시작 예정시간이 지난 경기는 위 표에서 오더 수집 상태만 확인합니다. 경기중 배당용 분석은 지원하지 않습니다.")
+        elif partial:
             st.warning(f"{partial}경기는 선발 최근 기록 또는 팀 OPS가 없어 DATA PARTIAL입니다. +EV 후보 판단을 보류하고 자동 다폴에서 제외했습니다.")
         elif st.session_state.get("baseball_failures"):
             st.warning("분석 실패 경기 때문에 후보를 계산하지 못했습니다. 아래 경기별 실패 이유를 확인하세요.")

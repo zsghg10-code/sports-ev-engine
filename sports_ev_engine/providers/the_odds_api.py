@@ -2,6 +2,8 @@
 import requests
 import pandas as pd
 
+PROVIDER_BUILD = "2.7.2"
+
 BASE = "https://api.the-odds-api.com/v4"
 
 class TheOddsAPI:
@@ -10,8 +12,10 @@ class TheOddsAPI:
             raise RuntimeError("THE_ODDS_API_KEY가 없습니다.")
         self.api_key = api_key
 
-    def sports(self):
-        r = requests.get(f"{BASE}/sports", params={"apiKey":self.api_key}, timeout=30)
+    def sports(self, all_sports=False):
+        params={"apiKey":self.api_key}
+        if all_sports: params["all"]="true"
+        r = requests.get(f"{BASE}/sports", params=params, timeout=30)
         r.raise_for_status()
         return r.json()
 

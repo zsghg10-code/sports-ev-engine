@@ -23,6 +23,8 @@ KBO_SCHEDULE_BASE = "https://www.koreabaseball.com/ws/Schedule.asmx"
 KBO_REFERER = "https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx"
 KBO_PITCHER_STATS = "https://www.koreabaseball.com/Record/Player/PitcherBasic/Basic1.aspx"
 
+PROVIDER_BUILD = "2.7.2"
+
 NPB_GAMES = "https://npb.jp/games/{year}/"
 NPB_STARTERS = "https://npb.jp/announcement/starter/"
 NPB_BATTING = "https://npb.jp/bis/{year}/stats/idb1_{code}.html"
@@ -489,8 +491,10 @@ class NPBOfficialLive:
         away, home = candidates[0], candidates[1]
         # Do not label a completed game's latest substituted order as confirmed pregame lineup.
         pregame = "試合開始前" in text or "試合前" in text
-        confirmed = pregame and len(home) >= 9 and len(away) >= 9
-        return {"confirmed": confirmed, "home": home, "away": away}
+        confirmed = all({p["order"] for p in order} == set(range(1,10)) for order in (home,away))
+        return {"confirmed": confirmed, "home": home, "away": away,
+                "kind": "starting" if pregame else "current",
+                "label": "확정(선발 오더)" if pregame else "확인(경기중·최신 오더)"}
 
     def _batting(self, team, year):
         key=(team,year)
@@ -599,6 +603,8 @@ class NPBOfficialLive:
             "away_starter_english":self._english_player_name(away_entry.get("player_id")),
             "home_starter_stats":home_p,"away_starter_stats":away_p,
             "home_lineup":lu.get("home",[]),"away_lineup":lu.get("away",[]),
+            "lineup_label":lu.get("label") if lineup_ok else "원본 미수집",
+            "lineup_kind":lu.get("kind"),
             "home_lineup_strength":hf,"away_lineup_strength":af,
             "source":"NPB.jp official","note":"","game_id":None,"game_url":url,
         }
