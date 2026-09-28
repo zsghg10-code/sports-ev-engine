@@ -6,7 +6,7 @@ def optimize_parlays(df, sizes=(2,3,4,5,6), top_n=10):
     usable=df[
         (df["grade"].isin(["A","B","C"])) &
         (df["conservative_ev_roi"]>0) &
-        (df["sanity"]!="OUTLIER_SHRUNK")
+        (~df["sanity"].isin(["OUTLIER_SHRUNK","HIGH_DISAGREEMENT"]))
     ].copy()
 
     records=usable.to_dict("records")

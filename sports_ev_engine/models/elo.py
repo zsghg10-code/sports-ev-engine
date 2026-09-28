@@ -33,7 +33,7 @@ def build_elo(fixtures, base=1500.0, k=22.0, home_adv=55.0):
 
         rh = ratings.get(home, base)
         ra = ratings.get(away, base)
-        exp_h = expected_score(rh + home_adv, ra)
+        exp_h = expected_score(rh + (0.0 if fx.get("neutral") else home_adv), ra)
         actual_h = 1.0 if hg > ag else 0.5 if hg == ag else 0.0
 
         gd = abs(hg-ag)

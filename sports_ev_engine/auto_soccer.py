@@ -7,6 +7,8 @@ import pandas as pd
 from sports_ev_engine.models.soccer_auto import score_matrix, price_from_matrix, norm_name
 from sports_ev_engine.models.elo import build_elo, opponent_adjusted_form
 from sports_ev_engine.core.ev import analyze_bet
+from sports_ev_engine.free_national import adjust_lambdas
+from sports_ev_engine.review_policy import review_reason, REVIEW_STATES
 
 def _side_for_row(r):
     home=norm_name(r["home_team"])
@@ -83,12 +85,11 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
     home_lookup=names.get(norm_name(home),home)
     away_lookup=names.get(norm_name(away),away)
     cutoff_ts=_cutoff_ts(first.get("commence_time"))
-    fixtures=competition_pool.get("fixtures",[])
-
-    ratings=competition_pool.get("elo")
-    if ratings is None:
-        ratings=build_elo(fixtures, home_adv=20.0 if international else 55.0)
-        competition_pool["elo"]=ratings
+    if cutoff_ts is None:
+        return pd.DataFrame(),{"status":"data_failed","reason":"경기 시작 시각 미확인"}
+    # Only regulation-time fixtures before this event; never reuse future-contaminated Elo.
+    fixtures=[f for f in competition_pool.get("fixtures",[]) if f.get("fixture",{}).get("status",{}).get("short")=="FT" and 0<int(f.get("fixture",{}).get("timestamp") or 0)<cutoff_ts]
+    ratings=build_elo(fixtures, home_adv=20.0 if international else 55.0)
 
     hf=opponent_adjusted_form(fixtures,home_lookup,ratings,cutoff_ts,recent_n=recent_n)
     af=opponent_adjusted_form(fixtures,away_lookup,ratings,cutoff_ts,recent_n=recent_n)
@@ -104,14 +105,19 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
 
     he=ratings.get(norm_name(home_lookup),1500.0)
     ae=ratings.get(norm_name(away_lookup),1500.0)
-    hl,al=_build_lambdas(hf,af,he,ae,home_adv=20.0 if international else 55.0)
+    ctx=competition_pool.get("manual_context",{})
+    neutral=bool(ctx and all(c.get("neutral") for c in ctx.values()))
+    hl,al=_build_lambdas(hf,af,he,ae,home_adv=(0.0 if neutral or competition_pool.get("venue_unknown") else 20.0) if international else 55.0)
+    lineup_ok=False; evidence_note=""
+    if international:hl,al,lineup_ok,evidence_note=adjust_lambdas(hl,al,competition_pool)
     matrix=score_matrix(hl,al)
 
     sample=min(hf["matches"],af["matches"])
     base_unc=3.5 + (1.5 if sample<5 else 0.0) + (1.0 if sample<3 else 0.0)
     if international:
         # The cross-competition Elo graph is thin and match venues may be neutral.
-        base_unc += 3.0
+        base_unc += 3.0 + float(competition_pool.get("extra_uncertainty",0))
+        if not lineup_ok:base_unc += 1.0
 
     rows=[]
     for _,r in event_rows.iterrows():
@@ -175,6 +181,7 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
             "final_market_gap_pp":final_gap_pp,
             "model_weight":model_weight,
             "sanity":sanity,
+            "review_reason":review_reason(raw_gap_pp,sample,international),
             "home_elo":he,
             "away_elo":ae,
             "home_lambda":hl,
@@ -192,7 +199,10 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
             "conservative_ev_roi":ev.conservative_ev_roi,
             "kelly_scaled":ev.kelly_scaled,
             "grade":grade,
-            "data_source":"A매치 최근 기록" if international else "대회 기록",
+            "data_source":competition_pool.get("data_source","A매치 최근 기록") if international else "대회 기록",
+            "evidence_note":evidence_note,
+            "lineup_confirmed":lineup_ok,
+            "parlay_eligible":bool((lineup_ok or not international) and grade in {"A","B","C"} and ev.conservative_ev_roi>0 and sanity not in REVIEW_STATES),
         })
         rows.append(d)
 

@@ -6,6 +6,23 @@ import pandas as pd
 import streamlit as st
 
 from sports_ev_engine.providers.the_odds_api import TheOddsAPI
+from sports_ev_engine.free_national import (download_history, prepare_history, read_csv, combine_history, free_pool, event_context, blank_csv, HISTORY_COLUMNS, CONTEXT_COLUMNS)
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_free_history():
+    return download_history()
+
+from sports_ev_engine import auto_national as auto_national_provider
+from sports_ev_engine.auto_national import collect as collect_automatic, fetch_board, automatic_pool, fetch_lineup, DataHold
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cached_public_board(league,year):
+    return fetch_board(league,year)
+
+@st.cache_data(ttl=300, show_spinner=False)
+def cached_public_lineup(event):
+    return fetch_lineup(event)
+
 from sports_ev_engine.providers.api_football import APIFootball
 from sports_ev_engine.providers import api_football as football_provider
 from sports_ev_engine.providers.mlb_statsapi import schedule as mlb_schedule
@@ -14,22 +31,24 @@ from sports_ev_engine.auto_soccer import analyze_event
 from sports_ev_engine.competition_form import build_competition_pool
 from sports_ev_engine.national_soccer import is_senior_international, build_national_event_pool
 from sports_ev_engine.core.parlay import optimize_parlays
+from sports_ev_engine.review_policy import candidate_mask, review_mask
 from sports_ev_engine.providers.official_baseball import OfficialBaseballStats
 from sports_ev_engine.official_baseball_model import analyze_official_event
 from sports_ev_engine.providers.live_baseball import LiveBaseballContext
 from sports_ev_engine.providers.baseball_advanced import AdvancedBaseballSignals
 from sports_ev_engine.providers import live_baseball as live_provider
 from sports_ev_engine import national_soccer as national_provider
+from sports_ev_engine import free_national as free_provider
 from sports_ev_engine.providers import baseball_advanced as advanced_provider, the_odds_api as odds_provider
 
-st.set_page_config(page_title="Sports EV Engine v2.7.3",layout="wide")
-st.title("Sports EV Engine v2.7.3")
-st.caption("BUILD v2.7.3-live-status · 2026-09-28")
-if any(getattr(module,"PROVIDER_BUILD",None)!="2.7.3" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider)):
+st.set_page_config(page_title="Sports EV Engine v2.9.1",layout="wide")
+st.title("Sports EV Engine v2.9.1")
+st.caption("BUILD v2.9.1-auto-national · 2026-09-28")
+if any(getattr(module,"PROVIDER_BUILD",None)!="2.9.1" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider)):
     st.error("앱과 수집 파일 버전이 다릅니다. ZIP의 sports_ev_engine 폴더까지 전부 반영한 뒤 Streamlit 앱을 Reboot하세요.")
     st.stop()
 FootballAccessError=football_provider.FootballAccessError
-st.caption("수집 모듈 v2.7.3 확인 완료")
+st.caption("수집 모듈 v2.9.1 확인 완료")
 st.caption("종목 선택 → 배당 수집 → 상대전력 Elo + 최근폼 → 시장 prior 캘리브레이션 → BE/Edge/EV → 2~6폴")
 
 def secret(name):
@@ -43,11 +62,11 @@ ODDS_KEY=secret("THE_ODDS_API_KEY")
 FOOTBALL_KEY=secret("API_FOOTBALL_KEY")
 BASEBALL_KEY=None
 
-_BUILD_ID = "2.7.3-live-status"
+_BUILD_ID = "2.9.1-auto-national"
 if st.session_state.get("_build_id") != _BUILD_ID:
     for _k in [
         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
-        "baseball_raw_odds","baseball_market","national_ranked","national_failures"
+        "ranked","failures","event_meta","raw_odds","market","baseball_raw_odds","baseball_market","national_ranked","national_failures","national_evidence","national_sources","national_status"
     ]:
         st.session_state.pop(_k, None)
     st.session_state["_build_id"] = _BUILD_ID
@@ -56,7 +75,8 @@ if st.session_state.get("_build_id") != _BUILD_ID:
 tabs=st.tabs(["⚡ 완전자동 축구","🌍 축구 A매치","⚾ KBO/NPB 자동분석","실시간 배당","시장 가격","MLB","다폴","📡 모니터링","설정"])
 
 with tabs[0]:
-    st.subheader("완전자동 축구 분석")
+    st.subheader("클럽 축구 자동분석")
+    st.info("국가대표·네이션스리그는 🌍 축구 A매치 탭의 무료 자동 수집을 사용하세요. 클럽 모델과 분리했습니다.")
     st.write("배당·대회 경기 데이터를 자동 수집하고 Elo/상대전력/최근폼으로 독립 확률을 만든 뒤 시장 무마진 확률로 과대괴리를 보정합니다.")
     st.caption("v2.2: 최근 득실만 보던 문제를 수정해 Elo 상대전력 보정 + 시장 prior + 이상치 자동 격리를 적용합니다.")
     if not ODDS_KEY:
@@ -68,13 +88,13 @@ with tabs[0]:
     if ODDS_KEY:
         try:
             sports=TheOddsAPI(ODDS_KEY).sports()
-            soccer=[s for s in sports if s.get("active") and str(s.get("key","")).startswith("soccer_")]
+            soccer=[s for s in sports if s.get("active") and str(s.get("key","")).startswith("soccer_") and not is_senior_international(s)]
             options={f'{s.get("title")} — {s.get("description","")}':s["key"] for s in soccer}
         except Exception:
-            options={"UEFA Nations League":"soccer_uefa_nations_league"}
+            options={}
     else:
-        options={"UEFA Nations League":"soccer_uefa_nations_league"}
-    label=c1.selectbox("종목",list(options.keys()),index=0)
+        options={}
+    label=c1.selectbox("클럽 대회",list(options.keys()),index=0,key="club_competition_v291")
     sport_key=options.get(label)
     region=c2.selectbox("배당 지역",["eu","uk","us","au"],index=0)
     recent_n=c3.selectbox("최근 경기 반영", [4,5,6,8,10], index=2)
@@ -92,6 +112,8 @@ with tabs[0]:
 
     if run:
         try:
+            if is_senior_international({"key":sport_key,"title":label}):
+                raise ValueError("국가대표 경기는 축구 A매치 탭에서 분석하세요.")
             with st.status("배당과 팀 데이터를 자동 분석 중...",expanded=True) as status:
                 odds_api=TheOddsAPI(ODDS_KEY)
                 events,headers=odds_api.odds(sport_key,region,",".join(markets))
@@ -165,14 +187,15 @@ with tabs[0]:
 
     if "ranked" in st.session_state and not st.session_state["ranked"].empty:
         ranked=st.session_state["ranked"]
-        st.markdown("### 오늘 +EV 후보")
-        view=ranked[ranked["grade"]!="PASS"].copy()
+        st.markdown("### 조건을 통과한 +EV 후보")
+        view=ranked[candidate_mask(ranked)].copy()
+        if view.empty:st.info("괴리/기대값 기준을 통과한 후보가 없습니다. 검토 대상을 억지로 추천하지 않습니다.")
         cols=["grade","sanity","display_pick","best_book","best_odds","books",
               "consensus_prob","raw_independent_prob","model_win_prob","push_prob",
               "break_even","raw_market_gap_pp","final_market_gap_pp","edge_pp",
               "ev_roi","conservative_ev_roi","uncertainty_pp","model_weight",
               "home_elo","away_elo","home_form_matches","away_form_matches",
-              "home_lambda","away_lambda"]
+              "home_lambda","away_lambda","review_reason"]
         view=view[cols]
         for c in ["consensus_prob","raw_independent_prob","model_win_prob","push_prob","break_even","model_weight"]:
             view[c]=(view[c]*100).round(1)
@@ -186,12 +209,18 @@ with tabs[0]:
         view["home_lambda"]=view["home_lambda"].round(2)
         view["away_lambda"]=view["away_lambda"].round(2)
         st.dataframe(view.head(100),use_container_width=True,hide_index=True)
+        review=ranked[review_mask(ranked)]
+        st.caption(f"전체 {len(ranked)}개 옵션 · 후보 {len(view)}개 · 검토 {len(review)}개 (경기 수가 아닌 승무패/라인별 옵션 수)")
+        with st.expander(f"검토 대상 {len(review)}개 — 추천/자동 다폴 제외"):
+            st.dataframe(review[["grade","sanity","display_pick","raw_market_gap_pp","final_market_gap_pp","review_reason","home_form_matches","away_form_matches"]],hide_index=True)
+        st.download_button("축구 전체 진단 CSV",ranked.to_csv(index=False).encode("utf-8-sig"),file_name="soccer_diagnostics.csv")
+
 
         st.markdown("""
 **sanity 해석**
 - `OK`: 모델-시장 괴리 정상 범위
 - `CHECK`: 원모델과 시장 차이가 다소 큼
-- `HIGH_DISAGREEMENT`: 강한 괴리, 등급 하향
+- `HIGH_DISAGREEMENT`: 강한 괴리, 후보/자동 다폴 제외
 - `OUTLIER_SHRUNK`: 과도한 괴리. 시장 prior로 강하게 축소하고 자동 다폴 제외
 """)
         st.caption("raw_independent_prob=Elo+상대보정 최근폼 원모델, model_win_prob=시장 prior로 캘리브레이션한 최종확률. OUTLIER_SHRUNK는 자동 조합 제외.")
@@ -205,9 +234,15 @@ with tabs[0]:
 
 with tabs[1]:
     st.subheader("🌍 국가대표 축구 A매치 자동분석")
-    st.caption("친선전·월드컵 예선·네이션스리그 등에서 배당이 있는 성인 국가대표 경기를 분석합니다. 양 팀의 최근 3년 A매치 기록을 대회 구분 없이 모읍니다.")
-    if not ODDS_KEY or not FOOTBALL_KEY:
-        st.warning("THE_ODDS_API_KEY와 API_FOOTBALL_KEY가 모두 필요합니다.")
+    st.caption("친선전·월드컵 예선·네이션스리그 등에서 배당이 있는 성인 국가대표 경기를 분석합니다. 선택한 소스의 최근 3년 기록을 사용하며, 무료 소스의 대회 범위와 최신성은 아래에서 확인하세요.")
+    if not ODDS_KEY:
+        st.warning("배당 자동 조회에는 THE_ODDS_API_KEY가 필요합니다. 무료 기록 모드는 API_FOOTBALL_KEY 없이 동작합니다.")
+    record_mode=st.radio("A매치 기록 소스",["무료 자동 수집","API-Football"],key="national_record_mode_v290")
+    st.caption("무료 모드는 공개 경기 결과를 자동 수집합니다. CSV 입력은 필요 없습니다. 핵심 기록이 부족하면 분석을 보류합니다. 시작 2시간 이내에는 공개 선발 명단도 조회합니다.")
+    history_file=None; context_file=None
+    with st.expander("무료 자동 수집 범위"):
+        st.write("선택 대회와 관련된 국가대표 대회·예선·친선전의 올해/전년도 공개 기록을 수집합니다. 90분 종료가 확인된 경기만 사용하며 연장·승부차기 결과는 제외합니다. 최신성·표본 기준 미달은 분석 보류로 표시합니다.")
+        st.write("라인업은 공개 소스에서 선발 11명이 확인될 때만 반영합니다. xG·결장·PPDA 자동 수집은 지원하지 않아 미수집으로 표시합니다. 현재 모델은 백테스트로 검증된 예측기가 아닙니다.")
     try:
         national_catalog=[s for s in TheOddsAPI(ODDS_KEY).sports(all_sports=True) if is_senior_international(s,include_inactive=True)] if ODDS_KEY else []
         national_sports=[s for s in national_catalog if s.get("active",True)]
@@ -229,13 +264,19 @@ with tabs[1]:
     national_label=n1.selectbox("A매치 대회",list(national_options),key="national_sport")
     national_region=n2.selectbox("배당 지역",["eu","uk","us","au"],key="national_region")
     national_recent=n3.selectbox("최근 A매치 반영",[4,5,6,8,10],index=2,key="national_recent")
-    national_scope=st.selectbox("경기 범위",["오늘(KST)","앞으로 3일","앞으로 7일","전체"],key="national_scope")
+    national_scope=st.selectbox("경기 범위",["오늘(KST)","앞으로 3일","앞으로 7일","전체"],index=1,key="national_scope")
     national_markets=st.multiselect("A매치 분석 마켓",["h2h","spreads","totals"],default=["h2h"],key="national_markets")
     national_books=st.slider("A매치 최소 북메이커",1,6,2,key="national_books")
-    national_run=st.button("🌍 선택 대회 A매치 자동분석",type="primary",disabled=not(ODDS_KEY and FOOTBALL_KEY and national_label and national_markets))
+    national_run=st.button("🌍 선택 대회 A매치 자동분석",type="primary",disabled=not(ODDS_KEY and (record_mode!="API-Football" or FOOTBALL_KEY) and national_label and national_markets))
     if national_run:
         try:
             with st.status("국가대표 배당과 최근 A매치 기록을 분석 중...",expanded=True) as status:
+                st.session_state["national_ranked"]=pd.DataFrame()
+                st.session_state["national_failures"]=[]
+                st.session_state["national_evidence"]=[]
+                records=[]; context_frame=None; public_events=[]
+                st.session_state["national_sources"]=[]
+                st.session_state["national_status"]=[]
                 odds_api=TheOddsAPI(ODDS_KEY)
                 events=[]; headers={}; event_sports={}; competition_errors=[]
                 for sport_key in national_options[national_label]:
@@ -258,21 +299,50 @@ with tabs[1]:
                         mask &= ts<=now+timedelta(days=7)
                     raw=raw[mask].copy()
                 market=consensus(raw,min_books=national_books) if not raw.empty else pd.DataFrame()
+                if record_mode=="무료 자동 수집" and not market.empty:
+                    public_records,public_events,diagnostics=collect_automatic(national_options[national_label],fetch=cached_public_board,progress=lambda i,n,d:st.write(f"공개 기록 {i}/{n}: {d['소스']} — {d['상태']}"))
+                    st.session_state["national_sources"]=diagnostics
+                    if any(d['상태']=='수집 실패' for d in diagnostics):
+                        st.warning("일부 공개 소스 수집에 실패했습니다. 확보한 기록으로 기준을 검사하며, 전체 최근 경기 수집을 보장하지 않습니다. 아래 소스 진단을 확인하세요.")
+                    try:
+                        baseline,_=cached_free_history()
+                        records=combine_history(baseline,public_records)
+                    except Exception as e:
+                        records=public_records
+                        st.session_state["national_sources"].append({"소스":"공개 친선전 보조 자료","상태":"수집 실패","이유":str(e)})
                 all_rows=[]; failures=list(competition_errors); cache={}; access_blocked=False
-                st.caption("API-Football 요청은 한도 보호를 위해 간격을 두고 전송하며, 성공한 기록은 재사용합니다. 최초 전체 조회는 몇 분 걸릴 수 있습니다.")
+                if record_mode=="API-Football":st.caption("API-Football 요청은 한도 보호를 위해 간격을 두고 전송하며, 성공한 기록은 재사용합니다. 최초 전체 조회는 몇 분 걸릴 수 있습니다.")
                 if not market.empty:
-                    foot=APIFootball(FOOTBALL_KEY)
+                    foot=APIFootball(FOOTBALL_KEY) if record_mode=="API-Football" else None
                     for idx,(eid,g) in enumerate(market.groupby("event_id"),1):
                         home,away=g.iloc[0][["home_team","away_team"]]
                         st.write(f"[{idx}/{market['event_id'].nunique()}] {home} - {away}")
                         try:
-                            pool=build_national_event_pool(foot,home,away,g.iloc[0]["commence_time"],cache,national_recent)
+                            kickoff=g.iloc[0]["commence_time"]
+                            pool=build_national_event_pool(foot,home,away,kickoff,cache,national_recent) if foot else automatic_pool(records,public_events,home,away,kickoff,national_recent)
+                            pool["manual_context"]={}
+                            if not foot and any(d.get('상태')=='수집 실패' for d in st.session_state['national_sources']):
+                                pool['extra_uncertainty']=pool.get('extra_uncertainty',0)+2.0
+                            if not foot:
+                                from sports_ev_engine.models.soccer_auto import norm_name
+                                matches=[e for e in public_events if norm_name(e['home'])==norm_name(home) and norm_name(e['away'])==norm_name(away) and pd.Timestamp(e['kickoff'])==pd.Timestamp(kickoff)]
+                                if len(matches)==1:
+                                    pool['venue_unknown']=matches[0].get('neutral') is None
+                                    try:pool['manual_context']=cached_public_lineup(matches[0])
+                                    except Exception as exc:st.session_state['national_sources'].append({'소스':f'{home} - {away} 라인업','상태':'수집 실패','이유':str(exc)})
+                            for side,info in pool.get("evidence",{}).items():
+                                st.session_state["national_evidence"].append({"경기":f"{home} - {away}","팀":home if side=="home" else away,**info})
                             analyzed,meta=analyze_event(g,pool,recent_n=national_recent)
                             if analyzed.empty:
                                 failures.append({"경기":f"{home} - {away}","이유":meta.get("reason","기록 부족")})
+                                st.session_state["national_status"].append({"경기":f"{home} - {away}","상태":"자료 부족 · 분석 보류","이유":meta.get("reason","기록 부족")})
                             else:
                                 analyzed["sport_key"]=event_sports.get(eid,"")
                                 all_rows.append(analyzed)
+                                st.session_state["national_status"].append({"경기":f"{home} - {away}","상태":"분석 가능","이유":"기록 기준 충족 · xG/결장 미수집", "라인업":"양 팀 확인" if pool.get("manual_context",{}).get("home",{}).get("confirmed") and pool.get("manual_context",{}).get("away",{}).get("confirmed") else "미확인"})
+                        except DataHold as e:
+                            failures.append({"경기":f"{home} - {away}","이유":str(e)})
+                            st.session_state["national_status"].append({"경기":f"{home} - {away}","상태":"자료 부족 · 분석 보류","이유":str(e)})
                         except FootballAccessError as e:
                             access_blocked=True
                             failures.append({"경기":f"{home} - {away}","이유":str(e)})
@@ -281,6 +351,7 @@ with tabs[1]:
                             break
                         except Exception as e:
                             failures.append({"경기":f"{home} - {away}","이유":str(e)})
+                            st.session_state["national_status"].append({"경기":f"{home} - {away}","상태":"수집/분석 실패","이유":str(e)})
                 ranked=pd.concat(all_rows,ignore_index=True) if all_rows else pd.DataFrame()
                 if not ranked.empty:
                     ranked=ranked.sort_values(["conservative_ev_roi","edge_pp"],ascending=False)
@@ -289,15 +360,34 @@ with tabs[1]:
                 status.update(label=f"{'기록 수집 제한으로 중단' if access_blocked else '완료'} — Odds API 남은 요청량 {headers.get('x-requests-remaining','확인 불가')}",state="error" if access_blocked else "complete")
         except Exception as e:
             st.error(f"A매치 분석 실패: {e}")
+    if st.session_state.get("national_status"):
+        st.markdown("#### 경기별 처리 상태")
+        st.dataframe(pd.DataFrame(st.session_state["national_status"]),hide_index=True)
+    if st.session_state.get("national_sources"):
+        with st.expander("실제 수집 결과 · 소스 진단"):
+            st.dataframe(pd.DataFrame(st.session_state["national_sources"]),hide_index=True)
     nr=st.session_state.get("national_ranked")
     if isinstance(nr,pd.DataFrame) and not nr.empty:
         st.markdown("### A매치 확률·EV 후보")
-        columns=["grade","sanity","display_pick","best_book","best_odds","books","model_win_prob","push_prob","break_even","edge_pp","conservative_ev_roi","uncertainty_pp","home_form_matches","away_form_matches","home_elo","away_elo"]
-        view=nr.loc[nr["grade"]!="PASS",columns].copy()
+        columns=["grade","sanity","display_pick","best_book","best_odds","books","model_win_prob","push_prob","break_even","edge_pp","conservative_ev_roi","uncertainty_pp","home_form_matches","away_form_matches","home_elo","away_elo","lineup_confirmed","parlay_eligible","data_source","evidence_note"]
+        columns += ["raw_market_gap_pp","final_market_gap_pp","review_reason"]
+        view=nr.loc[candidate_mask(nr),columns].copy()
+        if view.empty:st.info("괴리/기대값 기준을 통과한 후보가 없습니다.")
         for col in ("model_win_prob","push_prob","break_even","conservative_ev_roi"):
             view[col]=(view[col]*100).round(1)
         st.dataframe(view.head(100),use_container_width=True,hide_index=True)
-        st.caption("최근 A매치 표본과 상대 기록만으로 계산한 추정치입니다. 중립 개최지·명단 변동 등은 자동 확인하지 못해 불확실성을 높이고 A등급은 부여하지 않습니다. 기존 자동 다폴에는 포함되지 않습니다.")
+        review=nr[review_mask(nr)]
+        st.caption(f"전체 {len(nr)}개 옵션 · 후보 {len(view)}개 · 검토 {len(review)}개")
+        with st.expander(f"A매치 검토 대상 {len(review)}개 — 추천/자동 다폴 제외"):
+            st.dataframe(review[["grade","sanity","display_pick","raw_market_gap_pp","final_market_gap_pp","review_reason","home_form_matches","away_form_matches"]],hide_index=True)
+
+        st.caption("공개 기록은 누락·업데이트 지연이 있을 수 있습니다. 라인업은 공개된 선발 명단을 사용하며 xG·결장은 미수집입니다. 모델은 실전 적중률 검증을 마치지 않았습니다.")
+        st.download_button("전체 분석 CSV 다운로드",nr.to_csv(index=False).encode("utf-8-sig"),file_name="national_analysis.csv")
+        eligible=nr[nr["parlay_eligible"]].sort_values("conservative_ev_roi",ascending=False).head(20)
+        st.markdown("#### 양 팀 라인업 확인된 +EV 후보: 2폴")
+        combos=optimize_parlays(eligible,sizes=[2],top_n=5).get(2,[]) if not eligible.empty else []
+        if combos:st.dataframe(pd.DataFrame(combos),hide_index=True)
+        else:st.info("라인업과 +EV 기준을 충족한 서로 다른 2경기가 없습니다. 조합을 만들지 않습니다.")
     elif "national_ranked" in st.session_state:
         st.info("기록 수집 실패로 분석 결과를 만들지 못했습니다. 아래 제외 사유를 확인하세요." if st.session_state.get("national_failures") else "선택 범위의 배당 또는 분석 가능한 후보가 없습니다.")
     if st.session_state.get("national_failures"):
@@ -305,10 +395,17 @@ with tabs[1]:
             st.dataframe(pd.DataFrame(st.session_state["national_failures"]),use_container_width=True,hide_index=True)
 
 
+    if st.session_state.get("national_evidence"):
+        st.markdown("#### 사용한 최근 기록과 출처")
+        evidence=pd.DataFrame(st.session_state["national_evidence"])
+        if (evidence["age_days"]>45).any():
+            st.warning("45일 넘게 지난 기록을 사용하는 팀이 있습니다. 최근 대회 결과가 빠졌을 수 있습니다. 수집 진단과 마지막 기록일을 확인하세요.")
+        st.dataframe(evidence.rename(columns={"last_date":"마지막 기록일","age_days":"경과 일수","matches":"사용 경기 수","xg_matches":"xG 표본 수","sources":"출처"}),hide_index=True)
+
 with tabs[2]:
     st.subheader("⚾ KBO / NPB 완전자동 분석")
     st.write("The Odds API 배당 + KBO/NPB 공식 팀기록 + 예고/확정 선발 + 실제 라인업을 자동 수집해 최종 확률을 다시 계산합니다.")
-    st.caption("v2.7.3: NPB 선발 이름 매칭과 최근 팀 OPS 수집을 보강하고, 핵심 기록이 없으면 DATA PARTIAL로 표시합니다.")
+    st.caption("v2.9.1: NPB 선발 이름 매칭과 최근 팀 OPS 수집을 보강하고, 핵심 기록이 없으면 DATA PARTIAL로 표시합니다.")
 
     if not ODDS_KEY:
         st.warning("THE_ODDS_API_KEY가 필요합니다.")

@@ -1,3 +1,45 @@
+# v2.9.1 — REVIEW 표시 및 국가대표 경로 수정
+
+최신 설치·변경 내용은 REVIEW_FIX_KO.md를 읽으세요. 2.9.0 기능을 포함한 전체 패키지입니다.
+
+아래는 이전 버전 안내입니다.
+
+# Sports EV Engine v2.9.0 — 무료 자동 A매치
+
+현재 설치·사용법: **AUTO_AMATCH_KO.md**.
+CSV 없이 공개 기록을 자동 조회합니다. 불충분한 경기에는 분석 보류 사유를 표시합니다.
+기존 Odds API 키만 필요합니다. xG/결장은 자동 수집하지 않습니다.
+ZIP 전체 반영 후 Reboot하고 v2.9.0을 확인하세요.
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+python -m unittest discover -s tests -v
+```
+
+아래는 이전 버전 안내입니다. v2.8.0의 CSV 화면 안내는 현재 기본 화면에 적용되지 않습니다.
+
+# Sports EV Engine v2.8.0 — 무료 A매치 기록 모드
+
+설치·입력 안내는 FREE_AMATCH_KO.md와 PATCH_NOTES_KO.md를 먼저 읽으세요.
+
+- 기본 A매치 모드는 API-Football 키 없이 공개 친선전 기록과 선택적 CSV를 사용합니다.
+- 자동 배당 조회에는 기존 THE_ODDS_API_KEY가 필요하며 해당 서비스 한도는 그대로 적용됩니다.
+- 90분 결과 CSV로 예선·네이션스리그 등 최근 기록을 추가할 수 있습니다.
+- xG, 라인업, 결장은 자동 수집하지 않습니다. 출처가 있는 사용자 CSV만 사용합니다.
+- API-Football은 선택 모드로 유지합니다. 유료 시즌 접근 제한을 우회하지 않습니다.
+- A매치 무료 모드는 대화형 탭에 적용됩니다. 기존 클럽 축구와 모니터링 워커는 API-Football 경로를 유지합니다.
+- 검증: 6개 테스트 통과(무료 모드 Streamlit UI 포함, 배당 입력은 모의 데이터).
+- 공개 원본 다운로드/파싱은 실제로 확인했습니다. 사용자 배포 서버·실제 API 키로 실행한 결과는 확인하지 않았습니다.
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+python -m unittest discover -s tests -v
+```
+
+## 이전 기능 및 버전 설명 (현재 무료 모드는 위 안내 우선)
+
 # Sports EV Engine v2.7.3 — Soccer A-matches + KBO/NPB + 20K Monitor
 
 v2.7.3 adds API-Football request pacing (6.2 seconds between uncached requests
