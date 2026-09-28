@@ -15,8 +15,8 @@ from sports_ev_engine.core.parlay import optimize_parlays
 from sports_ev_engine.providers.sofascore_baseball import SofaScoreBaseball
 from sports_ev_engine.auto_baseball import analyze_baseball_event, build_league_pool
 
-st.set_page_config(page_title="Sports EV Engine v2.4",layout="wide")
-st.title("Sports EV Engine v2.4")
+st.set_page_config(page_title="Sports EV Engine v2.4.1",layout="wide")
+st.title("Sports EV Engine v2.4.1")
 st.caption("종목 선택 → 배당 수집 → 상대전력 Elo + 최근폼 → 시장 prior 캘리브레이션 → BE/Edge/EV → 2~6폴")
 
 def secret(name):
@@ -183,7 +183,7 @@ with tabs[0]:
 with tabs[1]:
     st.subheader("⚾ KBO / NPB 완전자동 분석")
     st.write("The Odds API 배당 + SofaScore 경기/라인업/선발 데이터로 최근 득실·상대전력·선발투수를 자동 반영합니다.")
-    st.caption("선발/라인업 데이터가 아직 없으면 LOW/MEDIUM 품질로 표시하고 A/B 등급을 제한합니다. 시장 확률을 그대로 복사하지 않고 독립 모델을 만든 뒤 과대 괴리만 보정합니다.")
+    st.caption("v2.4.1: NPB/KBO 리그·시즌을 SofaScore tournament 목록에서 직접 찾고, 실패 시 팀별 최근경기로 자동 fallback합니다. 선발/라인업 미확인은 LOW/MEDIUM으로 표시합니다.")
 
     if not ODDS_KEY:
         st.warning("THE_ODDS_API_KEY가 필요합니다.")
@@ -387,7 +387,7 @@ with tabs[6]:
             try:
                 from sports_ev_engine.telegram_notify import TelegramNotifier
                 TelegramNotifier(telegram_token,telegram_chat)(
-                    "✅ Sports EV Engine v2.4\nTelegram 알림 연결 테스트 성공"
+                    "✅ Sports EV Engine v2.4.1\nTelegram 알림 연결 테스트 성공"
                 )
                 st.success("테스트 알림을 보냈습니다.")
             except Exception as e:
@@ -428,6 +428,13 @@ API_FOOTBALL_KEY = "..."
 TELEGRAM_BOT_TOKEN = "..."
 TELEGRAM_CHAT_ID = "..."
 ```
+
+**v2.4.1 야구 데이터 소스 수정**
+- current-day schedule 매칭이 실패해도 NPB/KBO tournament/season을 직접 발견
+- tournament 최근경기 → 일별 일정 → 팀별 최근경기 3단 fallback
+- `api.sofascore.com` 실패 시 `www.sofascore.com/api/v1` 자동 재시도
+- 데이터 실패 시 실제 provider 오류를 화면에 표시
+- NPB 영문 팀명 alias 확장
 
 **v2.4 KBO/NPB 추가**
 - `baseball_kbo`, `baseball_npb` 실시간 배당 자동수집

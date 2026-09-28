@@ -255,30 +255,74 @@ def _selection_side(r):
 def build_league_pool(provider: SofaScoreBaseball, league: str, current_event=None):
     league=league.upper()
     seed=current_event
+    tid=sid=None
+    source=[]
+
     if seed:
         meta=provider.event_meta(seed)
-        tid=meta.get("tournament_id"); sid=meta.get("season_id")
-    else:
-        tid=sid=None
+        tid=meta.get("tournament_id")
+        sid=meta.get("season_id")
+        source.append("current_event")
+
+    # v2.4.1: direct league/season discovery if current-event matching fails.
+    if not tid or not sid:
+        try:
+            resolved=provider.resolve_league(league, datetime.now(timezone.utc).year)
+            if resolved:
+                t=resolved.get("tournament") or {}
+                s=resolved.get("season") or {}
+                tid=tid or t.get("id")
+                sid=sid or s.get("id")
+                source.append("unique_tournaments")
+        except Exception:
+            pass
 
     events=[]
     if tid and sid:
-        events=provider.tournament_last_events(tid,sid,pages=4)
+        events=provider.tournament_last_events(tid,sid,pages=8)
+        if events:
+            source.append("tournament_history")
 
     if len(events)<20:
-        fallback=provider.recent_events_fallback(league,days=35)
+        try:
+            fallback=provider.recent_events_fallback(league,days=35)
+        except Exception:
+            fallback=[]
         by_id={e.get("id"):e for e in events if e.get("id") is not None}
         for e in fallback:
             if e.get("id") is not None:
                 by_id[e["id"]]=e
         events=list(by_id.values())
+        if fallback:
+            source.append("daily_schedule_fallback")
 
     return {
         "league":league,
         "events":events,
         "tournament_id":tid,
         "season_id":sid,
+        "source":source,
+        "provider_error":provider.last_error,
     }
+
+
+def _merge_team_history(provider, events, team_name):
+    """Last-resort team-specific history lookup."""
+    try:
+        team_id=provider.find_team_id(team_name)
+    except Exception:
+        team_id=None
+    if not team_id:
+        return events
+    try:
+        extra=provider.team_last_events(team_id,pages=3)
+    except Exception:
+        extra=[]
+    by_id={e.get("id"):e for e in events if e.get("id") is not None}
+    for e in extra:
+        if e.get("id") is not None:
+            by_id[e["id"]]=e
+    return list(by_id.values())
 
 
 def analyze_baseball_event(event_market: pd.DataFrame, provider: SofaScoreBaseball, league: str, recent_n=10, pool=None):
@@ -289,14 +333,35 @@ def analyze_baseball_event(event_market: pd.DataFrame, provider: SofaScoreBaseba
     if pool is None:
         pool=build_league_pool(provider,league,sofa_event)
     events=pool.get("events",[])
+
+    # If league history is missing/incomplete, resolve each team's own recent games.
+    strengths=_team_strength(events) if events else {}
+    hf=_opponent_adjusted_form(events,home,strengths,recent_n=recent_n) if events else None
+    af=_opponent_adjusted_form(events,away,strengths,recent_n=recent_n) if events else None
+
+    if not hf:
+        events=_merge_team_history(provider,events,home)
+    if not af:
+        events=_merge_team_history(provider,events,away)
+
     if not events:
-        return pd.DataFrame(),{"status":"data_failed","reason":"SofaScore recent league games unavailable"}
+        detail=pool.get("provider_error") or provider.last_error or "no events returned"
+        return pd.DataFrame(),{
+            "status":"data_failed",
+            "reason":f"SofaScore league/team history unavailable ({detail})"
+        }
 
     strengths=_team_strength(events)
     hf=_opponent_adjusted_form(events,home,strengths,recent_n=recent_n)
     af=_opponent_adjusted_form(events,away,strengths,recent_n=recent_n)
     if not hf or not af:
-        return pd.DataFrame(),{"status":"data_failed","reason":"recent team form unavailable"}
+        missing=[]
+        if not hf: missing.append(home)
+        if not af: missing.append(away)
+        return pd.DataFrame(),{
+            "status":"data_failed",
+            "reason":"recent team form unavailable: "+", ".join(missing)
+        }
 
     league_mean=_league_environment(events)
     lineup={"home":[],"away":[],"confirmed":False}

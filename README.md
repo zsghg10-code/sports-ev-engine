@@ -1,4 +1,4 @@
-# Sports EV Engine v2.4 — Soccer + KBO/NPB + 20K Monitor
+# Sports EV Engine v2.4.1 — Soccer + KBO/NPB + 20K Monitor
 
 v2.3 adds background odds/lineup monitoring to the v2.2 model.
 
@@ -100,3 +100,18 @@ Important:
 SofaScore is an unofficial public-data dependency. Its response shape can change.
 The app fails soft: missing lineup/starter data increases uncertainty and caps grades
 instead of pretending that the data exists.
+
+
+## v2.4.1 NPB/KBO source fix
+
+v2.4 could fail with `SofaScore recent league games unavailable` when the daily event
+match was not enough to discover the current tournament/season IDs.
+
+v2.4.1 uses a three-stage history strategy:
+
+1. Discover NPB/KBO from `/sport/baseball/unique-tournaments` and select the current season.
+2. Fetch paginated `/unique-tournament/{id}/season/{id}/events/last/{page}`.
+3. If still incomplete, fall back to daily schedules and then team-specific `/team/{id}/events/last/{page}`.
+
+Two SofaScore hosts are tried automatically. Provider errors are surfaced in the UI instead
+of being hidden behind a generic "unavailable" message.
