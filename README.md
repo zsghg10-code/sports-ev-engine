@@ -1,3 +1,24 @@
+# Sports EV Engine v3.0.0 — ChatGPT-style Analysis Engine
+
+최신 안내는 **V3_CHATGPT_STYLE_KO.md**를 먼저 읽으세요. v2.9.4의 기존 기능을 유지하면서 다음 계층을 추가했습니다.
+
+- 실제 xG·확정 라인업·결장·선수 중요도·휴식일을 사용할 수 있을 때만 반영하는 deep context ledger
+- 미수집값을 지어내지 않는 `MISSING` 원칙
+- 실패 경로를 먼저 적는 counter-case engine
+- 득점환경/모델-시장 비중을 흔드는 27개 robustness stress test
+- `ROBUST / SENSITIVE / FRAGILE / REVIEW / PASS / DATA_HOLD` 판정
+- 자동 다폴은 `ROBUST` + 기존 FINAL/품질 게이트 통과 행만 사용
+- 경기 전 배당·확률·EV를 append-only snapshot으로 보존
+- 경기 후 score 연결, Brier / Log loss / ROI 평가
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+python settle_once.py
+```
+
+아래는 이전 버전 기록입니다.
+
 # v2.9.4
 
 전체 경기 분석표와 후보/라인업/조합 숫자를 분리했습니다. ANALYSIS_V294_KO.md를 확인하세요. 아래는 이전 버전 기록입니다.

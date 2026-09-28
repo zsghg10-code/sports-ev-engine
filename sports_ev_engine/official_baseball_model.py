@@ -3,6 +3,9 @@ import math
 import pandas as pd
 from sports_ev_engine.core.ev import analyze_bet
 from sports_ev_engine.providers.official_baseball import canonical_english
+from sports_ev_engine.reasoning_engine import (
+    SignalLedger, build_counter_cases, scenario_assessment, baseball_scenarios, decision_fields
+)
 
 
 def _nbinom_pmf(k, mean, dispersion=5.0):
@@ -142,6 +145,19 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
     if stage=="FINAL" and completeness < .55:
         quality="MEDIUM"
 
+    # v3 audit ledger. These signals were already applied in _apply_context; the
+    # ledger makes their availability and omissions explicit without double-counting.
+    signal_ledger=SignalLedger()
+    statuses=adv.get("statuses") or {}
+    for key,label in (("starter_recent","starter_recent_3_5"),("recent_form","recent_team_form"),
+                      ("bullpen","bullpen_workload"),("split","platoon_split"),
+                      ("velocity","velocity_trend"),("weather","park_weather")):
+        signal_ledger.add(label,bool(statuses.get(key)),"context" if statuses.get(key) else "neutral",0,.75 if statuses.get(key) else 0,
+                          source=context.get("source","") or hs.get("source",""),
+                          note="used by advanced baseball context" if statuses.get(key) else "not returned by wired source")
+    signal_ledger.add("confirmed_lineup",bool(context.get("lineup_confirmed")),"context",0,.9,source=context.get("source","") or "")
+    signal_ledger.add("confirmed_starters",bool(context.get("starter_confirmed")),"context",0,.9,source=context.get("source","") or "")
+
     rows=[]
     for _,r in event_market.iterrows():
         side=_side(r)
@@ -189,5 +205,24 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
             "weather_precip_mm": ((context.get("advanced") or {}).get("weather") or {}).get("precip_mm"),
             "source":context.get("source") or hs.get("source"),
         })
+
+        scenario_rows=baseball_scenarios(
+            hm,am,lambda mm:_market_probs(r["market"],side,point,mm),_matrix
+        )
+        robust=scenario_assessment(
+            odds=float(r["best_odds"]),market_prob=mp,model_weight=mw,scenarios=scenario_rows,
+            base_ev=ev.ev_roi,sanity=sanity,data_ready=(quality in {"HIGH","MEDIUM"}),
+            lineup_required=True,lineup_confirmed=bool(context.get("lineup_confirmed")) and stage=="FINAL",
+        )
+        counter_cases,counter_risk=build_counter_cases(
+            sample_matches=min(int(hs.get("games") or 0),int(aws.get("games") or 0)),
+            lineup_confirmed=bool(context.get("lineup_confirmed")),sanity=sanity,
+            uncertainty_pp=unc,signal_coverage=signal_ledger.coverage,stage=stage,
+            advanced_completeness=completeness,
+        )
+        legacy_ok=grade in {"A","B","C"} and ev.conservative_ev_roi>0 and sanity not in {"OUTLIER_SHRUNK","HIGH_DISAGREEMENT"}
+        d.update(decision_fields(ledger=signal_ledger,counter_cases=counter_cases,counter_risk=counter_risk,
+                                 robust=robust,legacy_eligible=legacy_ok))
+        d["parlay_eligible"]=bool(d["v3_parlay_eligible"]) and stage=="FINAL" and quality=="HIGH"
         rows.append(d)
     return pd.DataFrame(rows),{"status":"ok","home":home,"away":away,"data_quality":quality,"stage":stage,"home_expected_runs":hm,"away_expected_runs":am,"source":context.get("source") or hs.get("source"),"context":context}

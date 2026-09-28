@@ -2,7 +2,7 @@
 import requests
 import pandas as pd
 
-PROVIDER_BUILD = "2.9.4"
+PROVIDER_BUILD = "3.0.0"
 
 BASE = "https://api.the-odds-api.com/v4"
 
@@ -29,6 +29,16 @@ class TheOddsAPI:
         r = requests.get(f"{BASE}/sports/{sport_key}/odds", params=params, timeout=45)
         r.raise_for_status()
         return r.json(), dict(r.headers)
+
+    def scores(self, sport_key, days_from=3, event_ids=None):
+        params={"apiKey":self.api_key,"dateFormat":"iso"}
+        if days_from is not None:params["daysFrom"]=max(1,min(3,int(days_from)))
+        if event_ids:
+            if isinstance(event_ids,(list,tuple,set)):event_ids=",".join(str(x) for x in event_ids)
+            params["eventIds"]=str(event_ids)
+        r=requests.get(f"{BASE}/sports/{sport_key}/scores",params=params,timeout=45)
+        r.raise_for_status()
+        return r.json(),dict(r.headers)
 
     @staticmethod
     def flatten(events):

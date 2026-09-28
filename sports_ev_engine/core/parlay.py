@@ -3,11 +3,14 @@ import itertools, math
 
 def optimize_parlays(df, sizes=(2,3,4,5,6), top_n=10):
     results={}
-    usable=df[
-        (df["grade"].isin(["A","B","C"])) &
-        (df["conservative_ev_roi"]>0) &
-        (~df["sanity"].isin(["OUTLIER_SHRUNK","HIGH_DISAGREEMENT"]))
-    ].copy()
+    if "v3_parlay_eligible" in df.columns:
+        usable=df[df["v3_parlay_eligible"].fillna(False).astype(bool)].copy()
+    else:
+        usable=df[
+            (df["grade"].isin(["A","B","C"])) &
+            (df["conservative_ev_roi"]>0) &
+            (~df["sanity"].isin(["OUTLIER_SHRUNK","HIGH_DISAGREEMENT"]))
+        ].copy()
 
     records=usable.to_dict("records")
     for n in sizes:
@@ -26,8 +29,11 @@ def optimize_parlays(df, sizes=(2,3,4,5,6), top_n=10):
             high_dis=sum(1 for x in combo if x.get("sanity")=="HIGH_DISAGREEMENT")
             hit*=0.985**high_dis
 
+            # v3 favours compact combinations: every extra leg after 2 carries a
+            # small survival/correlation penalty even when each leg is individually robust.
+            if n>2: hit*=0.985**(n-2)
             ev=hit*odds-1
-            score=ev+0.20*hit-0.005*avg_unc
+            score=ev+0.20*hit-0.005*avg_unc-0.012*max(0,n-2)
             rows.append({
                 "조합":" + ".join(x["display_pick"] for x in combo),
                 "배당":odds,

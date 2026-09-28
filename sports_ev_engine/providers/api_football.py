@@ -6,7 +6,7 @@ import time
 from threading import Lock
 from datetime import date, datetime, timezone
 
-PROVIDER_BUILD = "2.9.4"
+PROVIDER_BUILD = "3.0.0"
 
 class FootballAccessError(RuntimeError):
     """Account-wide failure: stop the batch instead of repeating it for every team."""
@@ -101,3 +101,25 @@ class APIFootball:
 
     def injuries(self,fixture_id):
         return self._get("injuries",{"fixture":int(fixture_id)})
+
+    def fixture_statistics(self,fixture_id):
+        return self._get("fixtures/statistics",{"fixture":int(fixture_id)})
+
+    def fixture_players(self,fixture_id):
+        return self._get("fixtures/players",{"fixture":int(fixture_id)})
+
+    def team_players(self,team_id,season,max_pages=2):
+        out=[]
+        for page in range(1,max(1,int(max_pages))+1):
+            rows=self._get("players",{"team":int(team_id),"season":int(season),"page":page})
+            if not rows:break
+            out.extend(rows)
+            if len(rows)<20:break
+        # Keep one record per player id; provider can repeat a player across competitions.
+        merged={}
+        for row in out:
+            pid=(row.get("player") or {}).get("id")
+            if pid is None:continue
+            if pid not in merged:merged[pid]=row
+            else:merged[pid].setdefault("statistics",[]).extend(row.get("statistics") or [])
+        return list(merged.values())

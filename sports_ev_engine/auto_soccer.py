@@ -10,6 +10,10 @@ from sports_ev_engine.core.ev import analyze_bet
 from sports_ev_engine.national_policy import scenario_matrices, assess, POLICY_ID
 from sports_ev_engine.free_national import adjust_lambdas
 from sports_ev_engine.review_policy import review_reason, REVIEW_STATES
+from sports_ev_engine.reasoning_engine import (
+    apply_soccer_context, build_counter_cases, scenario_assessment,
+    soccer_scenarios, decision_fields,
+)
 
 def _side_for_row(r):
     home=norm_name(r["home_team"])
@@ -111,6 +115,15 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
     hl,al=_build_lambdas(hf,af,he,ae,home_adv=(0.0 if neutral or competition_pool.get("venue_unknown") else 20.0) if international else 55.0)
     lineup_ok=False; evidence_note=""
     if international:hl,al,lineup_ok,evidence_note=adjust_lambdas(hl,al,competition_pool)
+
+    # v3 context layer: xG, lineup/player importance, injuries and rest are used only
+    # when the provider actually returned them. Missing deep signals are never imputed.
+    deep_ctx=competition_pool.get("event_context") or {"deep_context_attempted":False}
+    hl,al,context_unc,signal_ledger=apply_soccer_context(
+        hl,al,deep_ctx,hf,af,international=international
+    )
+    if not international and deep_ctx.get("lineup_confirmed"):
+        lineup_ok=True
     matrix=score_matrix(hl,al)
     scenarios=scenario_matrices(hl,al) if international else []
 
@@ -120,6 +133,7 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
         # The cross-competition Elo graph is thin and match venues may be neutral.
         base_unc += 3.0 + float(competition_pool.get("extra_uncertainty",0))
         if not lineup_ok:base_unc += 1.0
+    base_unc += float(context_unc)
 
     # A mutually exclusive 1X2 market must use one shared blend weight.
     h2h_gaps=[]
@@ -229,6 +243,38 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
             d['kelly_scaled']=0.0
             # Generic optimizer must not silently treat these as calibrated picks.
             d['parlay_eligible']=False
+
+        # v3 counter-case + robustness layer.  Perturb both teams' scoring rates and
+        # the model-vs-market calibration weight.  This is a stress test, not a CI.
+        scenario_rows=soccer_scenarios(
+            hl,al,
+            lambda mm: price_from_matrix(mm,r["market"],side,line),
+            score_matrix,
+        )
+        lineup_required=bool(international or deep_ctx.get("deep_context_attempted"))
+        robust=scenario_assessment(
+            odds=float(r["best_odds"]),market_prob=market_prob,model_weight=model_weight,
+            scenarios=scenario_rows,base_ev=ev.ev_roi,sanity=sanity,
+            data_ready=sample>=3,lineup_required=lineup_required,lineup_confirmed=lineup_ok,
+        )
+        counter_cases,counter_risk=build_counter_cases(
+            sample_matches=sample,lineup_confirmed=lineup_ok if lineup_required else None,
+            sanity=sanity,uncertainty_pp=base_unc,
+            signal_coverage=signal_ledger.coverage if deep_ctx.get("deep_context_attempted") else None,
+            international=international,
+        )
+        if international:
+            legacy_ok=bool(d.get('scenario_candidate')) and d.get('selection_status') not in {'REVIEW','DATA_HOLD','PASS'}
+        else:
+            legacy_ok=grade in {'A','B','C'} and ev.conservative_ev_roi>0 and sanity not in REVIEW_STATES
+        d.update(decision_fields(ledger=signal_ledger,counter_cases=counter_cases,counter_risk=counter_risk,
+                                 robust=robust,legacy_eligible=legacy_ok))
+        d['deep_context_attempted']=bool(deep_ctx.get('deep_context_attempted'))
+        d['deep_context_reason']=deep_ctx.get('deep_context_reason','')
+        if international:
+            d['scenario_parlay_eligible']=bool(d.get('scenario_parlay_eligible')) and bool(d['v3_parlay_eligible'])
+        else:
+            d['parlay_eligible']=bool(d.get('parlay_eligible')) and bool(d['v3_parlay_eligible'])
         rows.append(d)
 
     return pd.DataFrame(rows),{

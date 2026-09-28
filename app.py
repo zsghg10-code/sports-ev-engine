@@ -45,16 +45,19 @@ from sports_ev_engine.providers import live_baseball as live_provider
 from sports_ev_engine import national_soccer as national_provider
 from sports_ev_engine import free_national as free_provider
 from sports_ev_engine.providers import baseball_advanced as advanced_provider, the_odds_api as odds_provider
+from sports_ev_engine.deep_soccer_context import collect_deep_context
+from sports_ev_engine import deep_soccer_context as deep_soccer_provider
+from sports_ev_engine.prediction_store import record_frame, auto_settle, evaluation, pending_sport_keys
 
-st.set_page_config(page_title="Sports EV Engine v2.9.4",layout="wide")
-st.title("Sports EV Engine v2.9.4")
-st.caption("BUILD v2.9.4-auto-national · 2026-09-28")
-if any(getattr(module,"PROVIDER_BUILD",None)!="2.9.4" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider)):
+st.set_page_config(page_title="Sports EV Engine v3.0.0",layout="wide")
+st.title("Sports EV Engine v3.0.0")
+st.caption("BUILD v3.0.0-chatgpt-style · 2026-09-28")
+if any(getattr(module,"PROVIDER_BUILD",None)!="3.0.0" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider,deep_soccer_provider)):
     st.error("앱과 수집 파일 버전이 다릅니다. ZIP의 sports_ev_engine 폴더까지 전부 반영한 뒤 Streamlit 앱을 Reboot하세요.")
     st.stop()
 FootballAccessError=football_provider.FootballAccessError
-st.caption("수집 모듈 v2.9.4 확인 완료")
-st.caption("종목 선택 → 배당 수집 → 상대전력 Elo + 최근폼 → 시장 prior 캘리브레이션 → BE/Edge/EV → 2~6폴")
+st.caption("수집 모듈 v3.0.0 확인 완료")
+st.caption("독립 모델 → 정밀 컨텍스트 → 반증 검사 → 시장 캘리브레이션 → 27개 스트레스 시나리오 → EV/ROBUST 판정 → 기록·사후검증")
 
 def secret(name):
     try:
@@ -67,7 +70,7 @@ ODDS_KEY=secret("THE_ODDS_API_KEY")
 FOOTBALL_KEY=secret("API_FOOTBALL_KEY")
 BASEBALL_KEY=None
 
-_BUILD_ID = "2.9.4-auto-national"
+_BUILD_ID = "3.0.0-chatgpt-style"
 if st.session_state.get("_build_id") != _BUILD_ID:
     for _k in [
         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
@@ -77,7 +80,7 @@ if st.session_state.get("_build_id") != _BUILD_ID:
     st.session_state["_build_id"] = _BUILD_ID
 
 
-tabs=st.tabs(["⚡ 완전자동 축구","🌍 축구 A매치","⚾ KBO/NPB 자동분석","실시간 배당","시장 가격","MLB","다폴","📡 모니터링","설정"])
+tabs=st.tabs(["⚡ 완전자동 축구","🌍 축구 A매치","⚾ KBO/NPB 자동분석","실시간 배당","시장 가격","MLB","다폴","📡 모니터링","설정","📊 모델 검증"])
 
 with tabs[0]:
     st.subheader("클럽 축구 자동분석")
@@ -113,6 +116,8 @@ with tabs[0]:
 
     markets=st.multiselect("분석 마켓",["h2h","spreads","totals"],default=["h2h","spreads","totals"])
     min_books=st.slider("컨센서스 최소 북메이커 수",2,6,3)
+    deep_context_on=st.checkbox("🧠 v3 정밀 컨텍스트 (24시간 이내 xG·확정 라인업·결장·선수 영향·휴식일)",value=True,
+        help="API-Football 추가 호출을 사용합니다. 실제 반환된 데이터만 반영하며 없는 항목은 MISSING으로 남깁니다.")
     run=st.button("🚀 선택 종목 전체 자동분석",type="primary",disabled=not(ODDS_KEY and FOOTBALL_KEY and sport_key))
 
     if run:
@@ -169,7 +174,18 @@ with tabs[0]:
                     home=g.iloc[0]["home_team"]; away=g.iloc[0]["away_team"]
                     st.write(f"[{idx}/{total_events}] {home} - {away}")
                     try:
-                        analyzed,meta=analyze_event(g,pool,recent_n=recent_n)
+                        event_pool=dict(pool)
+                        if deep_context_on:
+                            try:
+                                event_pool["event_context"]=collect_deep_context(
+                                    foot,pool,home,away,g.iloc[0]["commence_time"],
+                                    season=(pool.get("seasons") or [target_year])[0],horizon_hours=24
+                                )
+                            except Exception as deep_error:
+                                event_pool["event_context"]={"deep_context_attempted":True,"deep_context_reason":f"collector failed: {type(deep_error).__name__}: {deep_error}"}
+                        else:
+                            event_pool["event_context"]={"deep_context_attempted":False,"deep_context_reason":"disabled in UI"}
+                        analyzed,meta=analyze_event(g,event_pool,recent_n=recent_n)
                         if not analyzed.empty:
                             analyzed["sport_key"]=sport_key
                             all_rows.append(analyzed)
@@ -182,7 +198,12 @@ with tabs[0]:
                 st.session_state["failures"]=failures
                 ranked=pd.concat(all_rows,ignore_index=True) if all_rows else pd.DataFrame()
                 if not ranked.empty:
-                    ranked=ranked.sort_values(["conservative_ev_roi","edge_pp"],ascending=False)
+                    _v3_order={"ROBUST":0,"SENSITIVE":1,"REVIEW":2,"FRAGILE":3,"PASS":4,"DATA_HOLD":5}
+                    ranked["_v3_order"]=ranked["v3_decision_status"].map(_v3_order).fillna(9)
+                    ranked=ranked.sort_values(["_v3_order","robust_ev_p10","conservative_ev_roi"],ascending=[True,False,False]).drop(columns=["_v3_order"])
+                    saved=record_frame(ranked,sport_key=sport_key,sport_family="soccer_club")
+                    settle_info=auto_settle(odds_api,sport_key)
+                    st.caption(f"v3 불변 예측 스냅샷 {saved}개 추가 · 자동 정산 {settle_info.get('settled',0)}개" + (f" · 정산 오류: {settle_info.get('error')}" if settle_info.get('error') else ""))
                 st.session_state["ranked"]=ranked
                 st.session_state["event_meta"]=event_meta
                 remain=headers.get("x-requests-remaining")
@@ -195,17 +216,21 @@ with tabs[0]:
         st.markdown("### 조건을 통과한 +EV 후보")
         view=ranked[candidate_mask(ranked)].copy()
         if view.empty:st.info("괴리/기대값 기준을 통과한 후보가 없습니다. 검토 대상을 억지로 추천하지 않습니다.")
-        cols=["grade","sanity","display_pick","best_book","best_odds","books",
+        cols=["v3_decision_status","robust_positive_ratio","robust_ev_p10","robust_ev_min","counter_case_risk","signal_coverage",
+              "grade","sanity","display_pick","best_book","best_odds","books",
               "consensus_prob","raw_independent_prob","model_win_prob","push_prob",
               "break_even","raw_market_gap_pp","final_market_gap_pp","edge_pp",
               "ev_roi","conservative_ev_roi","uncertainty_pp","model_weight",
               "home_elo","away_elo","home_form_matches","away_form_matches",
-              "home_lambda","away_lambda","review_reason"]
+              "home_lambda","away_lambda","missing_signals","counter_case_summary","review_reason"]
+        cols=[c for c in cols if c in view.columns]
         view=view[cols]
         for c in ["consensus_prob","raw_independent_prob","model_win_prob","push_prob","break_even","model_weight"]:
             view[c]=(view[c]*100).round(1)
-        for c in ["ev_roi","conservative_ev_roi"]:
-            view[c]=(view[c]*100).round(1)
+        for c in ["ev_roi","conservative_ev_roi","robust_ev_p10","robust_ev_min"]:
+            if c in view:view[c]=(view[c]*100).round(1)
+        for c in ["robust_positive_ratio","signal_coverage"]:
+            if c in view:view[c]=(view[c]*100).round(1)
         view["edge_pp"]=view["edge_pp"].round(1)
         view["raw_market_gap_pp"]=view["raw_market_gap_pp"].round(1)
         view["final_market_gap_pp"]=view["final_market_gap_pp"].round(1)
@@ -270,8 +295,10 @@ with tabs[1]:
     national_region=n2.selectbox("배당 지역",["eu","uk","us","au"],key="national_region")
     national_recent=n3.selectbox("최근 A매치 반영",[4,5,6,8,10],index=2,key="national_recent")
     national_scope=st.selectbox("경기 범위",["오늘(KST)","앞으로 3일","앞으로 7일","전체"],index=1,key="national_scope")
-    national_markets=st.multiselect("A매치 분석 마켓",["h2h","spreads","totals"],default=["h2h"],key="national_markets")
+    national_markets=st.multiselect("A매치 분석 마켓",["h2h","spreads","totals"],default=["h2h","totals"],key="national_markets")
     national_books=st.slider("A매치 최소 북메이커",1,6,2,key="national_books")
+    national_deep=st.checkbox("🧠 API-Football 선택 시 v3 정밀 컨텍스트 사용",value=True,key="national_deep",
+        help="경기 24시간 이내 xG/라인업/결장/선수 중요도를 추가 수집합니다. 무료 공개모드는 확보된 공개 데이터만 사용합니다.")
     national_run=st.button("🌍 선택 대회 A매치 자동분석",type="primary",disabled=not(ODDS_KEY and (record_mode!="API-Football" or FOOTBALL_KEY) and national_label and national_markets))
     if national_run:
         try:
@@ -338,6 +365,15 @@ with tabs[1]:
                                     except Exception as exc:st.session_state['national_sources'].append({'소스':f'{home} - {away} 라인업','상태':'수집 실패','이유':str(exc)})
                             for side,info in pool.get("evidence",{}).items():
                                 st.session_state["national_evidence"].append({"경기":f"{home} - {away}","팀":home if side=="home" else away,**info})
+                            if foot and national_deep:
+                                try:
+                                    pool["event_context"]=collect_deep_context(
+                                        foot,pool,home,away,kickoff,season=pd.Timestamp(kickoff).year,horizon_hours=24
+                                    )
+                                except Exception as deep_error:
+                                    pool["event_context"]={"deep_context_attempted":True,"deep_context_reason":f"collector failed: {type(deep_error).__name__}: {deep_error}"}
+                            else:
+                                pool["event_context"]={"deep_context_attempted":False,"deep_context_reason":"free-source mode or deep context disabled"}
                             analyzed,meta=analyze_event(g,pool,recent_n=national_recent)
                             if analyzed.empty:
                                 failures.append({"경기":f"{home} - {away}","이유":meta.get("reason","기록 부족")})
@@ -360,7 +396,13 @@ with tabs[1]:
                             st.session_state["national_status"].append({"경기":f"{home} - {away}","상태":"수집/분석 실패","이유":str(e)})
                 ranked=pd.concat(all_rows,ignore_index=True) if all_rows else pd.DataFrame()
                 if not ranked.empty:
-                    ranked=ranked.sort_values(["scenario_ev_min","point_ev_roi"],ascending=False)
+                    ranked=ranked.sort_values(["robust_positive_ratio","robust_ev_p10","scenario_ev_min","point_ev_roi"],ascending=False)
+                    saved=record_frame(ranked,sport_family="soccer_national")
+                    settled_total=0; settlement_errors=[]
+                    for sk in sorted(x for x in ranked.get("sport_key",pd.Series(dtype=str)).dropna().unique() if x):
+                        info=auto_settle(odds_api,sk);settled_total+=info.get("settled",0)
+                        if info.get("error"):settlement_errors.append(f"{sk}: {info['error']}")
+                    st.caption(f"v3 불변 예측 스냅샷 {saved}개 추가 · 자동 정산 {settled_total}개" + (" · 일부 종목 정산 미지원/오류" if settlement_errors else ""))
                 st.session_state["national_ranked"]=ranked
                 st.session_state["national_failures"]=failures
                 status.update(label=f"{'기록 수집 제한으로 중단' if access_blocked else '완료'} — Odds API 남은 요청량 {headers.get('x-requests-remaining','확인 불가')}",state="error" if access_blocked else "complete")
@@ -393,7 +435,7 @@ with tabs[1]:
         st.markdown("### 전체 경기 자동분석 · 승무패 / 언더오버")
         st.caption("확률이 가장 높은 선택과 배당 대비 기대값이 가장 높은 선택을 따로 표시합니다. EV가 음수인 경기도 표시합니다. 언더오버 요약은 양방향 배당이 있는 라인 중 북메이커 수와 시장 균형으로 대표 라인을 고릅니다. 모든 라인과 핸디캡은 아래 전체 옵션에서 확인하세요.")
         st.dataframe(match_summary(nr),hide_index=True)
-        st.info("분석 확률과 EV는 모델 추정입니다. 최근 득실·상대 전력·시장 배당은 반영하지만 xG·결장·선발 선수별 전력은 완전히 반영하지 못합니다. 아래 성능 미검증 표시는 분석 실패나 후보 없음이라는 뜻이 아닙니다.")
+        st.info("분석 확률과 EV는 모델 추정입니다. v3 정밀 모드에서는 제공사가 실제 반환한 xG·확정 라인업·결장·선수 중요도·휴식일을 추가 반영하며, 확보하지 못한 신호는 MISSING으로 남깁니다.")
         st.markdown("### A매치 후보 · 조합 상태")
         passed_count=int(nr.scenario_candidate.sum())
         ready_count=int(nr.scenario_parlay_eligible.sum())
@@ -404,7 +446,7 @@ with tabs[1]:
         st.caption("앞의 두 숫자는 경기 수가 아닌 선택지 수입니다. 개별 분석 → 가정 변화 통과 → 라인업 확인 → 서로 다른 경기의 참고용 2폴 순서입니다. 모델 성능 검증은 별도입니다.")
         with st.expander("미검증은 어떻게 검증하나요?"):
             st.write("경기 전 예측 확률·배당·수집 시각·모델 버전을 저장하고 경기 후 실제 90분 결과와 연결합니다. 승무패와 언더오버를 따로 평가하며, 학습에 쓰지 않은 이후 기간에서 확률 정확도(Brier/Log loss·확률 구간별 실제 빈도), 시장 기준 대비 성능, 적특을 반영한 수익률과 불확실성을 확인해야 합니다.")
-            st.write("한 경기 적중 또는 100경기 달성만으로 검증 완료가 되지 않습니다. 현재 과거 경기 검증은 배당 없는 원모델 승무패 진단뿐입니다. 자동 영구 기록·결과 정산·최종 선정 기준의 성능 검증은 아직 구현되지 않았습니다. 지금도 모든 경기를 분석하고 후보로 표시하지만 검증 완료로 승격하지 않습니다.")
+            st.write("v3는 분석 당시 모델확률·배당·BE·Edge·EV·모델버전·ROBUST 판정을 append-only 스냅샷으로 저장합니다. The Odds API scores가 지원되는 종목은 최근 종료 경기 결과를 자동 연결해 Brier, Log loss, ROI를 계산합니다. 장기 검증은 충분한 사후 표본이 쌓인 뒤 판단해야 합니다.")
         st.markdown("#### 가정 변화에도 기대값이 양수인 개별 후보")
         st.caption("양 팀 예상 득점을 각각 −10%·기준·+10%, 원모델 비중을 15%·25%·35%로 바꾼 27개 조합입니다. 이 범위는 실측 오차나 신뢰구간이 아닙니다. 기존 약 8.5%p 일괄 차감은 후보 선정에서 사용하지 않습니다.")
         counts=nr.selection_status.value_counts()
@@ -451,7 +493,7 @@ with tabs[1]:
 with tabs[2]:
     st.subheader("⚾ KBO / NPB 완전자동 분석")
     st.write("The Odds API 배당 + KBO/NPB 공식 팀기록 + 예고/확정 선발 + 실제 라인업을 자동 수집해 최종 확률을 다시 계산합니다.")
-    st.caption("v2.9.4: NPB 선발 이름 매칭과 최근 팀 OPS 수집을 보강하고, 핵심 기록이 없으면 DATA PARTIAL로 표시합니다.")
+    st.caption("v3.0.0: 기존 선발/타선/불펜/좌우/날씨 신호에 반증 검사와 27개 스트레스 시나리오를 추가하고 ROBUST만 자동 다폴에 허용합니다.")
 
     if not ODDS_KEY:
         st.warning("THE_ODDS_API_KEY가 필요합니다.")
@@ -568,7 +610,11 @@ with tabs[2]:
 
                 rankedb=pd.concat(all_rows,ignore_index=True) if all_rows else pd.DataFrame()
                 if not rankedb.empty:
-                    rankedb=rankedb.sort_values(["conservative_ev_roi","edge_pp"],ascending=False)
+                    rankedb["sport_key"]=baseball_key
+                    rankedb=rankedb.sort_values(["robust_positive_ratio","robust_ev_p10","conservative_ev_roi"],ascending=False)
+                    saved=record_frame(rankedb,sport_key=baseball_key,sport_family=f"baseball_{league.lower()}")
+                    settle_info=auto_settle(odds_api,baseball_key)
+                    st.caption(f"v3 불변 예측 스냅샷 {saved}개 추가 · 자동 정산 {settle_info.get('settled',0)}개" + (f" · 정산 오류: {settle_info.get('error')}" if settle_info.get('error') else ""))
                 st.session_state["baseball_ranked"]=rankedb
                 st.session_state["baseball_failures"]=failures
                 st.session_state["baseball_meta"]=metas
@@ -589,8 +635,9 @@ with tabs[2]:
     if "baseball_ranked" in st.session_state and not st.session_state["baseball_ranked"].empty:
         rb=st.session_state["baseball_ranked"]
         st.markdown("### KBO/NPB +EV 후보")
-        vb=rb[(rb["grade"]!="PASS") & (rb["stage"]!="DATA PARTIAL")].copy()
+        vb=rb[rb.get("v3_candidate",pd.Series(False,index=rb.index)).fillna(False).astype(bool)].copy()
         cols=[
+            "v3_decision_status","robust_positive_ratio","robust_ev_p10","robust_ev_min","counter_case_risk","signal_coverage",
             "grade","stage","data_quality","sanity","display_pick","best_book","best_odds","books",
             "consensus_prob","raw_independent_prob","model_win_prob","push_prob","break_even",
             "edge_pp","conservative_ev_roi","uncertainty_pp","starter_confirmed","lineup_confirmed",
@@ -606,6 +653,10 @@ with tabs[2]:
         for c in ["consensus_prob","raw_independent_prob","model_win_prob","push_prob","break_even"]:
             if c in vb: vb[c]=(vb[c]*100).round(1)
         if "conservative_ev_roi" in vb: vb["conservative_ev_roi"]=(vb["conservative_ev_roi"]*100).round(1)
+        for c in ["robust_positive_ratio","signal_coverage"]:
+            if c in vb:vb[c]=(vb[c]*100).round(1)
+        for c in ["robust_ev_p10","robust_ev_min"]:
+            if c in vb:vb[c]=(vb[c]*100).round(1)
         for c in ["edge_pp","uncertainty_pp","away_recent_rf","away_recent_ra","home_recent_rf","home_recent_ra","away_expected_runs","home_expected_runs","away_starter_era","home_starter_era","away_starter_whip","home_starter_whip"]:
             if c in vb: vb[c]=pd.to_numeric(vb[c],errors="coerce").round(2)
         st.dataframe(vb.head(100),use_container_width=True,hide_index=True)
@@ -746,7 +797,7 @@ with tabs[7]:
             try:
                 from sports_ev_engine.telegram_notify import TelegramNotifier
                 TelegramNotifier(telegram_token,telegram_chat)(
-                    "✅ Sports EV Engine v2.6.1\nTelegram 알림 연결 테스트 성공"
+                    "✅ Sports EV Engine v3.0.0\nTelegram 알림 연결 테스트 성공"
                 )
                 st.success("테스트 알림을 보냈습니다.")
             except Exception as e:
@@ -841,5 +892,46 @@ TELEGRAM_CHAT_ID = "..."
 - 모델 EV/불확실성 보정/등급 자동 계산
 - 2~6폴 자동 생성
 
-라인업/개별 선수 중요도까지 완전자동 반영하는 것은 다음 단계입니다.
+**v3.0 ChatGPT-style reasoning layer**
+- 독립 모델 이후 xG·확정 라인업·결장·선수 중요도·휴식일 정밀 컨텍스트
+- 실제 미수집 신호는 평균으로 대체하지 않고 MISSING 처리
+- 반증(counter-case) 위험 자동 생성
+- 득점환경 ±10%(야구 ±8%) × 모델/시장 비중 변화의 27개 스트레스 시나리오
+- ROBUST / SENSITIVE / FRAGILE / REVIEW / PASS 판정
+- 자동 다폴은 ROBUST만 사용
+- 경기 전 모델확률·배당·EV·판정을 append-only로 저장
+- The Odds API scores 지원 종목은 자동 결과 연결 및 Brier/Log loss/ROI 평가
 """)
+
+
+with tabs[9]:
+    st.subheader("📊 v3 모델 사후 검증")
+    st.write("경기 전 스냅샷은 결과가 나온 뒤 덮어쓰지 않습니다. 당시 배당·모델확률·EV·ROBUST 판정과 실제 결과를 연결해 확률 정확도와 ROI를 따로 평가합니다.")
+    pending=pending_sport_keys()
+    if pending and ODDS_KEY:
+        if st.button("최근 종료 경기 지금 자동 정산"):
+            api=TheOddsAPI(ODDS_KEY);settled=0;errors=[]
+            for sk in pending:
+                info=auto_settle(api,sk);settled+=info.get("settled",0)
+                if info.get("error"):errors.append(f"{sk}: {info['error']}")
+            st.success(f"{settled}개 스냅샷 정산")
+            if errors:st.warning(" / ".join(errors))
+    elif pending:
+        st.info("정산 대기 기록이 있지만 THE_ODDS_API_KEY가 없어 자동 정산을 실행할 수 없습니다.")
+    report=evaluation()
+    if not report.get("roi_n"):
+        st.info("아직 정산된 표본이 없습니다. 분석을 계속 저장하고 `python settle_once.py`를 1~3일마다 실행하면 자동 누적됩니다.")
+    else:
+        overall=report["overall"]
+        c1,c2,c3,c4=st.columns(4)
+        c1.metric("확률 검증 표본",overall["n"])
+        c2.metric("Brier",f"{overall['brier']:.4f}" if overall["n"] else "—")
+        c3.metric("Log loss",f"{overall['log_loss']:.4f}" if overall["n"] else "—")
+        c4.metric(f"평균 ROI ({overall['roi_n']}건)",f"{overall['roi']*100:.2f}%")
+        groups=pd.DataFrame(report.get("groups",[]))
+        if not groups.empty:
+            groups["roi"]=(groups["roi"]*100).round(2);groups["hit_rate"]=(groups["hit_rate"]*100).round(2)
+            groups[["brier","log_loss"]]=groups[["brier","log_loss"]].round(4)
+            st.dataframe(groups.rename(columns={"sport_family":"종목","market":"마켓","decision":"v3 판정","n":"확률표본","roi_n":"ROI표본","brier":"Brier","log_loss":"Log loss","roi":"ROI(%)","hit_rate":"적중률(%)"}),hide_index=True,use_container_width=True)
+        st.caption("Brier/Log loss는 낮을수록 좋습니다. 아시안 쿼터라인의 부분 적특은 ROI에는 포함하지만 Bernoulli 확률검증에서는 제외합니다. 충분한 표본 전에는 특정 상태/리그가 우월하다고 결론내리지 않습니다.")
+    st.caption("운영 파일: data/prediction_snapshots.jsonl (append-only 예측) / data/settled_predictions.jsonl (정산 결과). Streamlit 재배포에도 보존하려면 worker의 영구 디스크나 외부 저장소에 data 경로를 마운트하세요.")

@@ -5,11 +5,16 @@ REVIEW_STATES={'OUTLIER_SHRUNK','HIGH_DISAGREEMENT'}
 
 def candidate_mask(frame):
     if frame.empty:return pd.Series(False,index=frame.index,dtype=bool)
+    if 'v3_candidate' in frame.columns:
+        return frame['v3_candidate'].fillna(False).astype(bool)
     return frame['grade'].isin(['A','B','C']) & (frame['conservative_ev_roi']>0) & ~frame['sanity'].isin(REVIEW_STATES)
 
 def review_mask(frame):
     if frame.empty:return pd.Series(False,index=frame.index,dtype=bool)
-    return frame['grade'].eq('REVIEW') | frame['sanity'].isin(REVIEW_STATES)
+    base=frame['grade'].eq('REVIEW') | frame['sanity'].isin(REVIEW_STATES)
+    if 'v3_decision_status' in frame.columns:
+        base = base | frame['v3_decision_status'].isin(['REVIEW','DATA_HOLD','FRAGILE'])
+    return base
 
 def review_reason(gap,sample,international):
     reasons=[]
