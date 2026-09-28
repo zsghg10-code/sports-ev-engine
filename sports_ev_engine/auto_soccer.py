@@ -243,6 +243,33 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
             "away_probable_players":deep_ctx.get("away_probable_players"),
             "fixture_id":deep_ctx.get("fixture_id"),
             "parlay_eligible":bool((lineup_ok or not international) and grade in {"A","B","C"} and ev.conservative_ev_roi>0 and sanity not in REVIEW_STATES),
+            # Preserve measured deep-context facts for match-specific explanations.
+            # These fields are descriptive only; missing values stay missing.
+            "home_xg_for":deep_ctx.get("home_xg_for"),
+            "home_xg_against":deep_ctx.get("home_xg_against"),
+            "away_xg_for":deep_ctx.get("away_xg_for"),
+            "away_xg_against":deep_ctx.get("away_xg_against"),
+            "xg_source":deep_ctx.get("xg_source"),
+            "xg_fallback_used":bool(deep_ctx.get("xg_fallback_used")),
+            "xg_samples_home":deep_ctx.get("xg_samples_home"),
+            "xg_samples_away":deep_ctx.get("xg_samples_away"),
+            "xg_checked_at":deep_ctx.get("xg_checked_at"),
+            "home_big_chances":deep_ctx.get("home_big_chances"),
+            "away_big_chances":deep_ctx.get("away_big_chances"),
+            "home_rest_days":deep_ctx.get("home_rest_days"),
+            "away_rest_days":deep_ctx.get("away_rest_days"),
+            "home_missing_players":deep_ctx.get("home_missing_players"),
+            "away_missing_players":deep_ctx.get("away_missing_players"),
+            "home_formation":deep_ctx.get("home_formation"),
+            "away_formation":deep_ctx.get("away_formation"),
+            "home_lineup_attack_pct":deep_ctx.get("home_lineup_attack_pct"),
+            "home_lineup_defense_pct":deep_ctx.get("home_lineup_defense_pct"),
+            "away_lineup_attack_pct":deep_ctx.get("away_lineup_attack_pct"),
+            "away_lineup_defense_pct":deep_ctx.get("away_lineup_defense_pct"),
+            "home_injury_attack_pct":deep_ctx.get("home_injury_attack_pct"),
+            "home_injury_defense_pct":deep_ctx.get("home_injury_defense_pct"),
+            "away_injury_attack_pct":deep_ctx.get("away_injury_attack_pct"),
+            "away_injury_defense_pct":deep_ctx.get("away_injury_defense_pct"),
         })
         if international:
             d.update(assess(d,scenarios,side,line))

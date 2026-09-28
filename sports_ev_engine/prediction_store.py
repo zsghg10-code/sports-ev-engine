@@ -20,7 +20,7 @@ import pandas as pd
 from .core.asian import settle_total_under, settle_total_over, settle_home_handicap
 from . import persistent_store
 
-MODEL_VERSION = "3.4.0"
+MODEL_VERSION = "3.4.2"
 DEFAULT_PREDICTIONS = "data/prediction_snapshots.jsonl"
 DEFAULT_SETTLED = "data/settled_predictions.jsonl"
 DEFAULT_MARKET_OBSERVATIONS = "data/market_observations.jsonl"
@@ -301,6 +301,10 @@ def record_frame(frame: pd.DataFrame, sport_key: str | None = None, sport_family
         "plate_discipline_used", "statcast_quality_used", "statcast_fallback_used", "batted_ball_regression_used", "pitch_mix_used", "starter_workload_used",
         "bullpen_exact_used", "lineup_platoon_exact_used", "pitch_matchup_used", "availability_news_used", "lineup_change_used",
         "market_movement_used", "roof_used", "umpire_used", "travel_rest_used", "bvp_used", "bullpen_manager_used",
+        "home_xg_for", "home_xg_against", "away_xg_for", "away_xg_against", "xg_source", "xg_fallback_used", "xg_samples_home", "xg_samples_away", "xg_checked_at",
+        "home_big_chances", "away_big_chances", "home_rest_days", "away_rest_days",
+        "home_missing_players", "away_missing_players", "home_formation", "away_formation",
+        "home_recent_gf", "home_recent_ga", "away_recent_gf", "away_recent_ga", "home_elo", "away_elo",
     ]
     for _, r in frame.iterrows():
         d = {k: _safe(r.get(k)) for k in keep if k in frame.columns}
@@ -313,6 +317,8 @@ def record_frame(frame: pd.DataFrame, sport_key: str | None = None, sport_family
         d["statcast_checked_at"] = now if d.get("statcast_quality_used") else None
         d["weather_checked_at"] = now if d.get("weather_used") else None
         d["news_checked_at"] = now if d.get("availability_news_used") else None
+        if d.get("xg_source") and not d.get("xg_checked_at"):
+            d["xg_checked_at"] = now
         rec=pd.to_datetime(now,utc=True,errors="coerce")
         kick=pd.to_datetime(d.get("commence_time"),utc=True,errors="coerce")
         pregame=not pd.isna(rec) and not pd.isna(kick) and rec < kick

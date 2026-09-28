@@ -116,3 +116,103 @@ def fetch_lineup(event,now=None):
         if len(starters)==11 and len({p['id'] for p in starters})==11:
             out[side]={'confirmed':True,'attack':0,'defense':0,'neutral':event.get('neutral') is True,'source':f'https://www.espn.com/soccer/lineups/_/gameId/{event["id"]}','checked_at':now.isoformat(),'players':';'.join(p['displayName'] for p in starters)}
     return out
+
+
+def fetch_summary(league,event_id):
+    if league not in LEAGUES: raise ValueError('Unsupported public league')
+    r=requests.get(f'{BASE}/{league}/summary',params={'event':str(event_id)},timeout=(5,12))
+    r.raise_for_status(); data=r.json()
+    if str((data.get('header') or {}).get('id'))!=str(event_id):
+        raise ValueError('공개 통계 경기 ID 불일치')
+    return data
+
+def _num_xg(v):
+    if isinstance(v,dict):
+        v=v.get('value',v.get('displayValue'))
+    if isinstance(v,str):
+        v=v.strip().replace(',','')
+    try:
+        x=float(v)
+    except (TypeError,ValueError):
+        return None
+    return x if 0<=x<=15 else None
+
+def _xg_from_stats(stats):
+    for st in stats or []:
+        name=' '.join(str(st.get(k) or '') for k in ('name','displayName','label','abbreviation')).lower()
+        key=''.join(ch for ch in name if ch.isalnum())
+        if ('expectedgoal' in key) or key in {'xg','xgoal','xgoals'}:
+            x=_num_xg(st.get('value',st.get('displayValue')))
+            if x is not None:return x
+    return None
+
+def _summary_xg(data,event):
+    """Conservatively extract ESPN xG only when it is explicitly team-labelled."""
+    wanted={'home':norm_name(event['home']),'away':norm_name(event['away'])}
+    out={}
+    candidates=[]
+    box=data.get('boxscore') or {}
+    candidates.extend(box.get('teams') or [])
+    header=data.get('header') or {}
+    try:candidates.extend((header.get('competitions') or [])[0].get('competitors') or [])
+    except (IndexError,AttributeError):pass
+    for row in candidates:
+        team=row.get('team') or {}
+        tname=norm_name(team.get('displayName') or team.get('name') or row.get('displayName') or '')
+        side='home' if tname==wanted['home'] else 'away' if tname==wanted['away'] else None
+        if not side:continue
+        x=_xg_from_stats(row.get('statistics') or row.get('stats') or [])
+        if x is not None:out[side]=x
+    return out if set(out)=={'home','away'} else {}
+
+def fetch_match_xg(event,fetch=fetch_summary):
+    data=fetch(event['league'],event['id'])
+    header=data.get('header') or {}
+    c,h,a=event_teams(header)
+    kick=pd.Timestamp(event['kickoff'])
+    if pd.Timestamp(c['date'])!=kick or norm_name(h['team']['displayName'])!=norm_name(event['home']) or norm_name(a['team']['displayName'])!=norm_name(event['away']):
+        raise ValueError('공개 xG 대진/시각 불일치')
+    x=_summary_xg(data,event)
+    if not x:return {}
+    return {'home_xg':x['home'],'away_xg':x['away'],'source':f'https://www.espn.com/soccer/match/_/gameId/{event["id"]}'}
+
+def collect_recent_xg(events,home,away,kickoff,n=3,fetch=fetch_summary):
+    """Collect recent measured xG from ESPN summaries, never synthesize xG."""
+    target=pd.Timestamp(kickoff)
+    if target.tzinfo is None:target=target.tz_localize('UTC')
+    else:target=target.tz_convert('UTC')
+    cache={}
+    def profile(team):
+        cand=[]
+        for e in events or []:
+            try:
+                ek=pd.Timestamp(e['kickoff']);ek=ek.tz_convert('UTC') if ek.tzinfo else ek.tz_localize('UTC')
+            except Exception:continue
+            if not e.get('completed') or ek>=target:continue
+            if norm_name(team) not in {norm_name(e.get('home','')),norm_name(e.get('away',''))}:continue
+            cand.append((ek,e))
+        cand.sort(key=lambda z:z[0],reverse=True)
+        xf=[];xa=[]
+        for _,e in cand[:max(6,n+3)]:
+            k=(e.get('league'),str(e.get('id')))
+            try:
+                rec=cache.get(k)
+                if rec is None:
+                    rec=fetch_match_xg(e,fetch=fetch);cache[k]=rec
+            except Exception:
+                rec={};cache[k]=rec
+            if not rec:continue
+            if norm_name(e.get('home',''))==norm_name(team):
+                xf.append(float(rec['home_xg']));xa.append(float(rec['away_xg']))
+            else:
+                xf.append(float(rec['away_xg']));xa.append(float(rec['home_xg']))
+            if len(xf)>=n:break
+        return {'for':sum(xf)/len(xf) if len(xf)>=n else None,'against':sum(xa)/len(xa) if len(xa)>=n else None,'games':len(xf)}
+    hp=profile(home);ap=profile(away)
+    return {
+        'home_xg_for':hp['for'],'home_xg_against':hp['against'],
+        'away_xg_for':ap['for'],'away_xg_against':ap['against'],
+        'xg_samples_home':hp['games'],'xg_samples_away':ap['games'],
+        'xg_source':'ESPN public match-summary xG fallback',
+        'xg_checked_at':datetime.now(timezone.utc).isoformat(),
+    }

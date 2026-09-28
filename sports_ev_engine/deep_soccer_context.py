@@ -113,6 +113,79 @@ def _opponent_xga(api,pool,team,kickoff_iso,n=3):
     return sum(vals)/len(vals) if len(vals)>=3 else None
 
 
+def _api_xg_profile(api, team_id, team_name, kickoff_iso, n=3):
+    """Fetch recent xG/xGA directly from API-Football team fixtures.
+
+    This deliberately does not rely on the historical modeling pool because the
+    free A-match path stores ESPN-normalized history without API fixture ids.
+    Only provider-returned expected-goals fields are accepted.
+    """
+    if not team_id:
+        return {"xg_for":None,"xg_against":None,"xg_games":0,"shots":None,"big_chances":None}
+    vals_for=[]; vals_against=[]; shots=[]; big=[]
+    try:
+        fixtures=api.team_recent_fixtures(team_id,last=max(6,n+2),cutoff_iso=kickoff_iso)
+        if not isinstance(fixtures,(list,tuple)):
+            fixtures=[]
+    except Exception:
+        fixtures=[]
+    for fx in fixtures:
+        if len(vals_for)>=n:
+            break
+        fid=(fx.get("fixture") or {}).get("id")
+        teams=fx.get("teams") or {}
+        h=(teams.get("home") or {}).get("name",""); a=(teams.get("away") or {}).get("name","")
+        opp=a if norm_name(h)==norm_name(team_name) else h if norm_name(a)==norm_name(team_name) else ""
+        if not fid or not opp:
+            continue
+        try:
+            payload=api.fixture_statistics(fid)
+        except Exception:
+            continue
+        own=_parse_fixture_stats(payload,team_name); other=_parse_fixture_stats(payload,opp)
+        ox=own.get("expected_goals")
+        if ox is None: ox=own.get("expected_goal")
+        ax=other.get("expected_goals")
+        if ax is None: ax=other.get("expected_goal")
+        if ox is None or ax is None:
+            continue
+        try:
+            vals_for.append(float(ox)); vals_against.append(float(ax))
+        except (TypeError,ValueError):
+            continue
+        if own.get("total_shots") is not None: shots.append(float(own["total_shots"]))
+        for key in ("big_chances","big_chances_created"):
+            if own.get(key) is not None:
+                big.append(float(own[key])); break
+    return {
+        "xg_for":sum(vals_for)/len(vals_for) if len(vals_for)>=n else None,
+        "xg_against":sum(vals_against)/len(vals_against) if len(vals_against)>=n else None,
+        "xg_games":len(vals_for),
+        "shots":sum(shots)/len(shots) if shots else None,
+        "big_chances":sum(big)/len(big) if big else None,
+    }
+
+
+def merge_xg_fallback(ctx, fallback):
+    """Use one coherent public xG fallback only when provider xG is incomplete."""
+    out=dict(ctx or {})
+    keys=("home_xg_for","home_xg_against","away_xg_for","away_xg_against")
+    if all(out.get(k) is not None for k in keys):
+        out.setdefault("xg_fallback_used",False)
+        return out
+    if fallback and all(fallback.get(k) is not None for k in keys):
+        for k in keys: out[k]=fallback[k]
+        out["home_big_chances"]=fallback.get("home_big_chances")
+        out["away_big_chances"]=fallback.get("away_big_chances")
+        out["xg_source"]=fallback.get("xg_source") or "public xG fallback"
+        out["big_chance_source"]=fallback.get("xg_source") or "public xG fallback"
+        out["xg_fallback_used"]=True
+        out["xg_samples_home"]=fallback.get("xg_samples_home")
+        out["xg_samples_away"]=fallback.get("xg_samples_away")
+        out["xg_checked_at"]=fallback.get("xg_checked_at")
+    return out
+
+
 def _player_importance(rows):
     out={}
     for item in rows or []:
@@ -199,12 +272,24 @@ def collect_deep_context(api,pool,home,away,kickoff_iso,season=None,horizon_hour
     teams=fixture.get("teams",{})
     htid=teams.get("home",{}).get("id"); atid=teams.get("away",{}).get("id")
 
-    # Recent xG and chance creation. Calls are cached by APIFootball._get.
-    hfor=_xg_average(api,pool,home,kickoff_iso); afor=_xg_average(api,pool,away,kickoff_iso)
-    hxga=_opponent_xga(api,pool,home,kickoff_iso); axga=_opponent_xga(api,pool,away,kickoff_iso)
-    ctx.update(home_xg_for=hfor["xg"],home_xg_against=hxga,away_xg_for=afor["xg"],away_xg_against=axga,
-               home_big_chances=hfor.get("big_chances"),away_big_chances=afor.get("big_chances"),
-               xg_source="API-Football fixtures/statistics",big_chance_source="API-Football fixtures/statistics")
+    # Recent xG and chance creation.  For A-match free-history mode the modeling
+    # pool contains ESPN-normalized rows without API fixture ids, so query recent
+    # provider fixtures directly by team id first.  Fall back to the old pool path
+    # for club/competition pools where fixture ids are already available.
+    hp=_api_xg_profile(api,htid,home,kickoff_iso); ap=_api_xg_profile(api,atid,away,kickoff_iso)
+    if hp.get("xg_for") is not None and hp.get("xg_against") is not None:
+        hxf,hxa=hp["xg_for"],hp["xg_against"]; hbig=hp.get("big_chances")
+    else:
+        hfor=_xg_average(api,pool,home,kickoff_iso); hxf=hfor["xg"]; hxa=_opponent_xga(api,pool,home,kickoff_iso); hbig=hfor.get("big_chances")
+    if ap.get("xg_for") is not None and ap.get("xg_against") is not None:
+        axf,axa=ap["xg_for"],ap["xg_against"]; abig=ap.get("big_chances")
+    else:
+        afor=_xg_average(api,pool,away,kickoff_iso); axf=afor["xg"]; axa=_opponent_xga(api,pool,away,kickoff_iso); abig=afor.get("big_chances")
+    ctx.update(home_xg_for=hxf,home_xg_against=hxa,away_xg_for=axf,away_xg_against=axa,
+               home_big_chances=hbig,away_big_chances=abig,
+               xg_source="API-Football recent team fixtures/statistics",big_chance_source="API-Football recent team fixtures/statistics",
+               xg_fallback_used=False,xg_samples_home=hp.get("xg_games"),xg_samples_away=ap.get("xg_games"),
+               xg_checked_at=datetime.now(timezone.utc).isoformat())
 
     # Confirmed XIs.
     lineups=[]

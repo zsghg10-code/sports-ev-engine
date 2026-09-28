@@ -40,6 +40,7 @@ def freshness_rows(now=None):
         statcast_age=analysis_age if bool(r.get("statcast_quality_used")) else None
         weather_age=analysis_age if bool(r.get("weather_used")) else None
         news_age=analysis_age if bool(r.get("availability_news_used")) or bool(r.get("news_scan_used")) else None
+        xg_age=_age(r.get("xg_checked_at"),now) if r.get("xg_source") else None
         ages=[x for x in [market_age,analysis_age,lineup_age] if x is not None]
         worst=max(ages) if ages else None
         rows.append({
@@ -47,6 +48,7 @@ def freshness_rows(now=None):
             "배당":f"{_grade(market_age,10,30)} {market_age:.0f}분" if market_age is not None else "MISSING",
             "모델":f"{_grade(analysis_age,20,90)} {analysis_age:.0f}분" if analysis_age is not None else "MISSING",
             "라인업":f"{_grade(lineup_age,30,90)} {lineup_age:.0f}분" if lineup_age is not None else "미확정",
+            "xG":f"{_grade(xg_age,180,720)} {xg_age:.0f}분" if xg_age is not None else "MISSING",
             "Statcast":f"{_grade(statcast_age,120,360)} {statcast_age:.0f}분" if statcast_age is not None else "MISSING",
             "날씨":f"{_grade(weather_age,60,180)} {weather_age:.0f}분" if weather_age is not None else "MISSING",
             "부상/뉴스":f"{_grade(news_age,180,720)} {news_age:.0f}분" if news_age is not None else "MISSING",

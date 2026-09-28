@@ -15,7 +15,7 @@ def cached_free_history():
     return download_history()
 
 from sports_ev_engine import auto_national as auto_national_provider
-from sports_ev_engine.auto_national import collect as collect_automatic, fetch_board, automatic_pool, fetch_lineup, DataHold
+from sports_ev_engine.auto_national import collect as collect_automatic, fetch_board, automatic_pool, fetch_lineup, fetch_summary, collect_recent_xg, DataHold
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def cached_public_board(league,year):
@@ -24,6 +24,10 @@ def cached_public_board(league,year):
 @st.cache_data(ttl=300, show_spinner=False)
 def cached_public_lineup(event):
     return fetch_lineup(event)
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def cached_public_summary(league,event_id):
+    return fetch_summary(league,event_id)
 
 from sports_ev_engine.providers.api_football import APIFootball
 from sports_ev_engine.providers import api_football as football_provider
@@ -47,7 +51,7 @@ from sports_ev_engine.providers import live_baseball as live_provider
 from sports_ev_engine import national_soccer as national_provider
 from sports_ev_engine import free_national as free_provider
 from sports_ev_engine.providers import baseball_advanced as advanced_provider, the_odds_api as odds_provider
-from sports_ev_engine.deep_soccer_context import collect_deep_context
+from sports_ev_engine.deep_soccer_context import collect_deep_context, merge_xg_fallback
 from sports_ev_engine import deep_soccer_context as deep_soccer_provider
 from sports_ev_engine.prediction_store import record_frame, auto_settle, evaluation, pending_sport_keys, configure_persistence, persistence_status, refresh_events, load_market_observations, load_settled
 from sports_ev_engine.providers.mlb_postgame import analyze_settled_mlb, postgame_reviews
@@ -67,14 +71,14 @@ from sports_ev_engine.feature_attribution import attribution
 from sports_ev_engine.model_drift import drift_rows
 from sports_ev_engine.bankroll import simulate as simulate_bankroll
 
-st.set_page_config(page_title="Sports EV Engine v3.4.1",layout="wide")
-st.title("Sports EV Engine v3.4.1")
-st.caption("BUILD v3.4.1-readable-reasons-candidate-gates · 2026-09-29")
+st.set_page_config(page_title="Sports EV Engine v3.4.3",layout="wide")
+st.title("Sports EV Engine v3.4.3")
+st.caption("BUILD v3.4.3-xg-fallback · 2026-09-29")
 if any(getattr(module,"PROVIDER_BUILD",None)!="3.0.0" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider,deep_soccer_provider)):
     st.error("앱과 수집 파일 버전이 다릅니다. ZIP의 sports_ev_engine 폴더까지 전부 반영한 뒤 Streamlit 앱을 Reboot하세요.")
     st.stop()
 FootballAccessError=football_provider.FootballAccessError
-st.caption("분석 백엔드 v3.4.1 · 자연어 판정/실패경로 + 후보/조합 게이트 분리 + source fallback + blind paper")
+st.caption("분석 백엔드 v3.4.3 · 경기별 실제 수치 기반 판정/실패경로 + 후보/조합 게이트 분리 + source fallback + blind paper")
 st.caption("독립 모델 → 정밀 컨텍스트 → 반증 검사 → 시장 캘리브레이션 → 27개 스트레스 시나리오 → EV/ROBUST 판정 → 기록·사후검증")
 
 def secret(name):
@@ -91,7 +95,7 @@ SUPABASE_KEY=secret("SUPABASE_SERVICE_ROLE_KEY") or secret("SUPABASE_KEY")
 configure_persistence(SUPABASE_URL,SUPABASE_KEY)
 BASEBALL_KEY=None
 
-_BUILD_ID = "3.4.1-readable-reasons-candidate-gates"
+_BUILD_ID = "3.4.2-match-specific-explanations"
 if st.session_state.get("_build_id") != _BUILD_ID:
     for _k in [
         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
@@ -497,9 +501,22 @@ with tabs[1]:
                                 st.session_state["national_evidence"].append({"경기":f"{home} - {away}","팀":home if side=="home" else away,**info})
                             if context_api and national_deep:
                                 try:
-                                    pool["event_context"]=collect_deep_context(
+                                    deep_ctx=collect_deep_context(
                                         context_api,pool,home,away,kickoff,season=pd.Timestamp(kickoff).year,horizon_hours=24
                                     )
+                                    # If API-Football did not expose a complete recent xG sample,
+                                    # try measured xG from verified ESPN match summaries.  This is a
+                                    # source fallback, not an xG estimate: missing public xG stays MISSING.
+                                    xg_keys=("home_xg_for","home_xg_against","away_xg_for","away_xg_against")
+                                    if not all(deep_ctx.get(k) is not None for k in xg_keys) and public_events:
+                                        try:
+                                            public_xg=collect_recent_xg(
+                                                public_events,home,away,kickoff,n=3,fetch=cached_public_summary
+                                            )
+                                            deep_ctx=merge_xg_fallback(deep_ctx,public_xg)
+                                        except Exception as xg_error:
+                                            deep_ctx["xg_fallback_error"]=f"{type(xg_error).__name__}: {xg_error}"
+                                    pool["event_context"]=deep_ctx
                                 except Exception as deep_error:
                                     pool["event_context"]={"deep_context_attempted":True,"deep_context_reason":f"collector failed: {type(deep_error).__name__}: {deep_error}","lineup_confirmed":False,"lineup_status":"ERROR"}
                             else:
@@ -538,7 +555,11 @@ with tabs[1]:
                                 deep_bits=[]
                                 if deep.get("deep_context_attempted"):
                                     deep_bits.append("정밀 컨텍스트 조회")
-                                    deep_bits.append("xG 반영" if deep.get("home_xg_for") is not None and deep.get("away_xg_for") is not None else "xG 미수집")
+                                    xg_ok=all(deep.get(k) is not None for k in ("home_xg_for","home_xg_against","away_xg_for","away_xg_against"))
+                                    if xg_ok:
+                                        deep_bits.append("xG 반영 (공개소스 fallback)" if deep.get("xg_fallback_used") else "xG 반영")
+                                    else:
+                                        deep_bits.append("xG 미수집")
                                     deep_bits.append("라인업 확정" if lineup_ok else "확정 라인업 미게시")
                                 else:
                                     deep_bits.append("정밀 컨텍스트 미조회")
@@ -546,7 +567,10 @@ with tabs[1]:
                                     "경기":match_label,"경기시간(KST)":format_kst(kickoff),"상태":"분석 가능",
                                     "이유":"기록 기준 충족 · " + " · ".join(deep_bits),
                                     "라인업":lineup_label,
-                                    "라인업 소스":lineup_stage.get("source") or "—"
+                                    "라인업 소스":lineup_stage.get("source") or "—",
+                                    "xG":"반영" if all(deep.get(k) is not None for k in ("home_xg_for","home_xg_against","away_xg_for","away_xg_against")) else "미수집",
+                                    "xG 소스":deep.get("xg_source") or "—",
+                                    "xG 표본":f"홈 {deep.get('xg_samples_home') or 0} / 원정 {deep.get('xg_samples_away') or 0}"
                                 })
                         except DataHold as e:
                             failures.append({"경기":match_label_kst(home,away,g.iloc[0]["commence_time"]),"이유":str(e)})

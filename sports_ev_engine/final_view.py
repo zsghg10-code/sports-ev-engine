@@ -15,7 +15,7 @@ from typing import Any
 import pandas as pd
 
 from sports_ev_engine.kst_schedule import format_kst
-from sports_ev_engine.explanations import humanize_data_risk, humanize_failure_route, humanize_selection_summary
+from sports_ev_engine.explanations import humanize_data_risk, humanize_failure_route, humanize_selection_summary, match_specific_failure_route
 
 
 def _num(v: Any, default=float("nan")) -> float:
@@ -182,7 +182,7 @@ def _candidate_row(frame: pd.DataFrame, market: str):
 def _failure_text(row: pd.Series | None) -> str:
     if row is None:
         return "핵심 +EV 후보가 없어 별도 실패경로를 선정하지 않음"
-    return humanize_failure_route(row.get("counter_case_summary"))
+    return match_specific_failure_route(row)
 
 
 def _data_risk_text(row: pd.Series | None) -> str:

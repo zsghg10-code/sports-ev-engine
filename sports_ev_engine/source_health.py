@@ -48,11 +48,13 @@ def source_health_rows(now=None):
             ])
         else:
             sources.extend([
-                ("xG","OK" if "recent_xg:MISSING" not in str(r.get("signal_summary") or "") else "MISSING","신호 ledger","API-Football statistics"),
+                ("xG","FALLBACK" if r.get("xg_fallback_used") else "OK" if "recent_xg:MISSING" not in str(r.get("signal_summary") or "") else "MISSING",
+                 f"홈 {r.get('xg_samples_home') or 0} / 원정 {r.get('xg_samples_away') or 0}경기",
+                 r.get("xg_source") or "API-Football statistics"),
                 ("부상/결장","OK" if "injuries_player_impact:MISSING" not in str(r.get("signal_summary") or "") else "MISSING","신호 ledger","API-Football injuries"),
             ])
         for name,status,detail,source in sources:
-            fb=(fallback and name=="라인업") or (name=="Statcast" and bool(r.get("statcast_fallback_used")))
+            fb=(fallback and name=="라인업") or (name=="Statcast" and bool(r.get("statcast_fallback_used"))) or (name=="xG" and bool(r.get("xg_fallback_used")))
             rows.append({"event_id":r.get("event_id"),"경기":f"{r.get('away_team')} @ {r.get('home_team')}","sport_family":r.get("sport_family"),
                          "소스항목":name,"상태":status,"상세":detail,"사용소스":source,"fallback":"YES" if fb else "NO"})
     return rows
