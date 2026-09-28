@@ -5,7 +5,7 @@ import pandas as pd
 import requests
 from .free_national import free_pool
 from .models.soccer_auto import norm_name
-PROVIDER_BUILD='2.9.3'
+PROVIDER_BUILD='2.9.4'
 BASE='https://site.api.espn.com/apis/site/v2/sports/soccer'
 LEAGUES=('uefa.nations','fifa.worldq.uefa','uefa.euro','uefa.euroq','fifa.friendly','fifa.world','concacaf.nations.league','fifa.worldq.concacaf','concacaf.gold','fifa.worldq.conmebol','conmebol.america','fifa.worldq.afc','afc.cup','fifa.worldq.caf','caf.nations','fifa.worldq.ofc')
 

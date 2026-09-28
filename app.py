@@ -35,6 +35,7 @@ from sports_ev_engine.national_soccer import is_senior_international, build_nati
 from sports_ev_engine.core.parlay import optimize_parlays
 from sports_ev_engine.review_policy import candidate_mask, review_mask
 from sports_ev_engine.national_policy import reference_pairs
+from sports_ev_engine.analysis_view import match_summary
 from sports_ev_engine.validation import validate
 from sports_ev_engine.providers.official_baseball import OfficialBaseballStats
 from sports_ev_engine.official_baseball_model import analyze_official_event
@@ -45,14 +46,14 @@ from sports_ev_engine import national_soccer as national_provider
 from sports_ev_engine import free_national as free_provider
 from sports_ev_engine.providers import baseball_advanced as advanced_provider, the_odds_api as odds_provider
 
-st.set_page_config(page_title="Sports EV Engine v2.9.3",layout="wide")
-st.title("Sports EV Engine v2.9.3")
-st.caption("BUILD v2.9.3-auto-national · 2026-09-28")
-if any(getattr(module,"PROVIDER_BUILD",None)!="2.9.3" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider)):
+st.set_page_config(page_title="Sports EV Engine v2.9.4",layout="wide")
+st.title("Sports EV Engine v2.9.4")
+st.caption("BUILD v2.9.4-auto-national · 2026-09-28")
+if any(getattr(module,"PROVIDER_BUILD",None)!="2.9.4" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider)):
     st.error("앱과 수집 파일 버전이 다릅니다. ZIP의 sports_ev_engine 폴더까지 전부 반영한 뒤 Streamlit 앱을 Reboot하세요.")
     st.stop()
 FootballAccessError=football_provider.FootballAccessError
-st.caption("수집 모듈 v2.9.3 확인 완료")
+st.caption("수집 모듈 v2.9.4 확인 완료")
 st.caption("종목 선택 → 배당 수집 → 상대전력 Elo + 최근폼 → 시장 prior 캘리브레이션 → BE/Edge/EV → 2~6폴")
 
 def secret(name):
@@ -66,7 +67,7 @@ ODDS_KEY=secret("THE_ODDS_API_KEY")
 FOOTBALL_KEY=secret("API_FOOTBALL_KEY")
 BASEBALL_KEY=None
 
-_BUILD_ID = "2.9.3-auto-national"
+_BUILD_ID = "2.9.4-auto-national"
 if st.session_state.get("_build_id") != _BUILD_ID:
     for _k in [
         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
@@ -366,7 +367,7 @@ with tabs[1]:
         except Exception as e:
             st.error(f"A매치 분석 실패: {e}")
     if st.session_state.get("national_status"):
-        st.markdown("#### 경기별 처리 상태")
+        st.markdown("#### 경기별 수집·분석 가능 여부 — 추천 여부와 별개")
         st.dataframe(pd.DataFrame(st.session_state["national_status"]),hide_index=True)
     if st.session_state.get("national_sources"):
         with st.expander("실제 수집 결과 · 소스 진단"):
@@ -389,7 +390,22 @@ with tabs[1]:
             st.download_button("검증 보고서 다운로드",json.dumps(report,ensure_ascii=False,indent=2),file_name="validation_report.json")
     nr=st.session_state.get("national_ranked")
     if isinstance(nr,pd.DataFrame) and not nr.empty:
-        st.markdown("### A매치 후보 · 가정 변화 시험")
+        st.markdown("### 전체 경기 자동분석 · 승무패 / 언더오버")
+        st.caption("확률이 가장 높은 선택과 배당 대비 기대값이 가장 높은 선택을 따로 표시합니다. EV가 음수인 경기도 표시합니다. 언더오버 요약은 양방향 배당이 있는 라인 중 북메이커 수와 시장 균형으로 대표 라인을 고릅니다. 모든 라인과 핸디캡은 아래 전체 옵션에서 확인하세요.")
+        st.dataframe(match_summary(nr),hide_index=True)
+        st.info("분석 확률과 EV는 모델 추정입니다. 최근 득실·상대 전력·시장 배당은 반영하지만 xG·결장·선발 선수별 전력은 완전히 반영하지 못합니다. 아래 성능 미검증 표시는 분석 실패나 후보 없음이라는 뜻이 아닙니다.")
+        st.markdown("### A매치 후보 · 조합 상태")
+        passed_count=int(nr.scenario_candidate.sum())
+        ready_count=int(nr.scenario_parlay_eligible.sum())
+        pairs=reference_pairs(nr)
+        metrics=st.columns(4)
+        for cell,label,value in zip(metrics,['가정 변화 통과 선택지','그중 라인업 확인','참고용 2폴 표시','성능 검증 완료'],[passed_count,ready_count,len(pairs),0]):
+            cell.metric(label,value)
+        st.caption("앞의 두 숫자는 경기 수가 아닌 선택지 수입니다. 개별 분석 → 가정 변화 통과 → 라인업 확인 → 서로 다른 경기의 참고용 2폴 순서입니다. 모델 성능 검증은 별도입니다.")
+        with st.expander("미검증은 어떻게 검증하나요?"):
+            st.write("경기 전 예측 확률·배당·수집 시각·모델 버전을 저장하고 경기 후 실제 90분 결과와 연결합니다. 승무패와 언더오버를 따로 평가하며, 학습에 쓰지 않은 이후 기간에서 확률 정확도(Brier/Log loss·확률 구간별 실제 빈도), 시장 기준 대비 성능, 적특을 반영한 수익률과 불확실성을 확인해야 합니다.")
+            st.write("한 경기 적중 또는 100경기 달성만으로 검증 완료가 되지 않습니다. 현재 과거 경기 검증은 배당 없는 원모델 승무패 진단뿐입니다. 자동 영구 기록·결과 정산·최종 선정 기준의 성능 검증은 아직 구현되지 않았습니다. 지금도 모든 경기를 분석하고 후보로 표시하지만 검증 완료로 승격하지 않습니다.")
+        st.markdown("#### 가정 변화에도 기대값이 양수인 개별 후보")
         st.caption("양 팀 예상 득점을 각각 −10%·기준·+10%, 원모델 비중을 15%·25%·35%로 바꾼 27개 조합입니다. 이 범위는 실측 오차나 신뢰구간이 아닙니다. 기존 약 8.5%p 일괄 차감은 후보 선정에서 사용하지 않습니다.")
         counts=nr.selection_status.value_counts()
         st.write({"분석 옵션":len(nr),"가정 변화 통과":int(counts.get('SCENARIO_PASS',0)),"가정에 민감":int(counts.get('SENSITIVE',0)),"괴리 검토":int(counts.get('REVIEW',0)),"기대값 미달":int(counts.get('PASS',0)),"자료 보류":int(counts.get('DATA_HOLD',0))})
@@ -415,7 +431,7 @@ with tabs[1]:
         st.caption("통과는 설정한 가정 안에서만 의미가 있습니다. xG·결장은 미수집이며 최종 시장 혼합 확률과 수익성은 검증되지 않았습니다. A/B/C 등급과 베팅금액 추천은 제공하지 않습니다.")
         st.download_button("전체 분석 CSV 다운로드",nr.to_csv(index=False).encode("utf-8-sig"),file_name="national_analysis.csv")
         st.markdown("#### 라인업 확인 + 가정 변화 통과: 참고용 2폴")
-        combos=reference_pairs(nr)
+        combos=pairs
         if combos:st.dataframe(pd.DataFrame(combos),hide_index=True)
         else:st.info("라인업 확인과 가정 변화 시험을 모두 통과한 서로 다른 2경기가 없어 조합을 만들지 않습니다.")
     elif "national_ranked" in st.session_state:
@@ -435,7 +451,7 @@ with tabs[1]:
 with tabs[2]:
     st.subheader("⚾ KBO / NPB 완전자동 분석")
     st.write("The Odds API 배당 + KBO/NPB 공식 팀기록 + 예고/확정 선발 + 실제 라인업을 자동 수집해 최종 확률을 다시 계산합니다.")
-    st.caption("v2.9.3: NPB 선발 이름 매칭과 최근 팀 OPS 수집을 보강하고, 핵심 기록이 없으면 DATA PARTIAL로 표시합니다.")
+    st.caption("v2.9.4: NPB 선발 이름 매칭과 최근 팀 OPS 수집을 보강하고, 핵심 기록이 없으면 DATA PARTIAL로 표시합니다.")
 
     if not ODDS_KEY:
         st.warning("THE_ODDS_API_KEY가 필요합니다.")
