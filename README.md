@@ -1,4 +1,17 @@
-# Sports EV Engine v3.0.1 — ChatGPT-style FINAL Decision UI
+# Sports EV Engine v3.0.2 — KST Calendar + Kickoff Time
+
+
+## v3.0.2 KST Calendar + kickoff time
+
+- 클럽 축구 / 국가대표 A매치 / KBO·NPB 탭에 **KST 기준 달력 날짜 선택** 추가
+- `특정 날짜만 분석(KST)`이 기본값이며, UTC 경기시간을 Asia/Seoul로 변환한 뒤 날짜를 판정
+- 자정 전후 UTC 경기의 날짜가 한국 날짜로 잘못 묶이는 문제를 방지
+- FINAL 경기 선택, 분석 진행 로그, A매치 수집 상태, KBO/NPB 선발·라인업 상태에 **경기 시작시간(KST)** 표시
+- 상세 진단에도 `kickoff_kst` 컬럼 노출
+- 클럽/A매치는 날짜 필터를 끄면 기존 오늘/3일/7일/전체 범위 조회 유지
+- KBO/NPB는 날짜 필터를 끄면 배당 제공사가 반환하는 전체 예정 경기를 조회
+
+> 날짜 필터는 현재 배당 API가 반환하는 이벤트를 대상으로 합니다. 과거 날짜의 historical odds를 새로 조회하는 기능은 아닙니다.
 
 
 ## v3.0.1 FINAL Decision UI

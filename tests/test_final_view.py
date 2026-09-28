@@ -3,7 +3,7 @@ from sports_ev_engine.final_view import compact_table,event_summary,data_status,
 
 
 def sample():
-    common=dict(event_id='e1',home_team='Germany',away_team='Greece',best_book='Pinnacle',books=4,
+    common=dict(event_id='e1',home_team='Germany',away_team='Greece',commence_time='2026-09-28T16:30:00Z',best_book='Pinnacle',books=4,
                 uncertainty_pp=4.0,counter_case_risk='LOW',signal_coverage=.8,lineup_confirmed=True,
                 deep_context_attempted=True,robust_positive_ratio=.92,robust_ev_p10=.01,
                 sanity='OK',home_form_matches=6,away_form_matches=6)
@@ -35,4 +35,4 @@ def test_summary_and_status():
 
 def test_split():
     x=split_events(sample())
-    assert len(x)==1 and x[0][1]=='Germany vs Greece'
+    assert len(x)==1 and x[0][1]=='Germany vs Greece · 09/29 01:30 KST'

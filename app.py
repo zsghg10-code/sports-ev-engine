@@ -49,15 +49,16 @@ from sports_ev_engine.deep_soccer_context import collect_deep_context
 from sports_ev_engine import deep_soccer_context as deep_soccer_provider
 from sports_ev_engine.prediction_store import record_frame, auto_settle, evaluation, pending_sport_keys
 from sports_ev_engine.final_view import split_events, compact_table, event_summary
+from sports_ev_engine.kst_schedule import format_kst
 
-st.set_page_config(page_title="Sports EV Engine v3.0.1",layout="wide")
-st.title("Sports EV Engine v3.0.1")
-st.caption("BUILD v3.0.1-final-decision-ui · 2026-09-28")
+st.set_page_config(page_title="Sports EV Engine v3.0.2",layout="wide")
+st.title("Sports EV Engine v3.0.2")
+st.caption("BUILD v3.0.2-kst-calendar · 2026-09-28")
 if any(getattr(module,"PROVIDER_BUILD",None)!="3.0.0" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider,deep_soccer_provider)):
     st.error("앱과 수집 파일 버전이 다릅니다. ZIP의 sports_ev_engine 폴더까지 전부 반영한 뒤 Streamlit 앱을 Reboot하세요.")
     st.stop()
 FootballAccessError=football_provider.FootballAccessError
-st.caption("분석 백엔드 v3.0.0 확인 완료 · FINAL UI v3.0.1")
+st.caption("분석 백엔드 v3.0.0 확인 완료 · FINAL UI v3.0.2")
 st.caption("독립 모델 → 정밀 컨텍스트 → 반증 검사 → 시장 캘리브레이션 → 27개 스트레스 시나리오 → EV/ROBUST 판정 → 기록·사후검증")
 
 def secret(name):
@@ -71,16 +72,61 @@ ODDS_KEY=secret("THE_ODDS_API_KEY")
 FOOTBALL_KEY=secret("API_FOOTBALL_KEY")
 BASEBALL_KEY=None
 
-_BUILD_ID = "3.0.1-final-decision-ui"
+_BUILD_ID = "3.0.2-kst-calendar"
 if st.session_state.get("_build_id") != _BUILD_ID:
     for _k in [
         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
-        "ranked","failures","event_meta","raw_odds","market","baseball_raw_odds","baseball_market","national_ranked","national_failures","national_evidence","national_sources","national_status","validation_records","validation_report"
+        "ranked","failures","event_meta","raw_odds","market","baseball_raw_odds","baseball_market","national_ranked","national_failures","national_evidence","national_sources","national_status","validation_records","validation_report","club_filter_label","national_filter_label","baseball_filter_label"
     ]:
         st.session_state.pop(_k, None)
     st.session_state["_build_id"] = _BUILD_ID
 
 
+
+KST=ZoneInfo("Asia/Seoul")
+
+def render_kst_calendar(prefix, *, range_options=None, range_index=0):
+    """Calendar-first filter. The provider stays UTC; comparison is always KST."""
+    c1,c2=st.columns([1,2])
+    date_only=c1.checkbox("📅 특정 날짜만 분석 (KST)",value=True,key=f"{prefix}_date_only")
+    selected=c2.date_input(
+        "경기 날짜(KST)",
+        value=datetime.now(KST).date(),
+        key=f"{prefix}_match_date",
+        help="UTC가 아니라 한국시간(KST) 00:00~23:59 기준으로 경기를 묶습니다.",
+    )
+    scope=None
+    if range_options:
+        scope=st.selectbox(
+            "경기 범위",range_options,index=range_index,key=f"{prefix}_scope",
+            disabled=date_only,
+            help="특정 날짜 필터를 끄면 기존 기간 조회를 사용할 수 있습니다.",
+        )
+    if date_only:
+        st.caption(f"📅 {selected:%Y-%m-%d} KST 경기만 분석 · 경기시간도 모두 KST로 표시")
+    return date_only, selected, scope
+
+def apply_kst_filter(frame, *, date_only, selected_date, scope=None, future_only=False):
+    if frame is None or frame.empty:
+        return frame
+    ts=pd.to_datetime(frame["commence_time"],utc=True,errors="coerce").dt.tz_convert(KST)
+    now=datetime.now(KST)
+    mask=ts.notna()
+    if future_only:
+        mask &= ts>now
+    if date_only:
+        mask &= ts.dt.date==selected_date
+    elif scope and scope!="전체":
+        if scope=="오늘(KST)":
+            mask &= ts.dt.date==now.date()
+        elif scope=="앞으로 3일":
+            mask &= (ts>=now)&(ts<=now+timedelta(days=3))
+        elif scope=="앞으로 7일":
+            mask &= (ts>=now)&(ts<=now+timedelta(days=7))
+    return frame.loc[mask].copy()
+
+def match_label_kst(home,away,kickoff):
+    return f"{home} - {away} · {format_kst(kickoff)}"
 
 
 def render_final_decision_layer(frame, key_prefix, title="🧠 v3 FINAL Decision Layer"):
@@ -131,7 +177,7 @@ def render_final_decision_layer(frame, key_prefix, title="🧠 v3 FINAL Decision
         if summary.get('missing_signals'):
             st.write("MISSING:",summary['missing_signals'])
         detail_cols=[c for c in [
-            "display_pick","best_book","best_odds","raw_independent_prob","market_prob","model_win_prob",
+            "kickoff_kst","display_pick","best_book","best_odds","raw_independent_prob","market_prob","model_win_prob",
             "robust_positive_ratio","robust_ev_min","robust_ev_p10","robust_ev_max",
             "counter_case_risk","counter_case_summary","sanity","uncertainty_pp","signal_coverage",
             "lineup_confirmed","stage","data_quality","home_lambda","away_lambda","home_expected_runs","away_expected_runs"
@@ -176,11 +222,8 @@ with tabs[0]:
     region=c2.selectbox("배당 지역",["eu","uk","us","au"],index=0)
     recent_n=c3.selectbox("최근 경기 반영", [4,5,6,8,10], index=2)
 
-    date_scope=st.selectbox(
-        "경기 범위",
-        ["오늘(KST)","앞으로 3일","앞으로 7일","전체"],
-        index=0,
-        help="API가 반환하는 미래 전체 경기를 전부 분석하지 않고 원하는 날짜 범위만 분석합니다."
+    club_date_only,club_match_date,date_scope=render_kst_calendar(
+        "club",range_options=["오늘(KST)","앞으로 3일","앞으로 7일","전체"],range_index=0
     )
 
     markets=st.multiselect("분석 마켓",["h2h","spreads","totals"],default=["h2h","spreads","totals"])
@@ -197,22 +240,11 @@ with tabs[0]:
                 odds_api=TheOddsAPI(ODDS_KEY)
                 events,headers=odds_api.odds(sport_key,region,",".join(markets))
                 raw=clean_odds(odds_api.flatten(events))
-                # Limit to requested KST date window before any API-Football calls.
-                if not raw.empty and date_scope != "전체":
-                    kst=ZoneInfo("Asia/Seoul")
-                    now_kst=datetime.now(kst)
-                    ts=pd.to_datetime(raw["commence_time"],utc=True,errors="coerce").dt.tz_convert(kst)
-                    if date_scope=="오늘(KST)":
-                        mask=ts.dt.date==now_kst.date()
-                    elif date_scope=="앞으로 3일":
-                        end=(now_kst+timedelta(days=3))
-                        mask=(ts>=now_kst)&(ts<=end)
-                    else:
-                        end=(now_kst+timedelta(days=7))
-                        mask=(ts>=now_kst)&(ts<=end)
-                    raw=raw[mask].copy()
+                # Calendar comparison is done only after UTC -> KST conversion.
+                raw=apply_kst_filter(raw,date_only=club_date_only,selected_date=club_match_date,scope=date_scope)
+                st.session_state["club_filter_label"]=(f"{club_match_date:%Y-%m-%d} KST" if club_date_only else str(date_scope))
                 if raw.empty:
-                    st.warning("선택한 날짜 범위에 배당이 있는 경기가 없습니다.")
+                    st.warning("선택한 KST 날짜/범위에 배당이 있는 경기가 없습니다.")
                     st.session_state["raw_odds"]=raw
                     st.session_state["market"]=pd.DataFrame()
                     st.session_state["ranked"]=pd.DataFrame()
@@ -241,7 +273,7 @@ with tabs[0]:
                 failures=[]
                 for idx,(eid,g) in enumerate(market.groupby("event_id"),start=1):
                     home=g.iloc[0]["home_team"]; away=g.iloc[0]["away_team"]
-                    st.write(f"[{idx}/{total_events}] {home} - {away}")
+                    st.write(f"[{idx}/{total_events}] {match_label_kst(home,away,g.iloc[0]['commence_time'])}")
                     try:
                         event_pool=dict(pool)
                         if deep_context_on:
@@ -257,6 +289,7 @@ with tabs[0]:
                         analyzed,meta=analyze_event(g,event_pool,recent_n=recent_n)
                         if not analyzed.empty:
                             analyzed["sport_key"]=sport_key
+                            analyzed["kickoff_kst"]=format_kst(g.iloc[0]["commence_time"])
                             all_rows.append(analyzed)
                         else:
                             failures.append({"경기":f"{home} - {away}","이유":meta.get("reason",meta.get("status","데이터 없음"))})
@@ -282,12 +315,13 @@ with tabs[0]:
 
     if "ranked" in st.session_state and not st.session_state["ranked"].empty:
         ranked=st.session_state["ranked"]
+        if st.session_state.get("club_filter_label"):st.caption(f"분석 경기일: {st.session_state['club_filter_label']}")
         render_final_decision_layer(ranked,"club",title="🧠 v3 FINAL Decision Layer · 클럽 축구")
         st.markdown("### 상세 진단 · 조건을 통과한 +EV 후보")
         view=ranked[candidate_mask(ranked)].copy()
         if view.empty:st.info("괴리/기대값 기준을 통과한 후보가 없습니다. 검토 대상을 억지로 추천하지 않습니다.")
         cols=["v3_decision_status","robust_positive_ratio","robust_ev_p10","robust_ev_min","counter_case_risk","signal_coverage",
-              "grade","sanity","display_pick","best_book","best_odds","books",
+              "grade","sanity","kickoff_kst","display_pick","best_book","best_odds","books",
               "consensus_prob","raw_independent_prob","model_win_prob","push_prob",
               "break_even","raw_market_gap_pp","final_market_gap_pp","edge_pp",
               "ev_roi","conservative_ev_roi","uncertainty_pp","model_weight",
@@ -364,7 +398,9 @@ with tabs[1]:
     national_label=n1.selectbox("A매치 대회",list(national_options),key="national_sport")
     national_region=n2.selectbox("배당 지역",["eu","uk","us","au"],key="national_region")
     national_recent=n3.selectbox("최근 A매치 반영",[4,5,6,8,10],index=2,key="national_recent")
-    national_scope=st.selectbox("경기 범위",["오늘(KST)","앞으로 3일","앞으로 7일","전체"],index=1,key="national_scope")
+    national_date_only,national_match_date,national_scope=render_kst_calendar(
+        "national",range_options=["오늘(KST)","앞으로 3일","앞으로 7일","전체"],range_index=1
+    )
     national_markets=st.multiselect("A매치 분석 마켓",["h2h","spreads","totals"],default=["h2h","totals"],key="national_markets")
     national_books=st.slider("A매치 최소 북메이커",1,6,2,key="national_books")
     national_deep=st.checkbox("🧠 API-Football 선택 시 v3 정밀 컨텍스트 사용",value=True,key="national_deep",
@@ -390,16 +426,8 @@ with tabs[1]:
                         competition_errors.append({"경기":sport_key,"이유":str(e)})
                 raw=clean_odds(odds_api.flatten(events))
                 if not raw.empty:
-                    ts=pd.to_datetime(raw["commence_time"],utc=True,errors="coerce").dt.tz_convert(ZoneInfo("Asia/Seoul"))
-                    now=datetime.now(ZoneInfo("Asia/Seoul"))
-                    mask=ts>now
-                    if national_scope=="오늘(KST)":
-                        mask &= ts.dt.date==now.date()
-                    elif national_scope=="앞으로 3일":
-                        mask &= ts<=now+timedelta(days=3)
-                    elif national_scope=="앞으로 7일":
-                        mask &= ts<=now+timedelta(days=7)
-                    raw=raw[mask].copy()
+                    raw=apply_kst_filter(raw,date_only=national_date_only,selected_date=national_match_date,scope=national_scope,future_only=True)
+                st.session_state["national_filter_label"]=(f"{national_match_date:%Y-%m-%d} KST" if national_date_only else str(national_scope))
                 market=consensus(raw,min_books=national_books) if not raw.empty else pd.DataFrame()
                 if record_mode=="무료 자동 수집" and not market.empty:
                     public_records,public_events,diagnostics=collect_automatic(national_options[national_label],fetch=cached_public_board,progress=lambda i,n,d:st.write(f"공개 기록 {i}/{n}: {d['소스']} — {d['상태']}"))
@@ -419,9 +447,10 @@ with tabs[1]:
                     foot=APIFootball(FOOTBALL_KEY) if record_mode=="API-Football" else None
                     for idx,(eid,g) in enumerate(market.groupby("event_id"),1):
                         home,away=g.iloc[0][["home_team","away_team"]]
-                        st.write(f"[{idx}/{market['event_id'].nunique()}] {home} - {away}")
+                        st.write(f"[{idx}/{market['event_id'].nunique()}] {match_label_kst(home,away,g.iloc[0]['commence_time'])}")
                         try:
                             kickoff=g.iloc[0]["commence_time"]
+                            match_label=match_label_kst(home,away,kickoff)
                             pool=build_national_event_pool(foot,home,away,kickoff,cache,national_recent) if foot else automatic_pool(records,public_events,home,away,kickoff,national_recent)
                             pool["manual_context"]={}
                             if not foot and any(d.get('상태')=='수집 실패' for d in st.session_state['national_sources']):
@@ -446,24 +475,25 @@ with tabs[1]:
                                 pool["event_context"]={"deep_context_attempted":False,"deep_context_reason":"free-source mode or deep context disabled"}
                             analyzed,meta=analyze_event(g,pool,recent_n=national_recent)
                             if analyzed.empty:
-                                failures.append({"경기":f"{home} - {away}","이유":meta.get("reason","기록 부족")})
-                                st.session_state["national_status"].append({"경기":f"{home} - {away}","상태":"자료 부족 · 분석 보류","이유":meta.get("reason","기록 부족")})
+                                failures.append({"경기":match_label,"이유":meta.get("reason","기록 부족")})
+                                st.session_state["national_status"].append({"경기":match_label,"경기시간(KST)":format_kst(kickoff),"상태":"자료 부족 · 분석 보류","이유":meta.get("reason","기록 부족")})
                             else:
                                 analyzed["sport_key"]=event_sports.get(eid,"")
+                                analyzed["kickoff_kst"]=format_kst(kickoff)
                                 all_rows.append(analyzed)
-                                st.session_state["national_status"].append({"경기":f"{home} - {away}","상태":"분석 가능","이유":"기록 기준 충족 · xG/결장 미수집", "라인업":"양 팀 확인" if pool.get("manual_context",{}).get("home",{}).get("confirmed") and pool.get("manual_context",{}).get("away",{}).get("confirmed") else "미확인"})
+                                st.session_state["national_status"].append({"경기":match_label,"경기시간(KST)":format_kst(kickoff),"상태":"분석 가능","이유":"기록 기준 충족 · xG/결장 미수집", "라인업":"양 팀 확인" if pool.get("manual_context",{}).get("home",{}).get("confirmed") and pool.get("manual_context",{}).get("away",{}).get("confirmed") else "미확인"})
                         except DataHold as e:
-                            failures.append({"경기":f"{home} - {away}","이유":str(e)})
-                            st.session_state["national_status"].append({"경기":f"{home} - {away}","상태":"자료 부족 · 분석 보류","이유":str(e)})
+                            failures.append({"경기":match_label_kst(home,away,g.iloc[0]["commence_time"]),"이유":str(e)})
+                            st.session_state["national_status"].append({"경기":match_label_kst(home,away,g.iloc[0]["commence_time"]),"경기시간(KST)":format_kst(g.iloc[0]["commence_time"]),"상태":"자료 부족 · 분석 보류","이유":str(e)})
                         except FootballAccessError as e:
                             access_blocked=True
-                            failures.append({"경기":f"{home} - {away}","이유":str(e)})
+                            failures.append({"경기":match_label_kst(home,away,g.iloc[0]["commence_time"]),"이유":str(e)})
                             failures.append({"경기":"남은 경기 조회 중단","이유":"동일 계정의 플랜/요청 제한이므로 반복 요청하지 않습니다."})
                             st.error(str(e))
                             break
                         except Exception as e:
-                            failures.append({"경기":f"{home} - {away}","이유":str(e)})
-                            st.session_state["national_status"].append({"경기":f"{home} - {away}","상태":"수집/분석 실패","이유":str(e)})
+                            failures.append({"경기":match_label_kst(home,away,g.iloc[0]["commence_time"]),"이유":str(e)})
+                            st.session_state["national_status"].append({"경기":match_label_kst(home,away,g.iloc[0]["commence_time"]),"경기시간(KST)":format_kst(g.iloc[0]["commence_time"]),"상태":"수집/분석 실패","이유":str(e)})
                 ranked=pd.concat(all_rows,ignore_index=True) if all_rows else pd.DataFrame()
                 if not ranked.empty:
                     ranked=ranked.sort_values(["robust_positive_ratio","robust_ev_p10","scenario_ev_min","point_ev_roi"],ascending=False)
@@ -502,6 +532,7 @@ with tabs[1]:
             st.download_button("검증 보고서 다운로드",json.dumps(report,ensure_ascii=False,indent=2),file_name="validation_report.json")
     nr=st.session_state.get("national_ranked")
     if isinstance(nr,pd.DataFrame) and not nr.empty:
+        if st.session_state.get("national_filter_label"):st.caption(f"분석 경기일: {st.session_state['national_filter_label']}")
         render_final_decision_layer(nr,"national",title="🧠 v3 FINAL Decision Layer · A매치")
         st.markdown("### 상세 진단 · 전체 경기 자동분석")
         st.caption("확률이 가장 높은 선택과 배당 대비 기대값이 가장 높은 선택을 따로 표시합니다. EV가 음수인 경기도 표시합니다. 언더오버 요약은 양방향 배당이 있는 라인 중 북메이커 수와 시장 균형으로 대표 라인을 고릅니다. 모든 라인과 핸디캡은 아래 전체 옵션에서 확인하세요.")
@@ -564,7 +595,7 @@ with tabs[1]:
 with tabs[2]:
     st.subheader("⚾ KBO / NPB 완전자동 분석")
     st.write("The Odds API 배당 + KBO/NPB 공식 팀기록 + 예고/확정 선발 + 실제 라인업을 자동 수집해 최종 확률을 다시 계산합니다.")
-    st.caption("v3.0.1: v3 백엔드 반증/27개 스트레스 시나리오 결과를 FINAL Decision Layer로 바로 표시하며 ROBUST만 자동 다폴에 허용합니다.")
+    st.caption("v3.0.2: KST 캘린더로 특정 날짜 경기만 분석하고 모든 경기 카드에 KST 시작시간을 표시합니다. ROBUST만 자동 다폴에 허용합니다.")
 
     if not ODDS_KEY:
         st.warning("THE_ODDS_API_KEY가 필요합니다.")
@@ -575,6 +606,7 @@ with tabs[2]:
     brecent=b3.selectbox("최근 경기 반영",[6,8,10,12],index=2,help="확인 가능한 최근 팀/타선 기록 수입니다. 선발은 최근 최대 5경기를 조회합니다.")
     bbooks=b4.slider("최소 북메이커",1,5,2,key="baseball_books")
     bmarkets=st.multiselect("야구 분석 마켓",["h2h","spreads","totals"],default=["h2h","spreads","totals"],key="baseball_markets")
+    baseball_date_only,baseball_match_date,_=render_kst_calendar("baseball")
     brun=st.button("⚾ 선택 리그 전체 자동분석",type="primary",disabled=not ODDS_KEY)
 
     if brun:
@@ -583,9 +615,11 @@ with tabs[2]:
                 odds_api=TheOddsAPI(ODDS_KEY)
                 events,headers=odds_api.odds(baseball_key,bregion,",".join(bmarkets))
                 rawb=clean_odds(odds_api.flatten(events))
+                rawb=apply_kst_filter(rawb,date_only=baseball_date_only,selected_date=baseball_match_date,future_only=True) if baseball_date_only else apply_kst_filter(rawb,date_only=False,selected_date=baseball_match_date,future_only=True)
+                st.session_state["baseball_filter_label"]=(f"{baseball_match_date:%Y-%m-%d} KST" if baseball_date_only else "전체 제공 예정 경기")
                 st.session_state["baseball_raw_odds"]=rawb
                 if rawb.empty:
-                    st.warning("현재 배당이 있는 경기가 없습니다.")
+                    st.warning("선택한 KST 날짜에 현재 배당이 있는 예정 경기가 없습니다." if baseball_date_only else "현재 배당이 있는 예정 경기가 없습니다.")
                     st.session_state["baseball_ranked"]=pd.DataFrame()
                     status.update(label="배당 경기 없음",state="complete")
                     st.stop()
@@ -606,12 +640,12 @@ with tabs[2]:
                 groups=list(marketb.groupby("event_id"))
                 for i,(eid,g) in enumerate(groups,start=1):
                     home=g.iloc[0]["home_team"]; away=g.iloc[0]["away_team"]
-                    st.write(f"[{i}/{len(groups)}] {home} - {away}")
+                    st.write(f"[{i}/{len(groups)}] {match_label_kst(home,away,g.iloc[0]['commence_time'])}")
                     try:
                         ctx=live.context(league,home,away,g.iloc[0]["commence_time"])
                         started=pd.Timestamp(g.iloc[0]["commence_time"])<=pd.Timestamp.now(tz="UTC")
                         if started:
-                            live_rows.append({"경기":f"{home} - {away}","단계":"시작시간 경과·사전분석 제외",
+                            live_rows.append({"경기":match_label_kst(home,away,g.iloc[0]["commence_time"]),"경기시간(KST)":format_kst(g.iloc[0]["commence_time"]),"단계":"시작시간 경과·사전분석 제외",
                                 "라인업":ctx.get("lineup_label") or ("확인" if ctx.get("lineup_confirmed") else "원본 미수집"),
                                 "선발 오더 여부":ctx.get("lineup_kind")=="starting",
                                 "원정 1~9":", ".join(x.get("name","") for x in ctx.get("away_lineup",[])),
@@ -636,7 +670,8 @@ with tabs[2]:
                                 ctx["stage"]="DATA PARTIAL"
                                 adv.setdefault("notes",[]).append("선발 최근 K-BB% 또는 양 팀 최근 OPS 결측: FINAL 보류")
                         live_rows.append({
-                            "경기":f"{home} - {away}",
+                            "경기":match_label_kst(home,away,g.iloc[0]["commence_time"]),
+                            "경기시간(KST)":format_kst(g.iloc[0]["commence_time"]),
                             "단계":ctx.get("stage"),
                             "원정 선발":ctx.get("away_starter") or "미확인",
                             "홈 선발":ctx.get("home_starter") or "미확인",
@@ -673,6 +708,7 @@ with tabs[2]:
                         analyzed,meta=analyze_official_event(g,stats,league,ctx)
                         metas.append(meta)
                         if not analyzed.empty:
+                            analyzed["kickoff_kst"]=format_kst(g.iloc[0]["commence_time"])
                             all_rows.append(analyzed)
                         else:
                             failures.append({"경기":f"{home} - {away}","이유":meta.get("reason",meta.get("status","데이터 없음"))})
@@ -705,12 +741,13 @@ with tabs[2]:
 
     if "baseball_ranked" in st.session_state and not st.session_state["baseball_ranked"].empty:
         rb=st.session_state["baseball_ranked"]
+        if st.session_state.get("baseball_filter_label"):st.caption(f"분석 경기일: {st.session_state['baseball_filter_label']}")
         render_final_decision_layer(rb,"baseball",title="🧠 v3 FINAL Decision Layer · KBO/NPB")
         st.markdown("### 상세 진단 · KBO/NPB +EV 후보")
         vb=rb[rb.get("v3_candidate",pd.Series(False,index=rb.index)).fillna(False).astype(bool)].copy()
         cols=[
             "v3_decision_status","robust_positive_ratio","robust_ev_p10","robust_ev_min","counter_case_risk","signal_coverage",
-            "grade","stage","data_quality","sanity","display_pick","best_book","best_odds","books",
+            "grade","stage","data_quality","sanity","kickoff_kst","display_pick","best_book","best_odds","books",
             "consensus_prob","raw_independent_prob","model_win_prob","push_prob","break_even",
             "edge_pp","conservative_ev_roi","uncertainty_pp","starter_confirmed","lineup_confirmed",
             "advanced_completeness","advanced_used","recent_form_used","starter_recent_used",
@@ -869,7 +906,7 @@ with tabs[7]:
             try:
                 from sports_ev_engine.telegram_notify import TelegramNotifier
                 TelegramNotifier(telegram_token,telegram_chat)(
-                    "✅ Sports EV Engine v3.0.1\nTelegram 알림 연결 테스트 성공"
+                    "✅ Sports EV Engine v3.0.2\nTelegram 알림 연결 테스트 성공"
                 )
                 st.success("테스트 알림을 보냈습니다.")
             except Exception as e:

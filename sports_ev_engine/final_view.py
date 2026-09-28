@@ -14,6 +14,8 @@ from typing import Any
 
 import pandas as pd
 
+from sports_ev_engine.kst_schedule import format_kst
+
 
 def _num(v: Any, default=float("nan")) -> float:
     try:
@@ -47,7 +49,8 @@ def event_label(frame: pd.DataFrame) -> str:
     r=frame.iloc[0]
     home=str(r.get("home_team", "홈"))
     away=str(r.get("away_team", "원정"))
-    return f"{home} vs {away}"
+    kickoff=format_kst(r.get("commence_time"))
+    return f"{home} vs {away} · {kickoff}"
 
 
 def _option_label(row: pd.Series) -> str:
