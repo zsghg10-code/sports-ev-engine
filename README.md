@@ -1,18 +1,26 @@
-# Sports EV Engine v2.7.2 — Soccer A-matches + KBO/NPB + 20K Monitor
+# Sports EV Engine v2.7.3 — Soccer A-matches + KBO/NPB + 20K Monitor
+
+v2.7.3 adds API-Football request pacing (6.2 seconds between uncached requests
+per key in this process), successful-response caching, and a batch stop on plan
+or rate-limit failures. A denied `last` query switches to permitted team/season
+queries. If the current season is denied too, the app reports that limitation;
+this patch does not unlock paid seasons. It also normalizes Turkey/Türkiye
+and excludes club Champions League qualifying from national-team discovery.
+The Odds API quota and API-Football quota are independent.
 
 The Streamlit entry point is `app.py` at the repository root. Upload the
 contents of this ZIP to the repository root, preserving the
 `sports_ev_engine/` subdirectory. The heading and BUILD caption in the app
-must show v2.7.2 after deployment.
+must show v2.7.3 after deployment.
 
-v2.7.2 corrects the post-start lineup label: a valid latest order is shown as
+v2.7.3 corrects the post-start lineup label: a valid latest order is shown as
 confirmed current order, not as an unconfirmed pregame lineup. Once the scheduled
 start time passes, the game is excluded from this pregame EV/parlay model;
 current scores and live prices need a separate live model.
 
 Upload ALL files, including the sports_ev_engine folder, then Reboot the Streamlit
 app. The UI checks the build of all changed provider modules and refuses to
-run when old modules remain. The app must show "수집 모듈 v2.7.2 확인 완료".
+run when old modules remain. The app must show "수집 모듈 v2.7.3 확인 완료".
 
 A-match discovery requests the full provider catalog, displays inactive events
 as unavailable, recognizes Euro qualifiers and CONCACAF Nations League, and
@@ -20,7 +28,7 @@ supports scanning all active senior international competitions. Unlisted
 friendlies cannot be fetched from this odds provider; no unsupported sport keys
 or odds are invented.
 
-NPB v2.7.2 reconciles Japanese announced starters with the official English
+NPB v2.7.3 reconciles Japanese announced starters with the official English
 player profile, corrects visitor/home order in recent boxscores, and attempts
 team OPS from official Japanese game batting outcomes. It only reports a
 recent OPS when at least five complete game boxscores can be resolved.
@@ -56,7 +64,7 @@ not report actual reliever pitches; NPB player handedness splits and recent
 pitch velocity remain unavailable from the wired public sources.
 
 The version history below documents earlier builds; older source descriptions
-are historical and do not describe the active v2.7.2 provider.
+are historical and do not describe the active v2.7.3 provider.
 
 v2.3 adds background odds/lineup monitoring to the v2.2 model.
 

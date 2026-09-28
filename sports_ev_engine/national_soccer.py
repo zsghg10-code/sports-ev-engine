@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from sports_ev_engine.models.soccer_auto import norm_name
 
 
-PROVIDER_BUILD = "2.7.2"
+PROVIDER_BUILD = "2.7.3"
 
 
 def is_senior_international(sport, include_inactive=False):
@@ -20,7 +20,7 @@ def is_senior_international(sport, include_inactive=False):
     return bool(
         key.startswith("soccer_fifa_world_cup_qualifiers")
         or key in {"soccer_fifa_world_cup", "soccer_uefa_nations_league", "soccer_uefa_european_championship", "soccer_conmebol_copa_america", "soccer_afc_asian_cup", "soccer_caf_africa_cup_of_nations", "soccer_concacaf_gold_cup", "soccer_international_friendlies", "soccer_uefa_euro_qualification", "soccer_concacaf_nations_league"}
-        or re.search(r"national teams|international friendlies|euro.*qualif|world cup qualif|nations league|africa cup of nations|asian cup|gold cup|copa am[eé]rica|european championship", title)
+        or re.search(r"national teams|international friendlies|euro(?:pean championship)? qualif|world cup qualif|nations league|africa cup of nations|asian cup|gold cup|copa am[eé]rica|european championship", title)
     )
 
 
@@ -54,7 +54,7 @@ def build_national_event_pool(api, home, away, cutoff_iso, cache=None, recent_n=
                     raise
                 team = _senior_team(api.search_team(normalized), name)
             # A single team query spans all competitions; share it across events in this run.
-            cache[normalized] = (team, api.team_recent_fixtures(team["id"], last=20))
+            cache[normalized] = (team, api.team_recent_fixtures(team["id"], last=20, cutoff_iso=cutoff_iso))
         team, fixtures = cache[normalized]
         names[normalized] = team["name"]
         valid = []

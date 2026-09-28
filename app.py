@@ -7,6 +7,7 @@ import streamlit as st
 
 from sports_ev_engine.providers.the_odds_api import TheOddsAPI
 from sports_ev_engine.providers.api_football import APIFootball
+from sports_ev_engine.providers import api_football as football_provider
 from sports_ev_engine.providers.mlb_statsapi import schedule as mlb_schedule
 from sports_ev_engine.market import consensus, clean_odds
 from sports_ev_engine.auto_soccer import analyze_event
@@ -21,13 +22,14 @@ from sports_ev_engine.providers import live_baseball as live_provider
 from sports_ev_engine import national_soccer as national_provider
 from sports_ev_engine.providers import baseball_advanced as advanced_provider, the_odds_api as odds_provider
 
-st.set_page_config(page_title="Sports EV Engine v2.7.2",layout="wide")
-st.title("Sports EV Engine v2.7.2")
-st.caption("BUILD v2.7.2-live-status · 2026-09-28")
-if any(getattr(module,"PROVIDER_BUILD",None)!="2.7.2" for module in (live_provider,national_provider,advanced_provider,odds_provider)):
+st.set_page_config(page_title="Sports EV Engine v2.7.3",layout="wide")
+st.title("Sports EV Engine v2.7.3")
+st.caption("BUILD v2.7.3-live-status · 2026-09-28")
+if any(getattr(module,"PROVIDER_BUILD",None)!="2.7.3" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider)):
     st.error("앱과 수집 파일 버전이 다릅니다. ZIP의 sports_ev_engine 폴더까지 전부 반영한 뒤 Streamlit 앱을 Reboot하세요.")
     st.stop()
-st.caption("수집 모듈 v2.7.2 확인 완료")
+FootballAccessError=football_provider.FootballAccessError
+st.caption("수집 모듈 v2.7.3 확인 완료")
 st.caption("종목 선택 → 배당 수집 → 상대전력 Elo + 최근폼 → 시장 prior 캘리브레이션 → BE/Edge/EV → 2~6폴")
 
 def secret(name):
@@ -41,7 +43,7 @@ ODDS_KEY=secret("THE_ODDS_API_KEY")
 FOOTBALL_KEY=secret("API_FOOTBALL_KEY")
 BASEBALL_KEY=None
 
-_BUILD_ID = "2.7.2-live-status"
+_BUILD_ID = "2.7.3-live-status"
 if st.session_state.get("_build_id") != _BUILD_ID:
     for _k in [
         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
@@ -256,7 +258,8 @@ with tabs[1]:
                         mask &= ts<=now+timedelta(days=7)
                     raw=raw[mask].copy()
                 market=consensus(raw,min_books=national_books) if not raw.empty else pd.DataFrame()
-                all_rows=[]; failures=list(competition_errors); cache={}
+                all_rows=[]; failures=list(competition_errors); cache={}; access_blocked=False
+                st.caption("API-Football 요청은 한도 보호를 위해 간격을 두고 전송하며, 성공한 기록은 재사용합니다. 최초 전체 조회는 몇 분 걸릴 수 있습니다.")
                 if not market.empty:
                     foot=APIFootball(FOOTBALL_KEY)
                     for idx,(eid,g) in enumerate(market.groupby("event_id"),1):
@@ -270,6 +273,12 @@ with tabs[1]:
                             else:
                                 analyzed["sport_key"]=event_sports.get(eid,"")
                                 all_rows.append(analyzed)
+                        except FootballAccessError as e:
+                            access_blocked=True
+                            failures.append({"경기":f"{home} - {away}","이유":str(e)})
+                            failures.append({"경기":"남은 경기 조회 중단","이유":"동일 계정의 플랜/요청 제한이므로 반복 요청하지 않습니다."})
+                            st.error(str(e))
+                            break
                         except Exception as e:
                             failures.append({"경기":f"{home} - {away}","이유":str(e)})
                 ranked=pd.concat(all_rows,ignore_index=True) if all_rows else pd.DataFrame()
@@ -277,7 +286,7 @@ with tabs[1]:
                     ranked=ranked.sort_values(["conservative_ev_roi","edge_pp"],ascending=False)
                 st.session_state["national_ranked"]=ranked
                 st.session_state["national_failures"]=failures
-                status.update(label=f"완료 — Odds API 남은 요청량 {headers.get('x-requests-remaining','확인 불가')}",state="complete")
+                status.update(label=f"{'기록 수집 제한으로 중단' if access_blocked else '완료'} — Odds API 남은 요청량 {headers.get('x-requests-remaining','확인 불가')}",state="error" if access_blocked else "complete")
         except Exception as e:
             st.error(f"A매치 분석 실패: {e}")
     nr=st.session_state.get("national_ranked")
@@ -290,7 +299,7 @@ with tabs[1]:
         st.dataframe(view.head(100),use_container_width=True,hide_index=True)
         st.caption("최근 A매치 표본과 상대 기록만으로 계산한 추정치입니다. 중립 개최지·명단 변동 등은 자동 확인하지 못해 불확실성을 높이고 A등급은 부여하지 않습니다. 기존 자동 다폴에는 포함되지 않습니다.")
     elif "national_ranked" in st.session_state:
-        st.info("선택 범위의 배당 또는 분석 가능한 후보가 없습니다.")
+        st.info("기록 수집 실패로 분석 결과를 만들지 못했습니다. 아래 제외 사유를 확인하세요." if st.session_state.get("national_failures") else "선택 범위의 배당 또는 분석 가능한 후보가 없습니다.")
     if st.session_state.get("national_failures"):
         with st.expander(f"분석 제외 경기 {len(st.session_state['national_failures'])}개"):
             st.dataframe(pd.DataFrame(st.session_state["national_failures"]),use_container_width=True,hide_index=True)
@@ -299,7 +308,7 @@ with tabs[1]:
 with tabs[2]:
     st.subheader("⚾ KBO / NPB 완전자동 분석")
     st.write("The Odds API 배당 + KBO/NPB 공식 팀기록 + 예고/확정 선발 + 실제 라인업을 자동 수집해 최종 확률을 다시 계산합니다.")
-    st.caption("v2.7.2: NPB 선발 이름 매칭과 최근 팀 OPS 수집을 보강하고, 핵심 기록이 없으면 DATA PARTIAL로 표시합니다.")
+    st.caption("v2.7.3: NPB 선발 이름 매칭과 최근 팀 OPS 수집을 보강하고, 핵심 기록이 없으면 DATA PARTIAL로 표시합니다.")
 
     if not ODDS_KEY:
         st.warning("THE_ODDS_API_KEY가 필요합니다.")

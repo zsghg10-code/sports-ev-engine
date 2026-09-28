@@ -8,6 +8,8 @@ ALIASES = {
     "south korea":"korea republic",
     "north korea":"korea dpr",
     "czech republic":"czechia",
+    "turkey":"turkiye",
+    "turkiye":"turkiye",
 }
 
 def norm_name(s):
