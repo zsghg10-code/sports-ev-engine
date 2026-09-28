@@ -1,5 +1,7 @@
 
 import os
+import json
+from pathlib import Path
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 import pandas as pd
@@ -32,6 +34,7 @@ from sports_ev_engine.competition_form import build_competition_pool
 from sports_ev_engine.national_soccer import is_senior_international, build_national_event_pool
 from sports_ev_engine.core.parlay import optimize_parlays
 from sports_ev_engine.review_policy import candidate_mask, review_mask
+from sports_ev_engine.validation import validate
 from sports_ev_engine.providers.official_baseball import OfficialBaseballStats
 from sports_ev_engine.official_baseball_model import analyze_official_event
 from sports_ev_engine.providers.live_baseball import LiveBaseballContext
@@ -41,14 +44,14 @@ from sports_ev_engine import national_soccer as national_provider
 from sports_ev_engine import free_national as free_provider
 from sports_ev_engine.providers import baseball_advanced as advanced_provider, the_odds_api as odds_provider
 
-st.set_page_config(page_title="Sports EV Engine v2.9.1",layout="wide")
-st.title("Sports EV Engine v2.9.1")
-st.caption("BUILD v2.9.1-auto-national · 2026-09-28")
-if any(getattr(module,"PROVIDER_BUILD",None)!="2.9.1" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider)):
+st.set_page_config(page_title="Sports EV Engine v2.9.2",layout="wide")
+st.title("Sports EV Engine v2.9.2")
+st.caption("BUILD v2.9.2-auto-national · 2026-09-28")
+if any(getattr(module,"PROVIDER_BUILD",None)!="2.9.2" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider)):
     st.error("앱과 수집 파일 버전이 다릅니다. ZIP의 sports_ev_engine 폴더까지 전부 반영한 뒤 Streamlit 앱을 Reboot하세요.")
     st.stop()
 FootballAccessError=football_provider.FootballAccessError
-st.caption("수집 모듈 v2.9.1 확인 완료")
+st.caption("수집 모듈 v2.9.2 확인 완료")
 st.caption("종목 선택 → 배당 수집 → 상대전력 Elo + 최근폼 → 시장 prior 캘리브레이션 → BE/Edge/EV → 2~6폴")
 
 def secret(name):
@@ -62,11 +65,11 @@ ODDS_KEY=secret("THE_ODDS_API_KEY")
 FOOTBALL_KEY=secret("API_FOOTBALL_KEY")
 BASEBALL_KEY=None
 
-_BUILD_ID = "2.9.1-auto-national"
+_BUILD_ID = "2.9.2-auto-national"
 if st.session_state.get("_build_id") != _BUILD_ID:
     for _k in [
         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
-        "ranked","failures","event_meta","raw_odds","market","baseball_raw_odds","baseball_market","national_ranked","national_failures","national_evidence","national_sources","national_status"
+        "ranked","failures","event_meta","raw_odds","market","baseball_raw_odds","baseball_market","national_ranked","national_failures","national_evidence","national_sources","national_status","validation_records","validation_report"
     ]:
         st.session_state.pop(_k, None)
     st.session_state["_build_id"] = _BUILD_ID
@@ -310,6 +313,7 @@ with tabs[1]:
                     except Exception as e:
                         records=public_records
                         st.session_state["national_sources"].append({"소스":"공개 친선전 보조 자료","상태":"수집 실패","이유":str(e)})
+                if record_mode=="무료 자동 수집":st.session_state["validation_records"]=records
                 all_rows=[]; failures=list(competition_errors); cache={}; access_blocked=False
                 if record_mode=="API-Football":st.caption("API-Football 요청은 한도 보호를 위해 간격을 두고 전송하며, 성공한 기록은 재사용합니다. 최초 전체 조회는 몇 분 걸릴 수 있습니다.")
                 if not market.empty:
@@ -366,9 +370,32 @@ with tabs[1]:
     if st.session_state.get("national_sources"):
         with st.expander("실제 수집 결과 · 소스 진단"):
             st.dataframe(pd.DataFrame(st.session_state["national_sources"]),hide_index=True)
+    with st.expander("과거 경기 검증 · 불확실성 기준",expanded=False):
+        st.write("기존 약 8.5%p 차감은 실측 오차가 아니라 보수 가정입니다. 아래 검증은 배당 없는 원모델 승무패만 평가하며, 시장 혼합 확률·언더오버·수익성을 검증하지 않습니다.")
+        if st.button("수집한 기록으로 날짜순 검증",disabled=not st.session_state.get("validation_records")):
+            with st.spinner("각 경기 이전 기록만으로 검증 중..."):
+                report,_=validate(st.session_state["validation_records"],datetime.now(ZoneInfo("Asia/Seoul")).date(),national_recent,max_events=900)
+                st.session_state["validation_report"]=report
+        report=st.session_state.get("validation_report")
+        if report is None:
+            try:report=json.loads((Path(__file__).parent/'data/validation_report.json').read_text())
+            except (OSError,ValueError):report={}
+        if report:
+            st.write({"검증 상태":report.get('status'),"학습 경기":report.get('train_n',0),"후기 검증 경기":report.get('test_n',0),"분리 날짜":report.get('split_date'),"기간 끝":report.get('end_date')})
+            st.write({"보정 전":report.get('holdout_before'),"보정 후":report.get('holdout_after')})
+            st.caption("Brier와 Log loss는 낮을수록 좋습니다. 표본 최소 100경기씩·두 지표 개선을 요구합니다. 진단 보고서는 운영 확률/차감률을 자동으로 바꾸지 않습니다.")
+            st.dataframe(pd.DataFrame(report.get('bins',[])),hide_index=True)
+            st.download_button("검증 보고서 다운로드",json.dumps(report,ensure_ascii=False,indent=2),file_name="validation_report.json")
     nr=st.session_state.get("national_ranked")
     if isinstance(nr,pd.DataFrame) and not nr.empty:
-        st.markdown("### A매치 확률·EV 후보")
+        st.markdown("### 차감 전 양의 기대값 · 미검증 관찰 목록")
+        observations=nr[nr['observation_only']].copy()
+        obs_cols=['display_pick','best_odds','model_win_prob','break_even','edge_pp','point_ev_roi','uncertainty_pp','stress_ev_roi','calibration_status','lineup_confirmed']
+        shown=observations[obs_cols].copy()
+        for col in ['model_win_prob','break_even','point_ev_roi','stress_ev_roi']:shown[col]=(shown[col]*100).round(2)
+        st.dataframe(shown.rename(columns={'point_ev_roi':'차감 전 EV(%)','stress_ev_roi':'가정 차감 후 EV(%)','uncertainty_pp':'가정 차감(%p)','calibration_status':'검증 상태'}),hide_index=True)
+        st.caption("이 목록은 검증된 추천이 아니며 자동 다폴에 추가하지 않습니다. 기대값은 모델 추정치입니다. 사진에서 보이던 일괄 차감 효과를 비교하기 위한 관찰 목록입니다.")
+        st.markdown("### 기존 보수 시나리오 기준 통과 목록")
         columns=["grade","sanity","display_pick","best_book","best_odds","books","model_win_prob","push_prob","break_even","edge_pp","conservative_ev_roi","uncertainty_pp","home_form_matches","away_form_matches","home_elo","away_elo","lineup_confirmed","parlay_eligible","data_source","evidence_note"]
         columns += ["raw_market_gap_pp","final_market_gap_pp","review_reason"]
         view=nr.loc[candidate_mask(nr),columns].copy()
@@ -405,7 +432,7 @@ with tabs[1]:
 with tabs[2]:
     st.subheader("⚾ KBO / NPB 완전자동 분석")
     st.write("The Odds API 배당 + KBO/NPB 공식 팀기록 + 예고/확정 선발 + 실제 라인업을 자동 수집해 최종 확률을 다시 계산합니다.")
-    st.caption("v2.9.1: NPB 선발 이름 매칭과 최근 팀 OPS 수집을 보강하고, 핵심 기록이 없으면 DATA PARTIAL로 표시합니다.")
+    st.caption("v2.9.2: NPB 선발 이름 매칭과 최근 팀 OPS 수집을 보강하고, 핵심 기록이 없으면 DATA PARTIAL로 표시합니다.")
 
     if not ODDS_KEY:
         st.warning("THE_ODDS_API_KEY가 필요합니다.")

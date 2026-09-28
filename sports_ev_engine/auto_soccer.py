@@ -119,6 +119,14 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
         base_unc += 3.0 + float(competition_pool.get("extra_uncertainty",0))
         if not lineup_ok:base_unc += 1.0
 
+    # A mutually exclusive 1X2 market must use one shared blend weight.
+    h2h_gaps=[]
+    for _,q in event_rows[event_rows['market']=='h2h'].iterrows():
+        side=_side_for_row(q)
+        if side:
+            pw,pp,_=price_from_matrix(matrix,'h2h',side,None)
+            h2h_gaps.append((pw/max(1e-9,1-pp)-float(q['consensus_prob']))*100)
+    h2h_gap=max(h2h_gaps,key=abs) if h2h_gaps else 0
     rows=[]
     for _,r in event_rows.iterrows():
         side=_side_for_row(r)
@@ -138,7 +146,7 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
         raw_gap_pp=(raw_cond-market_prob)*100.0
 
         final_w,model_weight=_blend_probability(
-            raw_w,raw_p,market_prob,sample,raw_gap_pp
+            raw_w,raw_p,market_prob,sample,h2h_gap if r["market"]=="h2h" else raw_gap_pp
         )
         if international:
             model_weight=min(model_weight,0.35)
@@ -196,6 +204,11 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
             "break_even":ev.break_even,
             "edge_pp":ev.edge_pp,
             "ev_roi":ev.ev_roi,
+            "point_ev_roi":ev.ev_roi,
+            "stress_ev_roi":ev.conservative_ev_roi,
+            "uncertainty_method":"사용자 검증 전 보수 차감 가정; 통계적 신뢰구간 아님",
+            "calibration_status":"시장 혼합/EV 미검증" if international else "미검증",
+            "observation_only":bool(ev.ev_roi>0 and sanity not in REVIEW_STATES),
             "conservative_ev_roi":ev.conservative_ev_roi,
             "kelly_scaled":ev.kelly_scaled,
             "grade":grade,

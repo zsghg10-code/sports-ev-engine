@@ -23,7 +23,7 @@ KBO_SCHEDULE_BASE = "https://www.koreabaseball.com/ws/Schedule.asmx"
 KBO_REFERER = "https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx"
 KBO_PITCHER_STATS = "https://www.koreabaseball.com/Record/Player/PitcherBasic/Basic1.aspx"
 
-PROVIDER_BUILD = "2.9.1"
+PROVIDER_BUILD = "2.9.2"
 
 NPB_GAMES = "https://npb.jp/games/{year}/"
 NPB_STARTERS = "https://npb.jp/announcement/starter/"

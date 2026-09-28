@@ -2,7 +2,7 @@
 import requests
 import pandas as pd
 
-PROVIDER_BUILD = "2.9.1"
+PROVIDER_BUILD = "2.9.2"
 
 BASE = "https://api.the-odds-api.com/v4"
 
