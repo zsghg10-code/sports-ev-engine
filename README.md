@@ -1,17 +1,67 @@
-# Sports EV Engine v2.1.3
+# Sports EV Engine v2.3 — 20K Monitor
 
-This patch replaces per-team recent-fixture calls with a competition-centric data pipeline.
+v2.3 adds background odds/lineup monitoring to the v2.2 model.
 
-## Why
-API-Football Free plan returned no completed fixtures for the team+season lookup used in v2.1.2.
+## Monitoring schedule
 
-## New flow
-- Resolve selected competition through `/leagues?search=...`
-- Fetch current and previous available season using `/fixtures?league=ID&season=YEAR`
-- Build one cached competition fixture pool
-- Derive each team's recent completed matches locally from that pool
-- Analyze every current event from the same pool
+- 24–6h: h2h every 60 min
+- 6–2h: h2h every 30 min
+- 2h–30m: h2h every 15 min
+- final 30m: h2h every 5 min
+- full `h2h+spreads+totals` snapshots at:
+  - 6h / 2h / 60m / 30m / 15m / 5m
 
-For UEFA Nations League the API-Football competition ID is 5 (resolved automatically).
+## Reanalysis triggers
 
-This reduces API-Football calls substantially and avoids the Free-plan `last`/team-season problems.
+- no-vig probability move:
+  - >2h: 2.0 percentage points
+  - 30m–2h: 1.5pp
+  - <30m: 1.0pp
+- 4.0pp move: immediate strong trigger
+- Asian handicap / total line move >= 0.25: immediate
+- ordinary price-only trigger requires two consecutive observations in the same direction
+- lineup change: immediate
+
+## Lineups
+
+API-Football is checked every 15 minutes from 90 minutes before kickoff.
+The Odds API credits are not used for lineup checks.
+
+## Telegram
+
+Add these Streamlit/worker secrets:
+
+```toml
+THE_ODDS_API_KEY = "..."
+API_FOOTBALL_KEY = "..."
+TELEGRAM_BOT_TOKEN = "..."
+TELEGRAM_CHAT_ID = "..."
+```
+
+Telegram notifications do not consume The Odds API credits.
+
+## Background mode
+
+Streamlit Community Cloud is the dashboard. For actual monitoring with the phone closed,
+run the included worker on an always-on host:
+
+```bash
+python monitor.py
+```
+
+Or for a cron/scheduler:
+
+```bash
+python monitor_once.py
+```
+
+The worker persists previous observations in `data/monitor_state.json`.
+
+## Credit budget
+
+Default:
+- monthly budget: 20,000
+- emergency reserve: 2,000
+- auto monitor stops before eating into the reserve
+
+The actual provider response header is recorded as `credits_remaining`.

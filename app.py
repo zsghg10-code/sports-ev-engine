@@ -13,9 +13,9 @@ from sports_ev_engine.auto_soccer import analyze_event
 from sports_ev_engine.competition_form import build_competition_pool
 from sports_ev_engine.core.parlay import optimize_parlays
 
-st.set_page_config(page_title="Sports EV Engine v2.1.3",layout="wide")
-st.title("Sports EV Engine v2.1.3")
-st.caption("종목 선택 → 배당 수집 → 축구 최근폼 모델 → BE/Edge/EV → 2~6폴 자동 생성")
+st.set_page_config(page_title="Sports EV Engine v2.3",layout="wide")
+st.title("Sports EV Engine v2.3")
+st.caption("종목 선택 → 배당 수집 → 상대전력 Elo + 최근폼 → 시장 prior 캘리브레이션 → BE/Edge/EV → 2~6폴")
 
 def secret(name):
     try:
@@ -28,12 +28,12 @@ ODDS_KEY=secret("THE_ODDS_API_KEY")
 FOOTBALL_KEY=secret("API_FOOTBALL_KEY")
 
 
-tabs=st.tabs(["⚡ 완전자동 축구","실시간 배당","시장 가격","MLB","다폴","설정"])
+tabs=st.tabs(["⚡ 완전자동 축구","실시간 배당","시장 가격","MLB","다폴","📡 모니터링","설정"])
 
 with tabs[0]:
     st.subheader("완전자동 축구 분석")
-    st.write("배당과 팀 최근 경기 데이터를 자동으로 불러와 승무패·핸디·O/U의 모델확률과 EV를 계산합니다.")
-    st.caption("무료 플랜 호환: 팀별 API 호출 대신 선택한 대회의 경기목록을 한 번 불러와 최근 같은 대회 성적을 자동 계산합니다.")
+    st.write("배당·대회 경기 데이터를 자동 수집하고 Elo/상대전력/최근폼으로 독립 확률을 만든 뒤 시장 무마진 확률로 과대괴리를 보정합니다.")
+    st.caption("v2.2: 최근 득실만 보던 문제를 수정해 Elo 상대전력 보정 + 시장 prior + 이상치 자동 격리를 적용합니다.")
     if not ODDS_KEY:
         st.warning("THE_ODDS_API_KEY가 필요합니다.")
     if not FOOTBALL_KEY:
@@ -142,19 +142,34 @@ with tabs[0]:
         ranked=st.session_state["ranked"]
         st.markdown("### 오늘 +EV 후보")
         view=ranked[ranked["grade"]!="PASS"].copy()
-        cols=["grade","display_pick","best_book","best_odds","books","consensus_prob",
-              "model_win_prob","push_prob","break_even","edge_pp","ev_roi",
-              "conservative_ev_roi","uncertainty_pp","home_form_matches","away_form_matches","home_lambda","away_lambda"]
+        cols=["grade","sanity","display_pick","best_book","best_odds","books",
+              "consensus_prob","raw_independent_prob","model_win_prob","push_prob",
+              "break_even","raw_market_gap_pp","final_market_gap_pp","edge_pp",
+              "ev_roi","conservative_ev_roi","uncertainty_pp","model_weight",
+              "home_elo","away_elo","home_form_matches","away_form_matches",
+              "home_lambda","away_lambda"]
         view=view[cols]
-        for c in ["consensus_prob","model_win_prob","push_prob","break_even"]:
+        for c in ["consensus_prob","raw_independent_prob","model_win_prob","push_prob","break_even","model_weight"]:
             view[c]=(view[c]*100).round(1)
         for c in ["ev_roi","conservative_ev_roi"]:
             view[c]=(view[c]*100).round(1)
         view["edge_pp"]=view["edge_pp"].round(1)
+        view["raw_market_gap_pp"]=view["raw_market_gap_pp"].round(1)
+        view["final_market_gap_pp"]=view["final_market_gap_pp"].round(1)
+        view["home_elo"]=view["home_elo"].round(0)
+        view["away_elo"]=view["away_elo"].round(0)
         view["home_lambda"]=view["home_lambda"].round(2)
         view["away_lambda"]=view["away_lambda"].round(2)
         st.dataframe(view.head(100),use_container_width=True,hide_index=True)
-        st.caption("A/B/C는 모델 EV와 불확실성 보정을 반영한 등급입니다. PASS는 조합에서 제외됩니다.")
+
+        st.markdown("""
+**sanity 해석**
+- `OK`: 모델-시장 괴리 정상 범위
+- `CHECK`: 원모델과 시장 차이가 다소 큼
+- `HIGH_DISAGREEMENT`: 강한 괴리, 등급 하향
+- `OUTLIER_SHRUNK`: 과도한 괴리. 시장 prior로 강하게 축소하고 자동 다폴 제외
+""")
+        st.caption("raw_independent_prob=Elo+상대보정 최근폼 원모델, model_win_prob=시장 prior로 캘리브레이션한 최종확률. OUTLIER_SHRUNK는 자동 조합 제외.")
     elif "ranked" in st.session_state:
         st.info("현재 필터와 데이터에서 +EV 후보가 없습니다.")
 
@@ -214,7 +229,71 @@ with tabs[4]:
                 frame["근사 EV"]=(frame["근사 EV"]*100).round(1)
             st.dataframe(frame,use_container_width=True,hide_index=True)
 
+
 with tabs[5]:
+    st.subheader("📡 20K 플랜 최적화 모니터링")
+    st.write("앱을 닫아도 계속 감시하려면 `monitor.py`를 별도 항상-실행 서버에서 돌립니다. 이 화면은 스케줄/알림 설정과 테스트용입니다.")
+
+    st.markdown("""
+### 기본 감시 스케줄
+| 킥오프까지 | h2h 조회 주기 | 재분석 기준 |
+|---|---:|---:|
+| 24~6시간 | 60분 | 무마진 확률 2.0%p |
+| 6~2시간 | 30분 | 2.0%p |
+| 2시간~30분 | 15분 | 1.5%p |
+| 마지막 30분 | 5분 | 1.0%p |
+
+**전체(h2h+spreads+totals) 스냅샷:** 6시간 / 2시간 / 60분 / 30분 / 15분 / 5분 전  
+**라인업 감시:** 킥오프 90분 전부터 15분 간격  
+**즉시 재분석:** 핸디·토탈 0.25 이동 / 확률 4%p 이상 급변 / 라인업 변경
+""")
+
+    st.markdown("### 크레딧 예산")
+    budget=st.number_input("월 Odds API 예산",min_value=500,max_value=100000,value=20000,step=500)
+    reserve=st.number_input("비상용으로 남길 credits",min_value=0,max_value=10000,value=2000,step=500)
+    usable=max(0,int(budget-reserve))
+    st.metric("자동 모니터링 사용 가능 예산",f"{usable:,} credits")
+    st.caption("알림 전송은 Odds API credit을 사용하지 않습니다. 크레딧은 새 배당을 조회할 때만 소모됩니다.")
+
+    st.markdown("### 연결 상태")
+    telegram_token=secret("TELEGRAM_BOT_TOKEN")
+    telegram_chat=secret("TELEGRAM_CHAT_ID")
+    st.write({
+        "Odds API":"연결됨" if ODDS_KEY else "미연결",
+        "API-Football":"연결됨" if FOOTBALL_KEY else "미연결",
+        "Telegram":"연결됨" if (telegram_token and telegram_chat) else "미연결",
+    })
+
+    if telegram_token and telegram_chat:
+        if st.button("📨 Telegram 테스트 알림 보내기"):
+            try:
+                from sports_ev_engine.telegram_notify import TelegramNotifier
+                TelegramNotifier(telegram_token,telegram_chat)(
+                    "✅ Sports EV Engine v2.3\nTelegram 알림 연결 테스트 성공"
+                )
+                st.success("테스트 알림을 보냈습니다.")
+            except Exception as e:
+                st.error(f"Telegram 테스트 실패: {e}")
+    else:
+        st.info("Telegram 알림을 쓰려면 설정 탭의 Secrets에 TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID를 추가하세요.")
+
+    st.markdown("""
+### 백그라운드 실행
+Streamlit Community Cloud 화면 자체는 스마트폰을 닫은 뒤 계속 감시하는 용도로는 적합하지 않습니다.
+
+v2.3 ZIP 안의 **`monitor.py`**가 실제 백그라운드 감시 프로그램입니다.
+Railway / Render / VPS 같은 항상 실행되는 Python worker에서:
+
+```bash
+python monitor.py
+```
+
+를 실행하면 휴대폰과 Streamlit을 닫아도 계속 감시합니다.
+
+`monitor_once.py`는 cron/스케줄러에서 한 번만 실행할 때 사용합니다.
+""")
+
+with tabs[6]:
     st.subheader("API 연결 상태")
     st.write({
         "The Odds API":"연결됨" if ODDS_KEY else "미연결",
@@ -226,9 +305,29 @@ Streamlit Cloud → **App settings → Secrets** 에 다음 형식으로 저장:
 ```toml
 THE_ODDS_API_KEY = "..."
 API_FOOTBALL_KEY = "..."
+TELEGRAM_BOT_TOKEN = "..."
+TELEGRAM_CHAT_ID = "..."
 ```
 
-**v2.1.3에서 달라진 점**
+**v2.3에서 추가된 모니터링**
+- 20K credits 최적화 시간대별 감시 주기
+- h2h 자주 조회 / spreads+totals 지정 시점 스냅샷
+- 무마진 확률 2.0→1.5→1.0%p 동적 재분석 기준
+- 4%p 급변 즉시 트리거
+- 핸디/토탈 0.25 이동 즉시 트리거
+- 일반 가격 변화는 2회 연속 관측 후 재분석
+- 경기 90분 전부터 라인업 15분 감시
+- Telegram 알림
+- 2,000 credits 비상 reserve 기본값
+- `monitor.py` 백그라운드 worker / `monitor_once.py` 스케줄러 실행
+
+**v2.2 모델 개선**
+- 경쟁 대회 내부 Elo 자동 계산
+- 최근 성적을 상대 Elo 수준으로 보정
+- 시장 무마진 확률을 calibration prior로 사용
+- 원모델-시장 25%p 이상 괴리는 OUTLIER_SHRUNK로 자동 격리
+- raw 독립확률과 최종 캘리브레이션 확률을 둘 다 표시
+- REVIEW/OUTLIER는 다폴 자동 제외
 - 팀별 최근경기 API 호출 제거
 - 대회 전체 경기목록 1~2회 호출로 최근폼 계산
 - UEFA Nations League는 API-Football league_id 5로 자동 매칭
