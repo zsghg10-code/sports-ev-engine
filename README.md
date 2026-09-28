@@ -1,9 +1,32 @@
-# Sports EV Engine v2.6.1 — Soccer + KBO/NPB + 20K Monitor
+# Sports EV Engine v2.7.1 — Soccer A-matches + KBO/NPB + 20K Monitor
 
 The Streamlit entry point is `app.py` at the repository root. Upload the
 contents of this ZIP to the repository root, preserving the
 `sports_ev_engine/` subdirectory. The heading and BUILD caption in the app
-must show v2.6.1 after deployment.
+must show v2.7.1 after deployment.
+
+NPB v2.7.1 reconciles Japanese announced starters with the official English
+player profile, corrects visitor/home order in recent boxscores, and attempts
+team OPS from official Japanese game batting outcomes. It only reports a
+recent OPS when at least five complete game boxscores can be resolved.
+The starter announcement must match the game's date and link to a player
+profile. When that page advances to tomorrow, the date-specific official
+schedule is used and each abbreviated pitcher name is resolved uniquely
+against that team's official player records. Navigation text such as `>>`
+cannot count as a confirmed starter.
+Missing starter K-BB% or team OPS holds the stage at DATA PARTIAL and excludes
+that game from automatic parlays. The screen shows the per-game missing-data
+reason; it does not substitute an OBP proxy for OPS.
+
+The new `🌍 축구 A매치` tab lists currently active senior national-team
+competitions from The Odds API. It fetches each country's recent fixtures
+across competitions with API-Football, then runs the soccer probability/EV
+model. At least three completed matches per country in the last three years
+are required. Name mismatches and missing data are shown as excluded games.
+International estimates use a smaller home adjustment and more uncertainty;
+they cannot receive an A grade and are kept out of the existing club-soccer
+automatic parlay. Availability depends on both API keys, bookmaker coverage,
+and the provider's senior national-team records.
 
 The baseball tab now calls `AdvancedBaseballSignals.collect()` for each game,
 passes its output through `analyze_official_event()`, and displays signal
@@ -18,7 +41,7 @@ not report actual reliever pitches; NPB player handedness splits and recent
 pitch velocity remain unavailable from the wired public sources.
 
 The version history below documents earlier builds; older source descriptions
-are historical and do not describe the active v2.6.1 provider.
+are historical and do not describe the active v2.7.1 provider.
 
 v2.3 adds background odds/lineup monitoring to the v2.2 model.
 

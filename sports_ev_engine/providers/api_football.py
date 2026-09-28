@@ -34,6 +34,9 @@ class APIFootball:
     def fixtures_by_date(self,date_str):
         return self._get("fixtures",{"date":date_str})
 
+    def team_recent_fixtures(self,team_id,last=16):
+        return self._get("fixtures",{"team":int(team_id),"last":int(last)})
+
     def lineups(self,fixture_id):
         return self._get("fixtures/lineups",{"fixture":int(fixture_id)})
 

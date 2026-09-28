@@ -29,12 +29,12 @@ def _cutoff_ts(iso):
     except Exception:
         return None
 
-def _build_lambdas(home_form, away_form, home_elo, away_elo, goal_mean=2.55):
+def _build_lambdas(home_form, away_form, home_elo, away_elo, goal_mean=2.55, home_adv=55.0):
     # opponent-adjusted recent form
     h_raw=max(0.18,(home_form["gf"]+away_form["ga"])/2 + 0.10)
     a_raw=max(0.18,(away_form["gf"]+home_form["ga"])/2)
 
-    elo_diff=(home_elo+55.0)-away_elo
+    elo_diff=(home_elo+home_adv)-away_elo
     elo_mult=math.exp(elo_diff/1000.0)
     home=h_raw*(elo_mult**0.38)
     away=a_raw*(elo_mult**-0.38)
@@ -78,16 +78,20 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
     first=event_rows.iloc[0]
     home=first["home_team"]
     away=first["away_team"]
+    international=bool(competition_pool.get("international"))
+    names=competition_pool.get("team_names",{})
+    home_lookup=names.get(norm_name(home),home)
+    away_lookup=names.get(norm_name(away),away)
     cutoff_ts=_cutoff_ts(first.get("commence_time"))
     fixtures=competition_pool.get("fixtures",[])
 
     ratings=competition_pool.get("elo")
     if ratings is None:
-        ratings=build_elo(fixtures)
+        ratings=build_elo(fixtures, home_adv=20.0 if international else 55.0)
         competition_pool["elo"]=ratings
 
-    hf=opponent_adjusted_form(fixtures,home,ratings,cutoff_ts,recent_n=recent_n)
-    af=opponent_adjusted_form(fixtures,away,ratings,cutoff_ts,recent_n=recent_n)
+    hf=opponent_adjusted_form(fixtures,home_lookup,ratings,cutoff_ts,recent_n=recent_n)
+    af=opponent_adjusted_form(fixtures,away_lookup,ratings,cutoff_ts,recent_n=recent_n)
 
     if not hf or not af:
         missing=[]
@@ -98,13 +102,16 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
             "reason":"same-competition completed fixtures unavailable: "+", ".join(missing)
         }
 
-    he=ratings.get(norm_name(home),1500.0)
-    ae=ratings.get(norm_name(away),1500.0)
-    hl,al=_build_lambdas(hf,af,he,ae)
+    he=ratings.get(norm_name(home_lookup),1500.0)
+    ae=ratings.get(norm_name(away_lookup),1500.0)
+    hl,al=_build_lambdas(hf,af,he,ae,home_adv=20.0 if international else 55.0)
     matrix=score_matrix(hl,al)
 
     sample=min(hf["matches"],af["matches"])
     base_unc=3.5 + (1.5 if sample<5 else 0.0) + (1.0 if sample<3 else 0.0)
+    if international:
+        # The cross-competition Elo graph is thin and match venues may be neutral.
+        base_unc += 3.0
 
     rows=[]
     for _,r in event_rows.iterrows():
@@ -127,6 +134,9 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
         final_w,model_weight=_blend_probability(
             raw_w,raw_p,market_prob,sample,raw_gap_pp
         )
+        if international:
+            model_weight=min(model_weight,0.35)
+            final_w=(model_weight*raw_cond+(1-model_weight)*market_prob)*resolved
         final_l=max(0.0,1.0-final_w-raw_p)
         ev=analyze_bet(float(r["best_odds"]),final_w,raw_p,base_unc)
 
@@ -144,6 +154,8 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
         if sanity=="OUTLIER_SHRUNK":
             grade="REVIEW"
         elif sanity=="HIGH_DISAGREEMENT" and grade=="A":
+            grade="B"
+        if international and grade=="A":
             grade="B"
 
         display=f'{home}-{away} | {r["selection"]}'
@@ -180,6 +192,7 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
             "conservative_ev_roi":ev.conservative_ev_roi,
             "kelly_scaled":ev.kelly_scaled,
             "grade":grade,
+            "data_source":"A매치 최근 기록" if international else "대회 기록",
         })
         rows.append(d)
 

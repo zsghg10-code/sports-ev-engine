@@ -341,48 +341,95 @@ class NPBOfficialLive:
             self._pages[url] = r.text
         return self._pages[url]
 
-    def _starter_map(self):
+    def _starter_map(self, game_date=None):
         soup = BeautifulSoup(self._get(NPB_STARTERS), "html.parser")
         out = {}
+        heading_tag = soup.find(string=re.compile(r"\d+月\d+日の予告先発投手"))
+        if game_date:
+            # The live page often lists tomorrow's pitchers while today's games
+            # remain in the site navigation. Do not borrow another day's names.
+            if not heading_tag or not re.search(
+                rf"0?{game_date.month}月0?{game_date.day}日の予告先発投手", str(heading_tag)
+            ):
+                return out
+        if not heading_tag:
+            return out
+        heading = heading_tag.find_parent(re.compile(r"^h[1-6]$"))
+        if not heading:
+            return out
+        section = []
+        for node in heading.next_elements:
+            if getattr(node, "name", None) in {"footer", "h1", "h2", "h3", "h4"}:
+                break
+            section.append(node)
 
         # Primary DOM path: official page uses a team-logo image followed by a pitcher link.
-        for img in soup.find_all("img"):
+        for img in (node for node in section if getattr(node, "name", None) == "img"):
             alt = _clean(img.get("alt", ""))
             team = NPB_FULL_MAP.get(alt)
             if not team:
                 continue
-            parent = img.find_parent("a") or img.parent
-            node = parent
-            pitcher = None
-            for _ in range(8):
-                node = node.find_next() if node is not None else None
-                if node is None:
+            for node in img.next_elements:
+                if getattr(node, "name", None) in {"footer", "h1", "h2", "h3", "h4"}:
                     break
-                if getattr(node, "name", None) == "a":
-                    cand = _clean(node.get_text(" ", strip=True))
-                    if cand and cand not in NPB_FULL_MAP and not re.search(r"\d{1,2}:\d{2}|球場|ドーム|スタジアム", cand):
-                        pitcher = cand
-                        break
-            if pitcher:
-                out[team] = pitcher
-
-        # Fallback for layouts where team names are visible text rather than img alt.
-        strings = [_clean(x) for x in soup.stripped_strings]
-        for i, label in enumerate(strings):
-            team = NPB_FULL_MAP.get(label)
-            if not team or team in out:
-                continue
-            for cand in strings[i+1:i+8]:
-                if cand in NPB_FULL_MAP:
-                    break
-                if not cand or re.search(r"\d{1,2}:\d{2}|球場|ドーム|スタジアム|月|日", cand):
+                if getattr(node, "name", None) == "img" and NPB_FULL_MAP.get(_clean(node.get("alt", ""))):
+                    break  # Next team's card; never assign its pitcher here.
+                if getattr(node, "name", None) != "a":
                     continue
-                if any(w in cand for w in ["予告先発", "投手", "公示", "更新", "一覧"]):
-                    continue
-                if len(cand) <= 24:
-                    out[team] = cand
+                cand = _clean(node.get_text(" ", strip=True))
+                pid = re.search(r"/players/(\d+)\.html", str(node.get("href", "")))
+                if pid and re.search(r"[\wぁ-んァ-ヶ一-龯]", cand) and cand not in NPB_FULL_MAP:
+                    out[team] = {"name": cand, "player_id": pid.group(1)}
                     break
         return out
+
+    def _english_player_name(self, player_id):
+        if not player_id:return None
+        try:
+            html=self._get(f"https://npb.jp/bis/eng/players/{player_id}.html")
+            title=BeautifulSoup(html,"html.parser").title
+            name=_clean(str(title.string).split("（")[0].split("|")[0]) if title and title.string else ""
+            return name if re.search(r"[a-z]",name,re.I) else None
+        except Exception:return None
+
+    def _player_from_stats(self, team, name, year):
+        code=NPB_TEAM_CODE.get(team)
+        if not code or not name:return None
+        try:
+            soup=BeautifulSoup(self._get(NPB_PITCHING.format(year=year,code=code)),"html.parser")
+            needle=_norm(name)
+            matches={}
+            for a in soup.find_all("a",href=True):
+                pid=re.search(r"/players/(\d+)\.html",a["href"])
+                full=_clean(a.get_text(" ",strip=True)); key=_norm(full)
+                if pid and needle and (key==needle or key.startswith(needle)):
+                    matches[pid.group(1)]={"name":full,"player_id":pid.group(1)}
+            return next(iter(matches.values())) if len(matches)==1 else None
+        except Exception:return None
+
+    def _schedule_starters(self, game_date, home, away):
+        """Recover today's announced pitchers after the announcement page rolls over."""
+        url=f"https://npb.jp/games/{game_date.year}/schedule_{game_date.month:02d}_detail.html"
+        soup=BeautifulSoup(self._get(url),"html.parser")
+        aliases={club:[jp for jp,en in NPB_NAME_MAP.items() if en==club] for club in (home,away)}
+        target=False
+        for row in soup.find_all("tr"):
+            label=row.get_text(" ",strip=True)
+            date_match=re.search(r"(?<!\d)(\d{1,2})/(\d{1,2})\s*[（(]",label)
+            if date_match:
+                target=(int(date_match.group(1)),int(date_match.group(2)))==(game_date.month,game_date.day)
+            if not target:continue
+            hpos=min((label.find(jp) for jp in aliases[home] if jp in label),default=-1)
+            apos=min((label.find(jp) for jp in aliases[away] if jp in label),default=-1)
+            if hpos<0 or apos<0 or hpos>=apos:continue
+            names=re.findall(r"先発\s*[:：]\s*([^\s　]+)",label)
+            if len(names)!=2:return {}
+            resolved={}
+            for club,short_name in zip((home,away),names):
+                entry=self._player_from_stats(club,short_name,game_date.year)
+                if entry:resolved[club]=entry
+            return resolved
+        return {}
 
     def _score_page(self, home, away, commence_iso):
         dt = _kst_dt(commence_iso)
@@ -516,15 +563,29 @@ class NPBOfficialLive:
 
     def context(self,home,away,commence_iso):
         home=canonical_english(home); away=canonical_english(away); year=_kst_dt(commence_iso).year
-        try: starters=self._starter_map()
+        try: starters=self._starter_map(_kst_dt(commence_iso).date())
         except Exception: starters={}
-        home_sp=starters.get(home); away_sp=starters.get(away)
-        starter_ok=bool(home_sp and away_sp)
+        if home not in starters or away not in starters:
+            try:
+                for team,entry in self._schedule_starters(_kst_dt(commence_iso).date(),home,away).items():
+                    starters.setdefault(team,entry)
+            except Exception:pass
         try: url=self._score_page(home,away,commence_iso)
         except Exception: url=None
         try: lu=self._lineups(url)
         except Exception: lu={"confirmed":False,"home":[],"away":[]}
         lineup_ok=bool(lu.get("confirmed")) and len(lu.get("home",[]))>=9 and len(lu.get("away",[]))>=9
+        home_entry=starters.get(home) or {}; away_entry=starters.get(away) or {}
+        for club,side in ((home,"home"),(away,"away")):
+            if (home_entry if side=="home" else away_entry).get("name") or not lineup_ok:continue
+            pitchers=[p.get("name") for p in lu.get(side,[])
+                      if "投" in str(p.get("position", "")) and re.search(r"[\wぁ-んァ-ヶ一-龯]", str(p.get("name", "")))]
+            if len(pitchers)==1:
+                entry=self._player_from_stats(club,pitchers[0],year) or {"name":pitchers[0],"player_id":None}
+                if side=="home":home_entry=entry
+                else:away_entry=entry
+        home_sp=home_entry.get("name"); away_sp=away_entry.get("name")
+        starter_ok=bool(home_sp and away_sp)
         home_p=self._fuzzy(self._pitching(home,year),home_sp) or {}
         away_p=self._fuzzy(self._pitching(away,year),away_sp) or {}
         hf=self._lineup_factor(home,lu.get("home",[]),year) if lineup_ok else None
@@ -533,6 +594,9 @@ class NPBOfficialLive:
         return {
             "league":"NPB","stage":stage,"starter_confirmed":starter_ok,"lineup_confirmed":lineup_ok,
             "home_starter":home_sp,"away_starter":away_sp,
+            "home_starter_id":home_entry.get("player_id"),"away_starter_id":away_entry.get("player_id"),
+            "home_starter_english":self._english_player_name(home_entry.get("player_id")),
+            "away_starter_english":self._english_player_name(away_entry.get("player_id")),
             "home_starter_stats":home_p,"away_starter_stats":away_p,
             "home_lineup":lu.get("home",[]),"away_lineup":lu.get("away",[]),
             "home_lineup_strength":hf,"away_lineup_strength":af,
@@ -555,4 +619,3 @@ class LiveBaseballContext:
             return empty_context(lg,"unsupported league")
         except Exception as e:
             return empty_context(lg,f"공식 선발/라인업 조회 실패: {type(e).__name__}: {e}")
-

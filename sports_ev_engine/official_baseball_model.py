@@ -133,7 +133,7 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
 
     stage=context.get("stage","PRE-LINEUP")
     if stage=="FINAL": quality,unc="HIGH",3.5
-    elif stage in {"STARTER CONFIRMED","LINEUP CONFIRMED"}: quality,unc="MEDIUM",4.5
+    elif stage in {"STARTER CONFIRMED","LINEUP CONFIRMED","DATA PARTIAL"}: quality,unc="MEDIUM",4.5
     else: quality,unc="LOW",5.8
 
     adv=context.get("advanced") or {}

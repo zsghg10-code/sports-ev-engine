@@ -1,20 +1,7 @@
 
 from __future__ import annotations
 import math
-import re
-import unicodedata
-
-def norm_name(s):
-    s = unicodedata.normalize("NFKD", str(s)).encode("ascii","ignore").decode().lower()
-    s = re.sub(r"[^a-z0-9 ]+"," ",s)
-    s = re.sub(r"\s+"," ",s).strip()
-    aliases = {
-        "republic of ireland": "ireland",
-        "korea republic": "south korea",
-        "korea dpr": "north korea",
-        "czech republic": "czechia",
-    }
-    return aliases.get(s, s)
+from sports_ev_engine.models.soccer_auto import norm_name
 
 def expected_score(rating_a, rating_b):
     return 1.0 / (1.0 + 10.0 ** ((rating_b-rating_a)/400.0))

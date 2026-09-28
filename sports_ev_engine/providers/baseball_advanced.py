@@ -15,7 +15,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from sports_ev_engine.providers.official_baseball import canonical_english
-from sports_ev_engine.providers.live_baseball import _kst_dt, _norm, _clean, _num, _npb_ip, _same_team
+from sports_ev_engine.providers.live_baseball import _kst_dt, _norm, _clean, _num, _npb_ip, _same_team, NPB_FULL_MAP
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -365,8 +365,9 @@ class KBOAdvanced:
 
 
 class NPBRecent:
-    def __init__(self, timeout=15):
+    def __init__(self, timeout=15, live=None):
         self.timeout=timeout
+        self.live=live
         self.s=requests.Session();self.s.headers.update({"User-Agent":UA,"Accept-Language":"en,ja;q=0.8"})
         self.cache={}
 
@@ -382,14 +383,14 @@ class NPBRecent:
         soup=BeautifulSoup(html,"html.parser");out=[]
         for a in soup.find_all("a",href=True):
             href=a["href"]
-            if re.search(r"/games/[fs]*s?\d{8}\d+\.html$",href):
+            if re.search(r"(?:^|/)s\d{8}\d+\.html$",href):
                 u=urljoin(url,href)
                 if u not in out:out.append(u)
         # Broad fallback used by NPB current pages.
         if not out:
             for a in soup.find_all("a",href=True):
                 href=a["href"]
-                if date.strftime("%Y%m%d") in href and href.endswith(".html"):
+                if re.search(r"(?:^|/)s"+date.strftime("%Y%m%d")+r"\d+\.html$",href):
                     u=urljoin(url,href)
                     if u not in out:out.append(u)
         return out
@@ -425,13 +426,15 @@ class NPBRecent:
         except Exception as e:return {"available":False,"reason":str(e)}
         text=BeautifulSoup(html,"html.parser").get_text(" ",strip=True)
         bats=self._candidate_tables(html,"bat"); pits=self._candidate_tables(html,"pit")
-        # NPB score pages conventionally present visitor then home for both table groups.
-        # Determine which side by team name order in page text where possible.
+        # NPB boxscores list VISITOR then HOME, whereas the title lists HOME vs VISITOR.
         teamc=canonical_english(team); short=NPB_SHORT.get(teamc,[teamc])[0]
-        # Heuristic: first two club names from title area.
         title=(BeautifulSoup(html,"html.parser").title.string if BeautifulSoup(html,"html.parser").title else "")
-        is_visitor=short.lower() in str(title).lower().split(" vs ")[0].lower() if " vs " in str(title).lower() else None
-        idx=0 if is_visitor else 1 if is_visitor is False else 0
+        parts=re.split(r"\s+vs\.?\s+",str(title),maxsplit=1,flags=re.I)
+        if len(parts)!=2:return {"available":False,"reason":"boxscore home/visitor mapping missing","url":url}
+        home_hit=self._contains_team(parts[0],teamc)
+        away_hit=self._contains_team(parts[1].split("|")[0],teamc)
+        if home_hit==away_hit:return {"available":False,"reason":"boxscore team mapping ambiguous","url":url}
+        idx=1 if home_hit else 0
         bat=bats[idx] if len(bats)>idx else None
         pit=pits[idx] if len(pits)>idx else None
 
@@ -452,25 +455,97 @@ class NPBRecent:
                 pitchers.append({"name":name,"ip":ip,"bf":bf,"bb":bb,"so":so,"er":er})
         return {"available":bool(batting or pitchers),"batting":batting,"pitchers":pitchers,"url":url}
 
+    def _official_box_url(self, day, english_url, team):
+        """Resolve the regular-season Japanese play-by-play page for exact XBH."""
+        html=self._get(english_url)
+        title=BeautifulSoup(html,"html.parser").title
+        parts=re.split(r"\s+vs\.?\s+",title.get_text(" ",strip=True) if title else "",maxsplit=1,flags=re.I)
+        if len(parts)!=2:return None
+        opponents=[c for c in NPB_SHORT if any(x.lower() in parts[0].lower() for x in NPB_SHORT[c]) or any(x.lower() in parts[1].lower() for x in NPB_SHORT[c])]
+        if len(opponents)!=2 or canonical_english(team) not in opponents:return None
+        schedule=f"https://npb.jp/games/{day.year}/schedule_{day.month:02d}_detail.html"
+        soup=BeautifulSoup(self._get(schedule),"html.parser")
+        hits=[]
+        for a in soup.find_all("a",href=True):
+            href=urljoin(schedule,a["href"])
+            if f"/scores/{day.year}/{day:%m%d}/" not in href:continue
+            parent=a.find_parent("tr") or a.find_parent("li") or a.parent
+            label=parent.get_text(" ",strip=True) if parent else ""
+            if all(any(jp in label for jp,en in NPB_FULL_MAP.items() if en==club) for club in opponents):
+                box=href.split("#")[0].split("?")[0]
+                box=box if box.endswith("/box.html") else box.rstrip("/").removesuffix("/index.html")+"/box.html"
+                hits.append(box)
+        return hits[0] if len(set(hits))==1 else None
+
+    def _box_batting(self,day,url,team):
+        try:
+            box_url=self._official_box_url(day,url,team)
+            if not box_url:return None
+            soup=BeautifulSoup(self._get(box_url),"html.parser")
+            club=canonical_english(team)
+            # The h3 game title includes both clubs; only the h4 immediately
+            # above a club's batting table identifies the table owner.
+            headings=[h for h in soup.find_all("h4")
+                      if any(jp in h.get_text(" ",strip=True) for jp,en in NPB_FULL_MAP.items() if en==club)]
+            if len(headings)!=1:return None
+            table=headings[0].find_next("table")
+            if table is None:return None
+            header=[_clean(c.get_text(" ",strip=True)) for c in table.find("tr").find_all(["th","td"])]
+            ab_i=header.index("打数"); h_i=header.index("安打")
+            outcome_start=header.index("盗塁")+1
+            counts={"ab":0,"h":0,"bb":0,"hp":0,"sf":0,"d2":0,"d3":0,"hr":0}
+            for tr in table.find_all("tr")[1:]:
+                cells=[_clean(c.get_text(" ",strip=True)) for c in tr.find_all(["th","td"],recursive=False)]
+                if len(cells)<=max(ab_i,h_i,outcome_start) or "チーム計" in " ".join(cells):continue
+                ab=_num(cells[ab_i]); hits=_num(cells[h_i])
+                if ab is None or hits is None:continue
+                counts["ab"]+=ab;counts["h"]+=hits
+                for play in cells[outcome_start:]:
+                    play=re.sub(r"\s+", "", play)
+                    if not play or play=="-":continue
+                    if "四球" in play or "敬遠" in play:counts["bb"]+=1
+                    if "死球" in play:counts["hp"]+=1
+                    if "犠飛" in play or "犠フ" in play:counts["sf"]+=1
+                    if "本" in play:counts["hr"]+=1
+                    elif "３" in play:counts["d3"]+=1
+                    elif "２" in play:counts["d2"]+=1
+            if counts["ab"]<20 or sum(counts[k] for k in ("d2","d3","hr"))>counts["h"]:return None
+            return counts
+        except Exception:return None
+
     def team_recent(self,team,commence_iso,n=10):
         urls=self.recent_game_urls(team,commence_iso,n=n)
         games=[self.parse_team_game(u,team) for _,u in urls]
         games=[g for g in games if g.get("available")]
         obps=[g.get("batting",{}).get("obp_proxy") for g in games if g.get("batting",{}).get("obp_proxy") is not None]
+        exact=[self._box_batting(day,u,team) for day,u in urls]
+        exact=[c for c in exact if c]
+        sums={k:sum(c[k] for c in exact) for k in ("ab","h","d2","d3","hr","bb","hp","sf")}
+        ops=_ops_from_counts(sums["ab"],sums["h"],sums["d2"],sums["d3"],sums["hr"],sums["bb"],sums["hp"],sums["sf"]) if len(exact)>=5 else None
         return {"available":bool(games),"games":len(games),
-                "obp_proxy":sum(obps)/len(obps) if obps else None,"raw":games}
+                "obp_proxy":sum(obps)/len(obps) if obps else None,
+                "recent10_ops":ops,"ops_games":len(exact),"raw":games}
 
-    def starter_recent(self,team,starter,commence_iso,n=5):
+    @staticmethod
+    def _same_pitcher(japanese, english, box_name):
+        target=_norm(english or japanese)
+        found=_norm(re.sub(r",\s*\([^)]*\)","",box_name or ""))
+        # English player profile: "Togo, Shosei"; boxscore: "Togo, (W)".
+        surname=_norm((english or "").split(",")[0])
+        return bool(target and found and (target==found or target in found or found in target or (surname and (found==surname or found.startswith(surname)))))
+
+    def starter_recent(self,team,starter,commence_iso,n=5,english_name=None):
         if not starter:return {"available":False,"reason":"starter unavailable"}
+        if not english_name and re.search(r"[ぁ-んァ-ヶ一-龯]",starter):
+            return {"available":False,"reason":"Japanese starter has no verified English player identity"}
         urls=self.recent_game_urls(team,commence_iso,n=15,max_days=45)
         rows=[]
-        sn=_norm(starter)
         for _,u in urls:
             g=self.parse_team_game(u,team)
             pits=g.get("pitchers") or []
             if not pits:continue
             p=pits[0]
-            if sn in _norm(p.get("name")) or _norm(p.get("name")) in sn:
+            if self._same_pitcher(starter,english_name,p.get("name")):
                 rows.append(p)
                 if len(rows)>=n:break
         if not rows:return {"available":False,"reason":"recent starter boxscores unavailable",
@@ -498,16 +573,20 @@ class NPBRecent:
     def enrich(self,home,away,commence_iso,ctx,recent_n=10):
         hrecent=self.team_recent(home,commence_iso,recent_n)
         arecent=self.team_recent(away,commence_iso,recent_n)
+        year=_kst_dt(commence_iso).year
+        def season_ops(team):
+            try:return self.live._batting(canonical_english(team),year)[1] if self.live else None
+            except Exception:return None
         return {
             "source":"NPB official recent boxscores",
             "home_recent":hrecent,"away_recent":arecent,
-            "home_starter_recent":self.starter_recent(home,ctx.get("home_starter"),commence_iso,5),
-            "away_starter_recent":self.starter_recent(away,ctx.get("away_starter"),commence_iso,5),
+            "home_starter_recent":self.starter_recent(home,ctx.get("home_starter"),commence_iso,5,ctx.get("home_starter_english")),
+            "away_starter_recent":self.starter_recent(away,ctx.get("away_starter"),commence_iso,5,ctx.get("away_starter_english")),
             "home_bullpen":self.bullpen(home,commence_iso),
             "away_bullpen":self.bullpen(away,commence_iso),
             # Exact public NPB L/R OPS split was not found in stable official tables.
-            "home_lineup_form":{"available":False,"split_exact":False,"reason":"stable public NPB L/R split unavailable"},
-            "away_lineup_form":{"available":False,"split_exact":False,"reason":"stable public NPB L/R split unavailable"},
+            "home_lineup_form":{"available":hrecent.get("recent10_ops") is not None,"recent10_ops":hrecent.get("recent10_ops"),"season_ops":season_ops(home),"ops_games":hrecent.get("ops_games"),"split_exact":False,"reason":"recent team OPS; lineup-specific split unavailable"},
+            "away_lineup_form":{"available":arecent.get("recent10_ops") is not None,"recent10_ops":arecent.get("recent10_ops"),"season_ops":season_ops(away),"ops_games":arecent.get("ops_games"),"split_exact":False,"reason":"recent team OPS; lineup-specific split unavailable"},
         }
 
 
@@ -516,7 +595,7 @@ class AdvancedBaseballSignals:
         self.live=live_context
         self.weather=WeatherProvider(timeout)
         self.kbo=KBOAdvanced(live_context.kbo,timeout)
-        self.npb=NPBRecent(timeout)
+        self.npb=NPBRecent(timeout,live_context.npb)
 
     @staticmethod
     def _starter_factor(recent,season):
