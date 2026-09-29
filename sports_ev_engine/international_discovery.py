@@ -68,23 +68,50 @@ def _fixture_kst_date(fx) -> date | None:
         return None
 
 
+def _fixtures_for_kst_day(api, day: date):
+    """Ask API-Football for one *KST calendar day*.
+
+    `/fixtures` accepts a timezone parameter.  Using it avoids the old ambiguity where
+    a KST day was approximated by two UTC date calls.  Test/fake providers from older
+    builds may only accept one positional argument, so keep a fail-soft compatibility
+    fallback.
+    """
+    ds=day.isoformat()
+    try:
+        return api.fixtures_by_date(ds, timezone_name="Asia/Seoul"), "Asia/Seoul"
+    except TypeError:
+        return api.fixtures_by_date(ds), "provider-default"
+
+
 def discover_api_football_fixtures(api, kst_dates: Iterable[date]):
-    """Return senior international fixtures on the requested KST dates plus diagnostics."""
+    """Return senior international fixtures on the requested KST dates plus diagnostics.
+
+    Discovery is fixture-first: a competition does not need to exist in The Odds API
+    catalog.  AFCON qualifiers, CONCACAF Nations League, Gulf/Arab cups and senior
+    friendlies are accepted whenever API-Football returns the scheduled fixture.
+    """
     wanted = set(kst_dates)
     out = {}
     diagnostics = []
-    for day in api_query_dates_for_kst_dates(wanted):
+    for day_obj in sorted(wanted):
+        day=day_obj.isoformat()
         try:
-            rows = api.fixtures_by_date(day)
-            diagnostics.append({"소스": f"API-Football fixtures {day}", "상태": "수집 완료", "건수": len(rows)})
+            rows,tz_used = _fixtures_for_kst_day(api,day_obj)
         except Exception as exc:
-            diagnostics.append({"소스": f"API-Football fixtures {day}", "상태": "수집 실패", "이유": str(exc)})
+            diagnostics.append({"소스": f"API-Football fixtures {day} KST", "상태": "수집 실패", "이유": str(exc)})
             continue
+        accepted=0; rejected_names=[]
         for fx in rows:
             league = fx.get("league") or {}
-            if not looks_senior_international_competition(league.get("name", ""), league.get("country", "")):
+            lname=league.get("name", "")
+            lcountry=league.get("country", "")
+            if not looks_senior_international_competition(lname, lcountry):
+                if lname and len(rejected_names)<12:
+                    rejected_names.append(str(lname))
                 continue
             kd = _fixture_kst_date(fx)
+            # With timezone=Asia/Seoul the date field should already describe the
+            # selected KST day, but timestamp conversion remains the source of truth.
             if kd not in wanted:
                 continue
             fixture = fx.get("fixture") or {}
@@ -92,7 +119,12 @@ def discover_api_football_fixtures(api, kst_dates: Iterable[date]):
             teams = fx.get("teams") or {}
             if fid is None or not (teams.get("home") or {}).get("name") or not (teams.get("away") or {}).get("name"):
                 continue
-            out[int(fid)] = fx
+            out[int(fid)] = fx; accepted+=1
+        diagnostics.append({
+            "소스": f"API-Football fixtures {day} KST", "상태": "수집 완료",
+            "건수": len(rows), "성인 A매치": accepted, "시간대": tz_used,
+            "제외 대회 예시": ", ".join(dict.fromkeys(rejected_names[:6])) if rejected_names else "—",
+        })
     return list(out.values()), diagnostics
 
 

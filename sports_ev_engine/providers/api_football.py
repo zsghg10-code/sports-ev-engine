@@ -74,8 +74,11 @@ class APIFootball:
     def search_team(self,name):
         return self._get("teams",{"search":name})
 
-    def fixtures_by_date(self,date_str):
-        return self._get("fixtures",{"date":date_str})
+    def fixtures_by_date(self,date_str,timezone_name=None):
+        params={"date":date_str}
+        if timezone_name:
+            params["timezone"]=str(timezone_name)
+        return self._get("fixtures",params)
 
     def team_recent_fixtures(self,team_id,last=16,cutoff_iso=None):
         if self.state["last_supported"]:

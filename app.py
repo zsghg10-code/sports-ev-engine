@@ -73,14 +73,14 @@ from sports_ev_engine.feature_attribution import attribution
 from sports_ev_engine.model_drift import drift_rows
 from sports_ev_engine.bankroll import simulate as simulate_bankroll
 
-st.set_page_config(page_title="Sports EV Engine v3.4.10",layout="wide")
-st.title("Sports EV Engine v3.4.10")
-st.caption("BUILD v3.4.10-npb-starter-official-fallback · 2026-09-29")
+st.set_page_config(page_title="Sports EV Engine v3.4.11",layout="wide")
+st.title("Sports EV Engine v3.4.11")
+st.caption("BUILD v3.4.11-amatch-kst-discovery-fix · 2026-09-29")
 if any(getattr(module,"PROVIDER_BUILD",None)!="3.0.0" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider,deep_soccer_provider)):
     st.error("앱과 수집 파일 버전이 다릅니다. ZIP의 sports_ev_engine 폴더까지 전부 반영한 뒤 Streamlit 앱을 Reboot하세요.")
     st.stop()
 FootballAccessError=football_provider.FootballAccessError
-st.caption("분석 백엔드 v3.4.10 · NPB 공식 일정 선발 fallback 강화 + 타순/선발투수 UI 구분")
+st.caption("분석 백엔드 v3.4.11 · A매치 KST 날짜 다중소스 자동발견 강화 + AFCON/친선전 진단 개선")
 st.caption("독립 모델 → 정밀 컨텍스트 → 반증 검사 → 시장 캘리브레이션 → 27개 스트레스 시나리오 → EV/ROBUST 판정 → 기록·사후검증")
 
 def secret(name):
@@ -97,11 +97,11 @@ SUPABASE_KEY=secret("SUPABASE_SERVICE_ROLE_KEY") or secret("SUPABASE_KEY")
 configure_persistence(SUPABASE_URL,SUPABASE_KEY)
 BASEBALL_KEY=None
 
-_BUILD_ID = "3.4.10-npb-starter-official-fallback"
+_BUILD_ID = "3.4.11-amatch-kst-discovery-fix"
 if st.session_state.get("_build_id") != _BUILD_ID:
     for _k in [
         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
-        "ranked","failures","event_meta","raw_odds","market","baseball_raw_odds","baseball_market","mlb_ranked","mlb_failures","mlb_status","mlb_schedule","mlb_market","mlb_raw_odds","mlb_filter_label","national_ranked","national_failures","national_evidence","national_sources","national_status","validation_records","validation_report","club_filter_label","national_filter_label","baseball_filter_label"
+        "ranked","failures","event_meta","raw_odds","market","baseball_raw_odds","baseball_market","mlb_ranked","mlb_failures","mlb_status","mlb_schedule","mlb_market","mlb_raw_odds","mlb_filter_label","national_ranked","national_failures","national_evidence","national_sources","national_status","national_lineups","national_discovery_status","validation_records","validation_report","club_filter_label","national_filter_label","baseball_filter_label"
     ]:
         st.session_state.pop(_k, None)
     st.session_state["_build_id"] = _BUILD_ID
@@ -420,10 +420,16 @@ with tabs[1]:
         with st.expander("A매치 대회 제공 상태",expanded=True):
             st.caption("v3.4.6부터 목록을 하드코딩하지 않습니다. The Odds API 활성 국제대회는 자동 탐색하고, '전체 A매치 · 다중소스 자동발견'은 API-Football의 해당 날짜 성인 국가대표 일정까지 추가 탐색합니다. The Odds API에 없는 경기라도 API-Football 사전 배당이 있으면 EV 분석을 계속합니다.")
             if national_catalog:
-                st.dataframe(pd.DataFrame([{"대회":s.get("title",s["key"]),"제공 상태":"활성" if s.get("active",True) else "비활성(현재 The Odds API 배당 없음)","코드":s["key"]} for s in national_catalog]),hide_index=True,use_container_width=True)
+                st.caption("아래 표의 활성/비활성은 **The Odds API 카탈로그만** 뜻합니다. 비활성이어도 `전체 A매치 · 다중소스 자동발견`에서는 API-Football 일정으로 다시 찾습니다.")
+                st.dataframe(pd.DataFrame([{
+                    "대회":s.get("title",s["key"]),
+                    "The Odds API 상태":"활성" if s.get("active",True) else "비활성",
+                    "다중소스 처리":"The Odds API 우선" if s.get("active",True) else "API-Football 날짜별 자동탐색",
+                    "코드":s["key"]
+                } for s in national_catalog]),hide_index=True,use_container_width=True)
             else:
                 st.caption("The Odds API 국제대회 목록 없음/키 미설정 — 다중소스 자동발견은 API-Football 키가 있으면 계속 사용할 수 있습니다.")
-            st.info("CONCACAF Nations League, Africa Cup/네이션스컵 계열, Gulf/Arab Cup, 월드컵·대륙 예선, 성인 친선전 등은 날짜별 자동발견 대상입니다. 일정은 발견돼도 어느 배당 소스에도 가격이 없으면 '일정 활성 · 배당 없음'으로 표시하며 EV는 만들지 않습니다.")
+            st.info("CONCACAF Nations League, Africa Cup of Nations **예선 포함**, African Nations Championship, Gulf/Arab Cup, 월드컵·대륙 예선, 성인 친선전 등은 날짜별 자동발견 대상입니다. 일정은 발견돼도 어느 배당 소스에도 가격이 없으면 '일정 활성 · 배당 없음'으로 표시하며 EV는 만들지 않습니다.")
     except Exception as e:
         national_options={"전체 A매치 · 다중소스 자동발견":["__AUTO_ALL__"]}
         national_sports=[]
@@ -440,6 +446,27 @@ with tabs[1]:
     national_books=st.slider("A매치 최소 북메이커",1,6,2,key="national_books")
     national_deep=st.checkbox("🧠 API-Football v3 정밀 컨텍스트 추가",value=True,key="national_deep",
         help="기록 소스와 독립적으로 API-Football 키가 있으면 경기 24시간 이내 xG/확정 라인업/결장/선수 중요도를 추가 수집합니다. 예상(Probable) 라인업은 확정으로 취급하지 않습니다.")
+
+    # Lightweight date preflight. API-Football accepts timezone on /fixtures; asking
+    # for the selected KST day directly prevents AFCON/other internationals from being
+    # hidden by UTC-calendar boundaries. The provider class caches this request for 15m,
+    # so the subsequent full analysis normally reuses it without another network call.
+    pre_discovered=[]; pre_discovery_diag=[]
+    if national_label=="전체 A매치 · 다중소스 자동발견" and FOOTBALL_KEY:
+        try:
+            _pre_dates=kst_target_dates(national_date_only,national_match_date,national_scope,datetime.now(ZoneInfo("Asia/Seoul")).date())
+            pre_discovered,pre_discovery_diag=discover_api_football_fixtures(APIFootball(FOOTBALL_KEY),_pre_dates)
+            st.markdown("#### 📅 선택 날짜 API-Football 성인 A매치 자동발견")
+            if pre_discovered:
+                st.dataframe(pd.DataFrame(competition_rows(pre_discovered)),hide_index=True,use_container_width=True)
+                st.caption(f"성인 A매치 일정 {len(pre_discovered)}경기를 먼저 발견했습니다. 여기의 '일정 활성'은 배당 확보와 별개이며, 아래 자동분석에서 The Odds API/API-Football 사전 배당을 결합합니다.")
+            else:
+                st.warning("선택 날짜에 API-Football 성인 A매치 일정을 아직 찾지 못했습니다. '실제 수집 결과 · 소스 진단'에서 fixtures 응답/필터 상태를 확인하세요.")
+                if pre_discovery_diag:
+                    st.dataframe(pd.DataFrame(pre_discovery_diag),hide_index=True,use_container_width=True)
+        except Exception as _pre_err:
+            st.warning(f"선택 날짜 A매치 일정 사전확인 실패: {_pre_err}")
+
     national_run=st.button("🌍 선택 대회 A매치 자동분석",type="primary",disabled=not((ODDS_KEY or FOOTBALL_KEY) and (record_mode!="API-Football" or FOOTBALL_KEY) and national_label and national_markets))
     if national_run:
         try:
@@ -479,7 +506,10 @@ with tabs[1]:
                     try:
                         kst_dates=kst_target_dates(national_date_only,national_match_date,national_scope,datetime.now(ZoneInfo("Asia/Seoul")).date())
                         discovery_api=APIFootball(FOOTBALL_KEY)
-                        discovered_fixtures,discovery_diag=discover_api_football_fixtures(discovery_api,kst_dates)
+                        if pre_discovered and set(kst_dates)==set(_pre_dates):
+                            discovered_fixtures=list(pre_discovered); discovery_diag=list(pre_discovery_diag)
+                        else:
+                            discovered_fixtures,discovery_diag=discover_api_football_fixtures(discovery_api,kst_dates)
                         fixture_map={int((fx.get("fixture") or {}).get("id")):fx for fx in discovered_fixtures if (fx.get("fixture") or {}).get("id") is not None}
                         odds_payload=[]
                         league_jobs={}
