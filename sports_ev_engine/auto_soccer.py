@@ -119,6 +119,8 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
     # v3 context layer: xG, lineup/player importance, injuries and rest are used only
     # when the provider actually returned them. Missing deep signals are never imputed.
     deep_ctx=competition_pool.get("event_context") or {"deep_context_attempted":False}
+    xg_keys=("home_xg_for","home_xg_against","away_xg_for","away_xg_against")
+    xg_missing=international and not all(deep_ctx.get(k) is not None for k in xg_keys)
     hl,al,context_unc,signal_ledger=apply_soccer_context(
         hl,al,deep_ctx,hf,af,international=international
     )
@@ -170,6 +172,10 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
         )
         if international:
             model_weight=min(model_weight,0.35)
+            # Goal-only form can produce an extreme total when measured xG is
+            # unavailable. Keep the estimate close to the no-vig market prior.
+            if xg_missing:
+                model_weight=min(model_weight,0.10)
             final_w=(model_weight*raw_cond+(1-model_weight)*market_prob)*resolved
         final_l=max(0.0,1.0-final_w-raw_p)
         ev=analyze_bet(float(r["best_odds"]),final_w,raw_p,base_unc)
@@ -254,6 +260,8 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
             "xg_samples_home":deep_ctx.get("xg_samples_home"),
             "xg_samples_away":deep_ctx.get("xg_samples_away"),
             "xg_checked_at":deep_ctx.get("xg_checked_at"),
+            "xg_collection_status":deep_ctx.get("xg_collection_status") or ("MISSING" if xg_missing else "OK"),
+            "xg_fallback_error":deep_ctx.get("xg_fallback_error") or deep_ctx.get("xg_errors"),
             "home_big_chances":deep_ctx.get("home_big_chances"),
             "away_big_chances":deep_ctx.get("away_big_chances"),
             "home_rest_days":deep_ctx.get("home_rest_days"),
@@ -308,6 +316,20 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
             legacy_ok=grade in {'A','B','C'} and ev.conservative_ev_roi>0 and sanity not in REVIEW_STATES
         d.update(decision_fields(ledger=signal_ledger,counter_cases=counter_cases,counter_risk=counter_risk,
                                  robust=robust,legacy_eligible=legacy_ok))
+        if xg_missing:
+            # Still display the priced row for inspection, but never promote
+            # missing/failed xG evidence to an automatic single or parlay pick.
+            d['v3_decision_status']='REVIEW'
+            d['robust_status']='REVIEW'
+            d['grade']='REVIEW'
+            d['v3_candidate']=False
+            d['v3_parlay_eligible']=False
+            d['parlay_eligible']=False
+            d['scenario_candidate']=False
+            d['scenario_parlay_eligible']=False
+            d['selection_status']='REVIEW'
+            d['selection_reason']='실측 xG 미수집/수집 오류: 자동후보 제외 · 원확률 검토 필요'
+            d['robust_reason']=d['selection_reason']
         d['deep_context_attempted']=bool(deep_ctx.get('deep_context_attempted'))
         d['deep_context_reason']=deep_ctx.get('deep_context_reason','')
         if international:

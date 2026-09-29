@@ -77,6 +77,11 @@ def collect_national_context(
                 kwargs["fetch"] = summary_fetch
             public_xg = xg_collector(public_events, home, away, kickoff, **kwargs)
             ctx = merge_xg_fallback(ctx, public_xg)
+            ctx["xg_collection_status"] = (
+                "OK" if all(ctx.get(k) is not None for k in xg_keys)
+                else "ERROR" if (public_xg or {}).get("xg_collector_error")
+                else "MISSING"
+            )
             # Make the audit trail explicit even if no usable xG was found.
             prior = str(ctx.get("xg_sources_tried") or "").strip()
             chain = "API-Football → ESPN → FotMob → SofaScore"
@@ -86,6 +91,16 @@ def collect_national_context(
         except Exception as exc:
             ctx["xg_fallback_attempted"] = True
             ctx["xg_fallback_error"] = f"{type(exc).__name__}: {exc}"
-            ctx["xg_sources_tried"] = "API-Football → ESPN → FotMob → SofaScore"
+            ctx["xg_collection_status"] = "ERROR"
+            ctx["xg_samples_home"] = 0
+            ctx["xg_samples_away"] = 0
+            # A collector call that fails before entering the provider loop has
+            # not actually checked ESPN/FotMob/SofaScore.
+            ctx["xg_sources_tried"] = "API-Football → public xG collector ERROR"
+
+    elif all(ctx.get(k) is not None for k in xg_keys):
+        ctx["xg_collection_status"] = "OK"
+    else:
+        ctx["xg_collection_status"] = "NO_EVENTS"
 
     return ctx

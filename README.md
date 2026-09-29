@@ -1,6 +1,6 @@
-# Sports EV Engine v3.4.13
+# Sports EV Engine v3.4.14
 
-최신 변경: `V3_4_12_XG_FAILSOFT_KO.md`
+최신 변경: `V3_4_14_XG_ERROR_GUARD_KO.md`
 
 # Sports EV Engine v3.4.10 — NPB official starter fallback + clearer lineup labels
 

@@ -186,6 +186,7 @@ def merge_xg_fallback(ctx, fallback):
         out["xg_checked_away"]=fallback.get("xg_checked_away")
         out["xg_sources_tried"]=fallback.get("xg_sources_tried")
         out["xg_errors"]=fallback.get("xg_errors")
+        out["xg_collector_error"]=bool(fallback.get("xg_collector_error"))
         out["xg_partial"]=bool(fallback.get("xg_partial"))
         out["xg_checked_at"]=fallback.get("xg_checked_at")
         if all(fallback.get(k) is not None for k in keys):

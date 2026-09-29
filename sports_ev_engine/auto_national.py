@@ -317,7 +317,7 @@ def fetch_match_xg_fotmob(event,day_fetch=_fotmob_day,detail_fetch=_fotmob_detai
 
 
 SOFA_BASE="https://api.sofascore.com/api/v1"
-SOFA_HEADERS={"User-Agent":"Mozilla/5.0 (compatible; SportsEVEngine/3.4.13; measured-xG fallback)","Accept":"application/json,text/plain,*/*"}
+SOFA_HEADERS={"User-Agent":"Mozilla/5.0 (compatible; SportsEVEngine/3.4.14; measured-xG fallback)","Accept":"application/json,text/plain,*/*"}
 
 
 def _sofa_json(path):
@@ -413,19 +413,19 @@ def fetch_match_xg_multi(event,espn_fetch=fetch_summary,fotmob_day_fetch=_fotmob
         if rec:
             rec['provider']='ESPN';return rec
         errors.append('ESPN:NO_XG')
-    except Exception as exc:errors.append(f'ESPN:{type(exc).__name__}')
+    except Exception as exc:errors.append(f'ESPN:{type(exc).__name__}: {str(exc)[:160]}')
     try:
         rec=fetch_match_xg_fotmob(event,day_fetch=fotmob_day_fetch,detail_fetch=fotmob_detail_fetch)
         if rec:
             rec['provider']='FotMob';return rec
         errors.append('FotMob:NO_XG_OR_MATCH')
-    except Exception as exc:errors.append(f'FotMob:{type(exc).__name__}')
+    except Exception as exc:errors.append(f'FotMob:{type(exc).__name__}: {str(exc)[:160]}')
     try:
         rec=fetch_match_xg_sofascore(event,day_fetch=sofa_day_fetch,stats_fetch=sofa_stats_fetch)
         if rec:
             rec['provider']='SofaScore';return rec
         errors.append('SofaScore:NO_XG_OR_MATCH')
-    except Exception as exc:errors.append(f'SofaScore:{type(exc).__name__}')
+    except Exception as exc:errors.append(f'SofaScore:{type(exc).__name__}: {str(exc)[:160]}')
     return {'errors':errors} if errors else {}
 
 def collect_recent_xg(events,home,away,kickoff,n=3,fetch=fetch_summary,allow_fotmob=None,allow_sofascore=True):
@@ -461,7 +461,8 @@ def collect_recent_xg(events,home,away,kickoff,n=3,fetch=fetch_summary,allow_fot
                     else:
                         rec=fetch_match_xg(e,fetch=fetch)
                     cache[k]=rec
-            except Exception:
+            except Exception as exc:
+                errors.append(f'collector:{type(exc).__name__}: {exc}')
                 rec={};cache[k]=rec
             if rec and rec.get('errors'):
                 errors.extend(str(x) for x in rec.get('errors') or [])
@@ -488,6 +489,7 @@ def collect_recent_xg(events,home,away,kickoff,n=3,fetch=fetch_summary,allow_fot
         'xg_source':('ESPN public match-summary xG fallback' if providers=={'ESPN'} else 'FotMob public match-details xG fallback' if providers=={'FotMob'} else 'SofaScore public match-statistics xG fallback' if providers=={'SofaScore'} else ' + '.join(sorted(providers))+' public measured xG fallback' if providers else 'public measured xG fallback'),
         'xg_sources_tried':' → '.join(attempts),
         'xg_errors':' · '.join(list(dict.fromkeys(errors))[:12]),
+        'xg_collector_error':any(str(error).startswith('collector:') for error in errors),
         'xg_partial': bool((hp['games'] or ap['games']) and not (hp['for'] is not None and ap['for'] is not None)),
         'xg_checked_at':datetime.now(timezone.utc).isoformat(),
     }
