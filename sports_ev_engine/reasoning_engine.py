@@ -9,6 +9,8 @@ Scenario ranges are stress tests, not statistical confidence intervals.
 """
 from __future__ import annotations
 
+PATCH_BUILD = '3.4.15-xg-single-pass'
+
 from dataclasses import dataclass, asdict
 from itertools import product
 import math
@@ -99,19 +101,41 @@ def apply_soccer_context(home_lambda: float, away_lambda: float, context: dict |
         nonlocal extra_unc
         if attempted:extra_unc+=float(v)
 
-    # Recent xG/xGA, if the provider exposed at least three usable matches/team.
+    # Recent measured xG/xGA is a *replacement blend*, not an additive second
+    # form boost.  Observed goals and xG are two noisy estimates of the same latent
+    # scoring rate; stacking both as sequential multipliers double-counts the same
+    # recent matches.  v3.4.15 therefore blends them exactly once here.
     hxgf=context.get("home_xg_for"); hxga=context.get("home_xg_against")
     axgf=context.get("away_xg_for"); axga=context.get("away_xg_against")
     xg_ok=all(finite(v) for v in (hxgf,hxga,axgf,axga))
     if xg_ok:
         hx=clamp((float(hxgf)+float(axga))/2, .20, 4.50)
         ax=clamp((float(axgf)+float(hxga))/2, .20, 4.50)
-        target_h=clamp(hx, base_h*.86, base_h*1.14)
-        target_a=clamp(ax, base_a*.86, base_a*1.14)
-        h=.78*h+.22*target_h; a=.78*a+.22*target_a
+        # Guard against a bad/mismatched provider record while still letting real
+        # measured xG move an overheated goal-only model materially.
+        target_h=clamp(hx, base_h*.65, base_h*1.35)
+        target_a=clamp(ax, base_a*.65, base_a*1.35)
+        try:
+            xg_n=min(int(context.get("xg_samples_home") or 0), int(context.get("xg_samples_away") or 0))
+        except (TypeError,ValueError):
+            xg_n=0
+        if xg_n >= 5:
+            xg_weight=.50 if international else .42
+        elif xg_n >= 3:
+            xg_weight=.45 if international else .38
+        else:
+            # Complete provider aggregates without an auditable sample count get a
+            # smaller weight rather than being discarded or treated as 3+ games.
+            xg_weight=.35 if international else .30
+        h=(1-xg_weight)*h+xg_weight*target_h
+        a=(1-xg_weight)*a+xg_weight*target_a
+        context["xg_application_mode"]="single_pass_blend"
+        context["xg_blend_weight"]=xg_weight
+        context["xg_target_home"]=target_h
+        context["xg_target_away"]=target_a
         ledger.add("recent_xg",True,"home" if hx>ax else "away" if ax>hx else "neutral",
-                   100*((h+a)/(base_h+base_a)-1),.80,context.get("xg_source","API-Football fixture statistics"),
-                   f"H xGF/xGA {float(hxgf):.2f}/{float(hxga):.2f}; A {float(axgf):.2f}/{float(axga):.2f}")
+                   100*((h+a)/(base_h+base_a)-1),.88,context.get("xg_source","measured xG"),
+                   f"single-pass {xg_weight:.0%}; H xGF/xGA {float(hxgf):.2f}/{float(hxga):.2f}; A {float(axgf):.2f}/{float(axga):.2f}")
     else:
         ledger.add("recent_xg",False,note="usable xG sample <3 per team or provider did not expose xG")
         miss_penalty(.8)

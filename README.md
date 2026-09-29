@@ -1,3 +1,9 @@
+# Sports EV Engine v3.4.15 — measured xG single-pass
+
+최신 수정은 **V3_4_15_XG_SINGLE_PASS_KO.md**를 확인하세요. 실측 xG 중복 경로를 제거하고 canonical single-pass blend 및 핵심 모듈 build contract를 추가했습니다.
+
+---
+
 # Sports EV Engine v3.4.14
 
 최신 변경: `V3_4_14_XG_ERROR_GUARD_KO.md`

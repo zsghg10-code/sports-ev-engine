@@ -1,4 +1,5 @@
 from __future__ import annotations
+PATCH_BUILD = '3.4.15-xg-single-pass'
 from .adaptive_model import apply_adaptive_layer
 import math
 from datetime import datetime, timezone
@@ -57,6 +58,50 @@ def _build_lambdas(home_form, away_form, home_elo, away_elo, goal_mean=2.55, hom
     factor=desired/max(total,1e-9)
     return max(.15,home*factor),max(.15,away*factor)
 
+def _canonical_xg_context(competition_pool, context):
+    """Return one coherent xG context and never hybridize/double-apply sources.
+
+    Priority is a complete fixture/deep-context measured xG set.  If that is not
+    available, a validated history/CSV xg_form (both teams, >=3 measured matches
+    by construction) can supply the complete set.  Partial source A + partial
+    source B is deliberately *not* stitched together.
+    """
+    out=dict(context or {})
+    keys=("home_xg_for","home_xg_against","away_xg_for","away_xg_against")
+    def _finite_xg(v):
+        try:return math.isfinite(float(v))
+        except (TypeError,ValueError):return False
+    if all(_finite_xg(out.get(k)) for k in keys):
+        out["xg_canonical_source"]="event_context"
+        out.setdefault("xg_application_mode","single_pass_blend")
+        out.setdefault("xg_collection_status","OK")
+        return out
+
+    xg=competition_pool.get("xg_form") or {}
+    h=xg.get("home"); a=xg.get("away")
+    try:
+        complete=(len(h)>=2 and len(a)>=2 and all(math.isfinite(float(v)) for v in (h[0],h[1],a[0],a[1])))
+    except (TypeError,ValueError):
+        complete=False
+    if complete:
+        # Replace the entire xG quartet atomically.  Never keep two values from a
+        # failed deep source and two from history, which would create a fake model.
+        out.update({
+            "home_xg_for":float(h[0]),"home_xg_against":float(h[1]),
+            "away_xg_for":float(a[0]),"away_xg_against":float(a[1]),
+        })
+        evidence=competition_pool.get("evidence") or {}
+        out["xg_samples_home"]=int((evidence.get("home") or {}).get("xg_matches") or 3)
+        out["xg_samples_away"]=int((evidence.get("away") or {}).get("xg_matches") or 3)
+        out["xg_source"]=competition_pool.get("xg_form_source") or "validated history/CSV measured xG"
+        out["xg_collection_status"]="OK"
+        out["xg_canonical_source"]="history_xg_form"
+        out["xg_application_mode"]="single_pass_blend"
+        out["xg_fallback_used"]=True
+    else:
+        out.setdefault("xg_canonical_source","missing")
+    return out
+
 def _blend_probability(raw_win, raw_push, market_prob, sample_matches, raw_gap_pp):
     """
     Market is a calibration prior, not the answer.
@@ -113,12 +158,19 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
     ctx=competition_pool.get("manual_context",{})
     neutral=bool(ctx and all(c.get("neutral") for c in ctx.values()))
     hl,al=_build_lambdas(hf,af,he,ae,home_adv=(0.0 if neutral or competition_pool.get("venue_unknown") else 20.0) if international else 55.0)
+
+    # v3.4.15 canonical xG pipeline.  Establish the one authoritative xG quartet
+    # *before* any lambda adjustment, then disable the legacy xg_form adjustment.
+    deep_ctx=_canonical_xg_context(
+        competition_pool,
+        competition_pool.get("event_context") or {"deep_context_attempted":False},
+    )
     lineup_ok=False; evidence_note=""
-    if international:hl,al,lineup_ok,evidence_note=adjust_lambdas(hl,al,competition_pool)
+    if international:
+        hl,al,lineup_ok,evidence_note=adjust_lambdas(hl,al,competition_pool,apply_xg=False)
 
     # v3 context layer: xG, lineup/player importance, injuries and rest are used only
     # when the provider actually returned them. Missing deep signals are never imputed.
-    deep_ctx=competition_pool.get("event_context") or {"deep_context_attempted":False}
     xg_keys=("home_xg_for","home_xg_against","away_xg_for","away_xg_against")
     xg_missing=international and not all(deep_ctx.get(k) is not None for k in xg_keys)
     hl,al,context_unc,signal_ledger=apply_soccer_context(
@@ -262,6 +314,11 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
             "xg_checked_at":deep_ctx.get("xg_checked_at"),
             "xg_collection_status":deep_ctx.get("xg_collection_status") or ("MISSING" if xg_missing else "OK"),
             "xg_fallback_error":deep_ctx.get("xg_fallback_error") or deep_ctx.get("xg_errors"),
+            "xg_canonical_source":deep_ctx.get("xg_canonical_source"),
+            "xg_application_mode":deep_ctx.get("xg_application_mode"),
+            "xg_blend_weight":deep_ctx.get("xg_blend_weight"),
+            "xg_target_home":deep_ctx.get("xg_target_home"),
+            "xg_target_away":deep_ctx.get("xg_target_away"),
             "home_big_chances":deep_ctx.get("home_big_chances"),
             "away_big_chances":deep_ctx.get("away_big_chances"),
             "home_rest_days":deep_ctx.get("home_rest_days"),

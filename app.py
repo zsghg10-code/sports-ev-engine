@@ -34,8 +34,10 @@ from sports_ev_engine.providers import api_football as football_provider
 from sports_ev_engine.providers.mlb_statsapi import schedule as mlb_schedule, schedule_kst as mlb_schedule_kst, match_schedule as mlb_match_schedule
 from sports_ev_engine.providers.mlb_context import MLBContextProvider
 from sports_ev_engine.market import consensus, clean_odds
+from sports_ev_engine import auto_soccer as auto_soccer_provider
 from sports_ev_engine.auto_soccer import analyze_event
 from sports_ev_engine.competition_form import build_competition_pool
+from sports_ev_engine import reasoning_engine as reasoning_provider
 from sports_ev_engine.national_soccer import is_senior_international, build_national_event_pool
 from sports_ev_engine.international_discovery import (discover_api_football_fixtures, flatten_api_football_odds, append_only_missing_events, competition_rows, kst_target_dates)
 from sports_ev_engine.core.parlay import optimize_parlays
@@ -53,6 +55,7 @@ from sports_ev_engine import national_soccer as national_provider
 from sports_ev_engine import free_national as free_provider
 from sports_ev_engine.providers import baseball_advanced as advanced_provider, the_odds_api as odds_provider
 from sports_ev_engine.deep_soccer_context import collect_deep_context, merge_xg_fallback
+from sports_ev_engine import national_context_pipeline as national_context_provider
 from sports_ev_engine.national_context_pipeline import collect_national_context
 from sports_ev_engine import deep_soccer_context as deep_soccer_provider
 from sports_ev_engine.prediction_store import record_frame, auto_settle, evaluation, pending_sport_keys, configure_persistence, persistence_status, refresh_events, load_market_observations, load_settled
@@ -74,14 +77,20 @@ from sports_ev_engine.feature_attribution import attribution
 from sports_ev_engine.model_drift import drift_rows
 from sports_ev_engine.bankroll import simulate as simulate_bankroll
 
-st.set_page_config(page_title="Sports EV Engine v3.4.14",layout="wide")
-st.title("Sports EV Engine v3.4.14")
-st.caption("BUILD v3.4.14-xg-error-guard · 2026-09-29")
+st.set_page_config(page_title="Sports EV Engine v3.4.15",layout="wide")
+st.title("Sports EV Engine v3.4.15")
+st.caption("BUILD v3.4.15-xg-single-pass · 2026-09-29")
 if any(getattr(module,"PROVIDER_BUILD",None)!="3.0.0" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider,deep_soccer_provider)):
     st.error("앱과 수집 파일 버전이 다릅니다. ZIP의 sports_ev_engine 폴더까지 전부 반영한 뒤 Streamlit 앱을 Reboot하세요.")
     st.stop()
+_PATCH_BUILD = "3.4.15-xg-single-pass"
+_patch_modules=(auto_national_provider,deep_soccer_provider,free_provider,auto_soccer_provider,reasoning_provider,national_context_provider)
+_patch_mismatch=[getattr(m,"__name__",str(m)) for m in _patch_modules if getattr(m,"PATCH_BUILD",None)!=_PATCH_BUILD]
+if _patch_mismatch:
+    st.error("v3.4.15 핵심 xG 모듈이 섞여 있습니다: " + ", ".join(_patch_mismatch) + ". DEPLOY_ONLY ZIP의 app.py와 sports_ev_engine 폴더를 함께 덮어쓴 뒤 Reboot하세요.")
+    st.stop()
 FootballAccessError=football_provider.FootballAccessError
-st.caption("분석 백엔드 v3.4.14 · API-Football 장애와 독립된 ESPN/FotMob/SofaScore xG fallback")
+st.caption("분석 백엔드 v3.4.15 · measured xG single-pass + API-Football/ESPN/FotMob/SofaScore fallback")
 st.caption("독립 모델 → 정밀 컨텍스트 → 반증 검사 → 시장 캘리브레이션 → 27개 스트레스 시나리오 → EV/ROBUST 판정 → 기록·사후검증")
 
 def secret(name):
@@ -98,7 +107,7 @@ SUPABASE_KEY=secret("SUPABASE_SERVICE_ROLE_KEY") or secret("SUPABASE_KEY")
 configure_persistence(SUPABASE_URL,SUPABASE_KEY)
 BASEBALL_KEY=None
 
-_BUILD_ID = "3.4.14-xg-error-guard"
+_BUILD_ID = "3.4.15-xg-single-pass"
 if st.session_state.get("_build_id") != _BUILD_ID:
     for _k in [
         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
@@ -655,7 +664,8 @@ with tabs[1]:
                                     "xG 시도":deep.get("xg_sources_tried") or ("API-Football" if deep.get("deep_context_attempted") else "—"),
                                     "xG 표본":f"홈 {deep.get('xg_samples_home') or 0}/3 · 원정 {deep.get('xg_samples_away') or 0}/3",
                                     "xG 후보경기":f"홈 {deep.get('xg_candidates_home') or 0} (검사 {deep.get('xg_checked_home') or 0}) · 원정 {deep.get('xg_candidates_away') or 0} (검사 {deep.get('xg_checked_away') or 0})",
-                                    "xG 진단":deep.get("xg_errors") or deep.get("xg_fallback_error") or "—"
+                                    "xG 진단":deep.get("xg_errors") or deep.get("xg_fallback_error") or deep.get("xg_pipeline_invariant_error") or "—",
+                                    "xG 적용":deep.get("xg_application_mode") or ("single_pass_blend" if all(deep.get(k) is not None for k in ("home_xg_for","home_xg_against","away_xg_for","away_xg_against")) else "—")
                                 })
                         except DataHold as e:
                             failures.append({"경기":match_label_kst(home,away,g.iloc[0]["commence_time"]),"이유":str(e)})

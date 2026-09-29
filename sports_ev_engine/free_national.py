@@ -6,6 +6,7 @@ import requests
 from sports_ev_engine.models.soccer_auto import norm_name
 
 PROVIDER_BUILD = '3.0.0'
+PATCH_BUILD = '3.4.15-xg-single-pass'
 FREE_URL = 'https://raw.githubusercontent.com/martj42/international_results/master/results.csv'
 HISTORY_COLUMNS = 'date,home_team,away_team,home_score,away_score,tournament,neutral,score_basis,home_xg,away_xg,source'.split(',')
 CONTEXT_COLUMNS = 'kickoff,home_team,away_team,team,lineup_confirmed,lineup_players,missing_players,attack_change_pct,defense_change_pct,neutral,source,checked_at'.split(',')
@@ -122,13 +123,19 @@ def event_context(frame,home,away,kickoff_iso,now=None):
     if len(out)==2 and out['home']['neutral']!=out['away']['neutral']:raise ValueError('양 팀 중립구장 값이 다릅니다.')
     return out
 
-def adjust_lambdas(hl,al,pool):
+def adjust_lambdas(hl,al,pool,apply_xg=True):
     xg=pool.get('xg_form',{});ctx=pool.get('manual_context',{});notes=[]
-    if 'home' in xg and 'away' in xg:
+    if apply_xg and 'home' in xg and 'away' in xg:
         hx=(xg['home'][0]+xg['away'][1])/2;ax=(xg['away'][0]+xg['home'][1])/2
         hl=.75*hl+.25*max(.8*hl,min(1.2*hl,hx))
-        al=.75*al+.25*max(.8*al,min(1.2*al,ax));notes.append('xG 반영(양 팀 각 3경기 이상)')
-    else:notes.append('xG 미반영(표본 부족/미수집)')
+        al=.75*al+.25*max(.8*al,min(1.2*al,ax));notes.append('xG 반영(legacy 단일경로)')
+    elif apply_xg:
+        notes.append('xG 미반영(표본 부족/미수집)')
+    else:
+        # v3.4.15+: analyze_event canonicalizes measured xG into event_context and
+        # apply_soccer_context() owns the one-and-only xG blend.  This prevents a
+        # history/CSV xG_form from being applied here and then again downstream.
+        notes.append('xG 단일경로 처리(컨텍스트 엔진)')
     h=ctx.get('home',{});a=ctx.get('away',{})
     hl*=1+(h.get('attack',0)+a.get('defense',0))/100
     al*=1+(a.get('attack',0)+h.get('defense',0))/100

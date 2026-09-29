@@ -5,6 +5,8 @@ independent: an API-Football error must never prevent ESPN/FotMob/SofaScore xG c
 """
 from __future__ import annotations
 
+PATCH_BUILD = '3.4.15-xg-single-pass'
+
 import pandas as pd
 
 from .deep_soccer_context import collect_deep_context, merge_xg_fallback
@@ -102,5 +104,12 @@ def collect_national_context(
         ctx["xg_collection_status"] = "OK"
     else:
         ctx["xg_collection_status"] = "NO_EVENTS"
+
+    # In deep mode, NOT_CHECKED is never a valid terminal xG state.  Seeing it
+    # previously meant app.py and this module came from different ZIP versions.
+    if enable_deep and ctx.get("xg_collection_status") in (None, "", "NOT_CHECKED"):
+        ctx["xg_collection_status"] = "ERROR"
+        ctx["xg_pipeline_invariant_error"] = "deep xG pipeline ended without terminal status"
+        ctx["xg_fallback_error"] = ctx.get("xg_fallback_error") or ctx["xg_pipeline_invariant_error"]
 
     return ctx
