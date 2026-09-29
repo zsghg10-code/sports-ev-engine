@@ -1,3 +1,21 @@
+# Sports EV Engine v3.4.12
+
+최신 변경: `V3_4_12_XG_FAILSOFT_KO.md`
+
+# Sports EV Engine v3.4.10 — NPB official starter fallback + clearer lineup labels
+
+- NPB announcement page가 다음날로 넘어간 뒤에도 월간 공식 일정의 `先発:` 이름을 선발 확정 근거로 사용합니다.
+- 선수 profile/id 해석이 실패해도 공식 일정에 이름이 있으면 선발 자체를 버리지 않습니다.
+- UI의 `선발 오더`를 `타순 1~9 확정`으로 변경해 선발투수와 타순을 구분합니다.
+- `선발확인` 컬럼은 `선발투수 확정`으로 표시합니다.
+- v3.4.9 KBO Naver lineup fallback 및 이전 기능은 그대로 유지합니다.
+
+---
+
+# Sports EV Engine v3.4.9 — KBO Naver lineup fallback
+
+KBO batting-order collection is now fail-soft: KBO official GameCenter remains primary; when it has not returned a complete lineup, the engine checks Naver Sports public preview and promotes the lineup only when both teams have complete batting orders 1–9. v3.4.8 match-safety guards remain active.
+
 # Sports EV Engine v3.4.7 — NPB starter section fix
 
 - NPB announced-starter parsing now continues across Central/Pacific League sub-headings under the same date.

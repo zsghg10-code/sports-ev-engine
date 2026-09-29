@@ -53,6 +53,7 @@ from sports_ev_engine import national_soccer as national_provider
 from sports_ev_engine import free_national as free_provider
 from sports_ev_engine.providers import baseball_advanced as advanced_provider, the_odds_api as odds_provider
 from sports_ev_engine.deep_soccer_context import collect_deep_context, merge_xg_fallback
+from sports_ev_engine.national_context_pipeline import collect_national_context
 from sports_ev_engine import deep_soccer_context as deep_soccer_provider
 from sports_ev_engine.prediction_store import record_frame, auto_settle, evaluation, pending_sport_keys, configure_persistence, persistence_status, refresh_events, load_market_observations, load_settled
 from sports_ev_engine.providers.mlb_postgame import analyze_settled_mlb, postgame_reviews
@@ -73,14 +74,14 @@ from sports_ev_engine.feature_attribution import attribution
 from sports_ev_engine.model_drift import drift_rows
 from sports_ev_engine.bankroll import simulate as simulate_bankroll
 
-st.set_page_config(page_title="Sports EV Engine v3.4.11",layout="wide")
-st.title("Sports EV Engine v3.4.11")
-st.caption("BUILD v3.4.11-amatch-kst-discovery-fix · 2026-09-29")
+st.set_page_config(page_title="Sports EV Engine v3.4.12",layout="wide")
+st.title("Sports EV Engine v3.4.12")
+st.caption("BUILD v3.4.12-xg-fallback-independent · 2026-09-29")
 if any(getattr(module,"PROVIDER_BUILD",None)!="3.0.0" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider,deep_soccer_provider)):
     st.error("앱과 수집 파일 버전이 다릅니다. ZIP의 sports_ev_engine 폴더까지 전부 반영한 뒤 Streamlit 앱을 Reboot하세요.")
     st.stop()
 FootballAccessError=football_provider.FootballAccessError
-st.caption("분석 백엔드 v3.4.11 · A매치 KST 날짜 다중소스 자동발견 강화 + AFCON/친선전 진단 개선")
+st.caption("분석 백엔드 v3.4.12 · API-Football 장애와 독립된 ESPN/FotMob xG fallback")
 st.caption("독립 모델 → 정밀 컨텍스트 → 반증 검사 → 시장 캘리브레이션 → 27개 스트레스 시나리오 → EV/ROBUST 판정 → 기록·사후검증")
 
 def secret(name):
@@ -97,7 +98,7 @@ SUPABASE_KEY=secret("SUPABASE_SERVICE_ROLE_KEY") or secret("SUPABASE_KEY")
 configure_persistence(SUPABASE_URL,SUPABASE_KEY)
 BASEBALL_KEY=None
 
-_BUILD_ID = "3.4.11-amatch-kst-discovery-fix"
+_BUILD_ID = "3.4.12-xg-fallback-independent"
 if st.session_state.get("_build_id") != _BUILD_ID:
     for _k in [
         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
@@ -547,7 +548,7 @@ with tabs[1]:
                 st.session_state["national_filter_label"]=(f"{national_match_date:%Y-%m-%d} KST" if national_date_only else str(national_scope))
                 market=consensus(raw,min_books=national_books) if not raw.empty else pd.DataFrame()
                 if record_mode=="무료 자동 수집" and not market.empty:
-                    public_records,public_events,diagnostics=collect_automatic(theodds_keys if theodds_keys else ["all_international"],fetch=cached_public_board,progress=lambda i,n,d:st.write(f"공개 기록 {i}/{n}: {d['소스']} — {d['상태']}"))
+                    public_records,public_events,diagnostics=collect_automatic((["all_international"] if auto_all else (theodds_keys if theodds_keys else ["all_international"])),fetch=cached_public_board,progress=lambda i,n,d:st.write(f"공개 기록 {i}/{n}: {d['소스']} — {d['상태']}"))
                     st.session_state["national_sources"].extend(diagnostics)
                     if any(d['상태']=='수집 실패' for d in diagnostics):
                         st.warning("일부 공개 소스 수집에 실패했습니다. 확보한 기록으로 기준을 검사하며, 전체 최근 경기 수집을 보장하지 않습니다. 아래 소스 진단을 확인하세요.")
@@ -584,28 +585,17 @@ with tabs[1]:
                                     except Exception as exc:st.session_state['national_sources'].append({'소스':f'{home} - {away} 라인업','상태':'수집 실패','이유':str(exc)})
                             for side,info in pool.get("evidence",{}).items():
                                 st.session_state["national_evidence"].append({"경기":f"{home} - {away}","팀":home if side=="home" else away,**info})
-                            if context_api and national_deep:
-                                try:
-                                    deep_ctx=collect_deep_context(
-                                        context_api,pool,home,away,kickoff,season=pd.Timestamp(kickoff).year,horizon_hours=24
-                                    )
-                                    # If API-Football did not expose a complete recent xG sample,
-                                    # try measured xG from verified ESPN match summaries.  This is a
-                                    # source fallback, not an xG estimate: missing public xG stays MISSING.
-                                    xg_keys=("home_xg_for","home_xg_against","away_xg_for","away_xg_against")
-                                    if not all(deep_ctx.get(k) is not None for k in xg_keys) and public_events:
-                                        try:
-                                            public_xg=collect_recent_xg(
-                                                public_events,home,away,kickoff,n=3,fetch=cached_public_summary,allow_fotmob=True
-                                            )
-                                            deep_ctx=merge_xg_fallback(deep_ctx,public_xg)
-                                        except Exception as xg_error:
-                                            deep_ctx["xg_fallback_error"]=f"{type(xg_error).__name__}: {xg_error}"
-                                    pool["event_context"]=deep_ctx
-                                except Exception as deep_error:
-                                    pool["event_context"]={"deep_context_attempted":True,"deep_context_reason":f"collector failed: {type(deep_error).__name__}: {deep_error}","lineup_confirmed":False,"lineup_status":"ERROR"}
+                            if national_deep:
+                                # API-Football and public measured-xG fallback are independent.
+                                # A rate-limit/fixture failure must not prevent ESPN/FotMob checks.
+                                pool["event_context"]=collect_national_context(
+                                    context_api,pool,home,away,kickoff,
+                                    season=pd.Timestamp(kickoff).year,horizon_hours=24,
+                                    public_events=public_events,summary_fetch=cached_public_summary,
+                                    enable_deep=True,
+                                )
                             else:
-                                pool["event_context"]={"deep_context_attempted":False,"deep_context_reason":"API-Football key missing or deep context disabled","lineup_confirmed":False,"lineup_status":"NOT_CHECKED"}
+                                pool["event_context"]={"deep_context_attempted":False,"deep_context_reason":"deep context disabled","lineup_confirmed":False,"lineup_status":"NOT_CHECKED"}
                             deep=pool.get("event_context") or {}
                             lineup_stage=resolve_lineup_stage(deep,pool.get("manual_context") or {})
                             if lineup_stage.get("confirmed") or lineup_stage.get("probable"):
