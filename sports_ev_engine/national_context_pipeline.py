@@ -1,7 +1,7 @@
 """Fail-soft national-team pre-match context orchestration.
 
 API-Football deep context and public measured-xG fallbacks are deliberately
-independent: an API-Football error must never prevent ESPN/FotMob xG checks.
+independent: an API-Football error must never prevent ESPN/FotMob/SofaScore xG checks.
 """
 from __future__ import annotations
 
@@ -79,13 +79,13 @@ def collect_national_context(
             ctx = merge_xg_fallback(ctx, public_xg)
             # Make the audit trail explicit even if no usable xG was found.
             prior = str(ctx.get("xg_sources_tried") or "").strip()
-            chain = "API-Football → ESPN → FotMob"
+            chain = "API-Football → ESPN → FotMob → SofaScore"
             ctx["xg_sources_tried"] = chain if not prior else (
                 chain if "ESPN" in prior or "FotMob" in prior else f"API-Football → {prior}"
             )
         except Exception as exc:
             ctx["xg_fallback_attempted"] = True
             ctx["xg_fallback_error"] = f"{type(exc).__name__}: {exc}"
-            ctx["xg_sources_tried"] = "API-Football → ESPN → FotMob"
+            ctx["xg_sources_tried"] = "API-Football → ESPN → FotMob → SofaScore"
 
     return ctx

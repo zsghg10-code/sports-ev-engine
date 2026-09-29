@@ -314,28 +314,130 @@ def fetch_match_xg_fotmob(event,day_fetch=_fotmob_day,detail_fetch=_fotmob_detai
     return {'home_xg':x['home'],'away_xg':x['away'],'source':f'https://www.fotmob.com/matches/{mid}'}
 
 
-def fetch_match_xg_multi(event,espn_fetch=fetch_summary,fotmob_day_fetch=_fotmob_day,fotmob_detail_fetch=_fotmob_detail):
-    """Measured-xG cascade: ESPN -> FotMob. Missing stays missing."""
+
+
+SOFA_BASE="https://api.sofascore.com/api/v1"
+SOFA_HEADERS={"User-Agent":"Mozilla/5.0 (compatible; SportsEVEngine/3.4.13; measured-xG fallback)","Accept":"application/json,text/plain,*/*"}
+
+
+def _sofa_json(path):
+    r=requests.get(f"{SOFA_BASE}/{path.lstrip('/')}",headers=SOFA_HEADERS,timeout=(5,12))
+    r.raise_for_status()
+    ctype=(r.headers.get('content-type') or '').lower()
+    if 'json' not in ctype and not r.text.lstrip().startswith(('{','[')):
+        raise ValueError('SofaScore non-JSON response')
+    return r.json()
+
+
+@lru_cache(maxsize=96)
+def _sofa_day(day_iso):
+    return _sofa_json(f"sport/football/scheduled-events/{day_iso}")
+
+
+@lru_cache(maxsize=256)
+def _sofa_stats(event_id):
+    return _sofa_json(f"event/{event_id}/statistics")
+
+
+def _sofa_event_kickoff(e):
+    raw=e.get('startTimestamp')
+    try:
+        return pd.to_datetime(int(raw),unit='s',utc=True)
+    except (TypeError,ValueError,OverflowError):
+        return pd.NaT
+
+
+def _find_sofa_match(event,day_fetch=_sofa_day):
+    """Match one completed event on SofaScore by teams + kickoff, never by names alone."""
+    kick=pd.to_datetime(event.get('kickoff'),utc=True,errors='coerce')
+    if pd.isna(kick):return None
+    days=[kick.date(),(kick-timedelta(days=1)).date(),(kick+timedelta(days=1)).date()]
+    best=None
+    for d in days:
+        try: payload=day_fetch(d.isoformat())
+        except Exception: continue
+        for e in (payload or {}).get('events') or []:
+            if not isinstance(e,dict):continue
+            home=((e.get('homeTeam') or {}).get('name') or '')
+            away=((e.get('awayTeam') or {}).get('name') or '')
+            if not (_team_equiv(home,event.get('home','')) and _team_equiv(away,event.get('away',''))):continue
+            ek=_sofa_event_kickoff(e)
+            delta=abs((ek-kick).total_seconds()) if not pd.isna(ek) else 9e9
+            if delta>8*3600:continue
+            st=e.get('status') or {}
+            finished=(str(st.get('type') or '').lower()=='finished' or st.get('code')==100)
+            if event.get('completed') and not finished:continue
+            if best is None or delta<best[0]:best=(delta,e)
+        if best and best[0]<=2*3600:break
+    return best[1] if best else None
+
+
+def _sofa_stats_xg(payload):
+    """Extract measured full-match xG only when SofaScore explicitly labels it."""
+    periods=(payload or {}).get('statistics') or []
+    allp=None
+    for block in periods:
+        if str(block.get('period') or '').upper()=='ALL':
+            allp=block;break
+    if allp is None and periods:
+        allp=periods[0]
+    for group in (allp or {}).get('groups') or []:
+        for item in group.get('statisticsItems') or []:
+            label=' '.join(str(item.get(k) or '') for k in ('name','key')).lower()
+            key=''.join(ch for ch in label if ch.isalnum())
+            if not (key in {'xg','expectedgoals','expectedgoalsxg'} or ('expectedgoals' in key and 'ontarget' not in key and 'xgot' not in key)):
+                continue
+            h=_num_xg(item.get('homeValue',item.get('home')))
+            a=_num_xg(item.get('awayValue',item.get('away')))
+            if h is not None and a is not None:
+                return {'home':h,'away':a}
+    return {}
+
+
+def fetch_match_xg_sofascore(event,day_fetch=_sofa_day,stats_fetch=_sofa_stats):
+    """Measured xG fallback from a matched finished SofaScore event."""
+    e=_find_sofa_match(event,day_fetch=day_fetch)
+    if not e:return {}
+    eid=e.get('id')
+    if not eid:return {}
+    payload=stats_fetch(str(eid))
+    x=_sofa_stats_xg(payload)
+    if not x:return {}
+    return {'home_xg':x['home'],'away_xg':x['away'],'source':f'https://www.sofascore.com/event/{eid}'}
+
+def fetch_match_xg_multi(event,espn_fetch=fetch_summary,fotmob_day_fetch=_fotmob_day,fotmob_detail_fetch=_fotmob_detail,sofa_day_fetch=_sofa_day,sofa_stats_fetch=_sofa_stats):
+    """Measured-xG cascade: ESPN -> FotMob -> SofaScore. Missing stays missing."""
     errors=[]
     try:
         rec=fetch_match_xg(event,fetch=espn_fetch)
         if rec:
             rec['provider']='ESPN';return rec
+        errors.append('ESPN:NO_XG')
     except Exception as exc:errors.append(f'ESPN:{type(exc).__name__}')
     try:
         rec=fetch_match_xg_fotmob(event,day_fetch=fotmob_day_fetch,detail_fetch=fotmob_detail_fetch)
         if rec:
             rec['provider']='FotMob';return rec
+        errors.append('FotMob:NO_XG_OR_MATCH')
     except Exception as exc:errors.append(f'FotMob:{type(exc).__name__}')
+    try:
+        rec=fetch_match_xg_sofascore(event,day_fetch=sofa_day_fetch,stats_fetch=sofa_stats_fetch)
+        if rec:
+            rec['provider']='SofaScore';return rec
+        errors.append('SofaScore:NO_XG_OR_MATCH')
+    except Exception as exc:errors.append(f'SofaScore:{type(exc).__name__}')
     return {'errors':errors} if errors else {}
 
-def collect_recent_xg(events,home,away,kickoff,n=3,fetch=fetch_summary,allow_fotmob=None):
-    """Collect recent measured xG from ESPN summaries, never synthesize xG."""
+def collect_recent_xg(events,home,away,kickoff,n=3,fetch=fetch_summary,allow_fotmob=None,allow_sofascore=True):
+    """Collect recent measured xG from ESPN/FotMob/SofaScore; never synthesize xG."""
     target=pd.Timestamp(kickoff)
     if target.tzinfo is None:target=target.tz_localize('UTC')
     else:target=target.tz_convert('UTC')
     if allow_fotmob is None: allow_fotmob=(fetch is fetch_summary)
-    cache={}; providers=set(); attempts={'ESPN','FotMob'} if allow_fotmob else {'ESPN'}
+    cache={}; providers=set(); errors=[]
+    attempts=['ESPN']
+    if allow_fotmob: attempts.append('FotMob')
+    if allow_sofascore: attempts.append('SofaScore')
     def profile(team):
         cand=[]
         for e in events or []:
@@ -343,22 +445,26 @@ def collect_recent_xg(events,home,away,kickoff,n=3,fetch=fetch_summary,allow_fot
                 ek=pd.Timestamp(e['kickoff']);ek=ek.tz_convert('UTC') if ek.tzinfo else ek.tz_localize('UTC')
             except Exception:continue
             if not e.get('completed') or ek>=target:continue
-            if norm_name(team) not in {norm_name(e.get('home','')),norm_name(e.get('away',''))}:continue
+            if not (_team_equiv(team,e.get('home','')) or _team_equiv(team,e.get('away',''))):continue
             cand.append((ek,e))
         cand.sort(key=lambda z:z[0],reverse=True)
         xf=[];xa=[]
-        for _,e in cand[:max(6,n+3)]:
+        checked=0
+        for _,e in cand[:max(12,n+6)]:
+            checked+=1
             k=(e.get('league'),str(e.get('id')))
             try:
                 rec=cache.get(k)
                 if rec is None:
                     if allow_fotmob:
-                        rec=fetch_match_xg_multi(e,espn_fetch=fetch)
+                        rec=fetch_match_xg_multi(e,espn_fetch=fetch) if allow_sofascore else fetch_match_xg_multi(e,espn_fetch=fetch,sofa_day_fetch=lambda *_:{},sofa_stats_fetch=lambda *_:{})
                     else:
                         rec=fetch_match_xg(e,fetch=fetch)
                     cache[k]=rec
             except Exception:
                 rec={};cache[k]=rec
+            if rec and rec.get('errors'):
+                errors.extend(str(x) for x in rec.get('errors') or [])
             if not rec or rec.get('home_xg') is None or rec.get('away_xg') is None:continue
             if rec.get('provider'):
                 providers.add(str(rec.get('provider')))
@@ -366,19 +472,22 @@ def collect_recent_xg(events,home,away,kickoff,n=3,fetch=fetch_summary,allow_fot
                 providers.add('ESPN')
             elif 'fotmob.com' in str(rec.get('source') or '').lower():
                 providers.add('FotMob')
-            if norm_name(e.get('home',''))==norm_name(team):
+            if _team_equiv(e.get('home',''),team):
                 xf.append(float(rec['home_xg']));xa.append(float(rec['away_xg']))
             else:
                 xf.append(float(rec['away_xg']));xa.append(float(rec['home_xg']))
             if len(xf)>=n:break
-        return {'for':sum(xf)/len(xf) if len(xf)>=n else None,'against':sum(xa)/len(xa) if len(xa)>=n else None,'games':len(xf)}
+        return {'for':sum(xf)/len(xf) if len(xf)>=n else None,'against':sum(xa)/len(xa) if len(xa)>=n else None,'games':len(xf),'candidates':len(cand),'checked':checked}
     hp=profile(home);ap=profile(away)
     return {
         'home_xg_for':hp['for'],'home_xg_against':hp['against'],
         'away_xg_for':ap['for'],'away_xg_against':ap['against'],
         'xg_samples_home':hp['games'],'xg_samples_away':ap['games'],
-        'xg_source':('ESPN public match-summary xG fallback' if providers=={'ESPN'} else 'FotMob public match-details xG fallback' if providers=={'FotMob'} else 'ESPN + FotMob public measured xG fallback' if providers else 'public measured xG fallback'),
-        'xg_sources_tried':' → '.join(sorted(attempts)),
+        'xg_candidates_home':hp['candidates'],'xg_candidates_away':ap['candidates'],
+        'xg_checked_home':hp['checked'],'xg_checked_away':ap['checked'],
+        'xg_source':('ESPN public match-summary xG fallback' if providers=={'ESPN'} else 'FotMob public match-details xG fallback' if providers=={'FotMob'} else 'SofaScore public match-statistics xG fallback' if providers=={'SofaScore'} else ' + '.join(sorted(providers))+' public measured xG fallback' if providers else 'public measured xG fallback'),
+        'xg_sources_tried':' → '.join(attempts),
+        'xg_errors':' · '.join(list(dict.fromkeys(errors))[:12]),
         'xg_partial': bool((hp['games'] or ap['games']) and not (hp['for'] is not None and ap['for'] is not None)),
         'xg_checked_at':datetime.now(timezone.utc).isoformat(),
     }

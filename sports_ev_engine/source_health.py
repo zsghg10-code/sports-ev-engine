@@ -50,7 +50,7 @@ def source_health_rows(now=None):
             sources.extend([
                 ("xG","FALLBACK" if r.get("xg_fallback_used") else "PARTIAL" if r.get("xg_partial") or ((r.get('xg_samples_home') or 0) or (r.get('xg_samples_away') or 0)) and "recent_xg:MISSING" in str(r.get("signal_summary") or "") else "OK" if "recent_xg:MISSING" not in str(r.get("signal_summary") or "") else "MISSING",
                  f"홈 {r.get('xg_samples_home') or 0}/3 · 원정 {r.get('xg_samples_away') or 0}/3",
-                 r.get("xg_source") or r.get("xg_fallback_source") or r.get("xg_sources_tried") or "API-Football → ESPN → FotMob"),
+                 r.get("xg_source") or r.get("xg_fallback_source") or r.get("xg_sources_tried") or "API-Football → ESPN → FotMob → SofaScore"),
                 ("부상/결장","OK" if "injuries_player_impact:MISSING" not in str(r.get("signal_summary") or "") else "MISSING","신호 ledger","API-Football injuries"),
             ])
         for name,status,detail,source in sources:

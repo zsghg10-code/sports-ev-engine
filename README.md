@@ -1,4 +1,4 @@
-# Sports EV Engine v3.4.12
+# Sports EV Engine v3.4.13
 
 최신 변경: `V3_4_12_XG_FAILSOFT_KO.md`
 
@@ -26,7 +26,7 @@ KBO batting-order collection is now fail-soft: KBO official GameCenter remains p
 # Sports EV Engine v3.4.6 — All A-match Multi-source Discovery
 
 - `🏆 오늘의 베스트 조합`은 기준 +EV 전체를 숨기지 않고 `검토 후보 / 단일 후보 / 조합 가능`으로 분리합니다. 실제 2~3폴 게이트는 기존보다 느슨하게 하지 않습니다.
-- A매치 xG는 `API-Football → ESPN → FotMob` 실제 측정 xG cascade를 사용합니다. 각 팀 최근 3경기 표본이 완성된 경우에만 모델에 반영하고, 1~2경기는 부분수집으로만 표시합니다.
+- A매치 xG는 `API-Football → ESPN → FotMob → SofaScore` 실제 측정 xG cascade를 사용합니다. 각 팀 최근 3경기 표본이 완성된 경우에만 모델에 반영하고, 1~2경기는 부분수집으로만 표시합니다.
 - 자세한 내용: `V3_4_5_WIDE_CANDIDATES_XG_KO.md`.
 
 # Sports EV Engine v3.4.4 — Baseball Diagnostics Visibility

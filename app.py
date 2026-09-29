@@ -74,14 +74,14 @@ from sports_ev_engine.feature_attribution import attribution
 from sports_ev_engine.model_drift import drift_rows
 from sports_ev_engine.bankroll import simulate as simulate_bankroll
 
-st.set_page_config(page_title="Sports EV Engine v3.4.12",layout="wide")
-st.title("Sports EV Engine v3.4.12")
-st.caption("BUILD v3.4.12-xg-fallback-independent · 2026-09-29")
+st.set_page_config(page_title="Sports EV Engine v3.4.13",layout="wide")
+st.title("Sports EV Engine v3.4.13")
+st.caption("BUILD v3.4.13-xg-multisource-diagnostics · 2026-09-29")
 if any(getattr(module,"PROVIDER_BUILD",None)!="3.0.0" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider,deep_soccer_provider)):
     st.error("앱과 수집 파일 버전이 다릅니다. ZIP의 sports_ev_engine 폴더까지 전부 반영한 뒤 Streamlit 앱을 Reboot하세요.")
     st.stop()
 FootballAccessError=football_provider.FootballAccessError
-st.caption("분석 백엔드 v3.4.12 · API-Football 장애와 독립된 ESPN/FotMob xG fallback")
+st.caption("분석 백엔드 v3.4.13 · API-Football 장애와 독립된 ESPN/FotMob/SofaScore xG fallback")
 st.caption("독립 모델 → 정밀 컨텍스트 → 반증 검사 → 시장 캘리브레이션 → 27개 스트레스 시나리오 → EV/ROBUST 판정 → 기록·사후검증")
 
 def secret(name):
@@ -98,7 +98,7 @@ SUPABASE_KEY=secret("SUPABASE_SERVICE_ROLE_KEY") or secret("SUPABASE_KEY")
 configure_persistence(SUPABASE_URL,SUPABASE_KEY)
 BASEBALL_KEY=None
 
-_BUILD_ID = "3.4.12-xg-fallback-independent"
+_BUILD_ID = "3.4.13-xg-multisource-diagnostics"
 if st.session_state.get("_build_id") != _BUILD_ID:
     for _k in [
         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
@@ -638,7 +638,7 @@ with tabs[1]:
                                     elif xg_h or xg_a:
                                         deep_bits.append(f"xG 부분수집 홈 {xg_h}/3 · 원정 {xg_a}/3")
                                     else:
-                                        deep_bits.append("xG 미수집 (API-Football→ESPN→FotMob 확인)")
+                                        deep_bits.append("xG 미수집 (API-Football→ESPN→FotMob→SofaScore 확인)")
                                     deep_bits.append("라인업 확정" if lineup_ok else "확정 라인업 미게시")
                                 else:
                                     deep_bits.append("정밀 컨텍스트 미조회")
@@ -650,7 +650,9 @@ with tabs[1]:
                                     "xG":"반영" if all(deep.get(k) is not None for k in ("home_xg_for","home_xg_against","away_xg_for","away_xg_against")) else ("부분수집" if (deep.get('xg_samples_home') or deep.get('xg_samples_away')) else "미수집"),
                                     "xG 소스":deep.get("xg_source") or deep.get("xg_fallback_source") or "—",
                                     "xG 시도":deep.get("xg_sources_tried") or ("API-Football" if deep.get("deep_context_attempted") else "—"),
-                                    "xG 표본":f"홈 {deep.get('xg_samples_home') or 0}/3 · 원정 {deep.get('xg_samples_away') or 0}/3"
+                                    "xG 표본":f"홈 {deep.get('xg_samples_home') or 0}/3 · 원정 {deep.get('xg_samples_away') or 0}/3",
+                                    "xG 후보경기":f"홈 {deep.get('xg_candidates_home') or 0} (검사 {deep.get('xg_checked_home') or 0}) · 원정 {deep.get('xg_candidates_away') or 0} (검사 {deep.get('xg_checked_away') or 0})",
+                                    "xG 진단":deep.get("xg_errors") or deep.get("xg_fallback_error") or "—"
                                 })
                         except DataHold as e:
                             failures.append({"경기":match_label_kst(home,away,g.iloc[0]["commence_time"]),"이유":str(e)})
