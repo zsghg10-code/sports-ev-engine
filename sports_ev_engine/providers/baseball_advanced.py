@@ -201,6 +201,8 @@ class KBOAdvanced:
     @staticmethod
     def _pid_from_game(g, home=True):
         if not isinstance(g,dict):return None
+        if g.get("_event_reversed"):
+            home = not home
         pref="B_" if home else "T_"
         candidates=[]
         for k,v in g.items():

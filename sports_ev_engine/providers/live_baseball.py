@@ -82,6 +82,28 @@ def _num(v):
         return None
 
 
+def _flag_true(v):
+    """Normalize KBO API flags without treating string "0"/"N" as truthy."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return int(v) == 1
+    t = str(v or "").strip().lower()
+    return t in {"1", "true", "y", "yes"}
+
+
+def _clock_minutes(v):
+    """Parse KBO G_TM values such as 18:30, 1830, or 18.30."""
+    t = str(v or "").strip()
+    m = re.search(r"(?<!\d)(\d{1,2})[:.]?(\d{2})(?!\d)", t)
+    if not m:
+        return None
+    h, minute = int(m.group(1)), int(m.group(2))
+    if not (0 <= h <= 23 and 0 <= minute <= 59):
+        return None
+    return h * 60 + minute
+
+
 def _npb_ip(v):
     try:
         s = str(v).strip()
@@ -204,16 +226,44 @@ class KBOOfficialLive:
         return games
 
     def _match_game(self, home, away, commence_iso):
-        date8 = _kst_dt(commence_iso).strftime("%Y%m%d")
+        """Match by date + teams, then disambiguate same-day games by KST start time.
+
+        `_event_reversed` records the rare case where an odds feed reverses the
+        official KBO home/away orientation, so downstream starter/lineup fields
+        can be remapped instead of silently attaching them to the wrong team.
+        """
+        event_dt = _kst_dt(commence_iso)
+        date8 = event_dt.strftime("%Y%m%d")
+        target_min = event_dt.hour * 60 + event_dt.minute
         games = self._game_list(date8)
-        for reverse in (False, True):
+
+        def candidates(reverse=False):
+            out=[]
             for g in games:
                 gh = KBO_EN_BY_KR.get(str(g.get("HOME_NM", "")).strip(), str(g.get("HOME_NM", "")))
                 ga = KBO_EN_BY_KR.get(str(g.get("AWAY_NM", "")).strip(), str(g.get("AWAY_NM", "")))
-                if not reverse and _same_team(gh, home) and _same_team(ga, away):
-                    return g
-                if reverse and _same_team(gh, away) and _same_team(ga, home):
-                    return g
+                ok = (_same_team(gh, away) and _same_team(ga, home)) if reverse else (_same_team(gh, home) and _same_team(ga, away))
+                if ok:
+                    out.append(g)
+            return out
+
+        for reverse in (False, True):
+            hits = candidates(reverse)
+            if not hits:
+                continue
+            if len(hits) > 1:
+                timed=[(_clock_minutes(g.get("G_TM")), g) for g in hits]
+                valid=[(abs(m-target_min), g) for m,g in timed if m is not None]
+                if valid:
+                    valid.sort(key=lambda x:x[0])
+                    chosen=valid[0][1]
+                else:
+                    chosen=hits[0]
+            else:
+                chosen=hits[0]
+            chosen=dict(chosen)
+            chosen["_event_reversed"] = bool(reverse)
+            return chosen
         return None
 
     def _lineup(self, game_id, season):
@@ -232,7 +282,7 @@ class KBOOfficialLive:
         r.raise_for_status()
         data = r.json()
         try:
-            confirmed = bool((data.get("0") or [{}])[0].get("LINEUP_CK"))
+            confirmed = _flag_true((data.get("0") or [{}])[0].get("LINEUP_CK"))
         except Exception:
             confirmed = False
 
@@ -259,7 +309,15 @@ class KBOOfficialLive:
             vals = [v for v in vals if v is not None]
             return sum(vals) if vals else None
 
-        return {"confirmed": confirmed, "home": rows("3"), "away": rows("4"), "home_war": war("1"), "away_war": war("2")}
+        home_meta=(data.get("1") or [{}])[0] or {}
+        away_meta=(data.get("2") or [{}])[0] or {}
+        return {
+            "confirmed": confirmed, "home": rows("3"), "away": rows("4"),
+            "home_war": war("1"), "away_war": war("2"),
+            "home_team": _clean(home_meta.get("T_NM", "")),
+            "away_team": _clean(away_meta.get("T_NM", "")),
+            "source_game_id": str(home_meta.get("G_ID") or away_meta.get("G_ID") or ""),
+        }
 
     def _pitcher_table(self):
         if self._pitchers is not None:
@@ -297,15 +355,26 @@ class KBOOfficialLive:
 
         game_id = str(g.get("G_ID", ""))
         season = int(g.get("SEASON_ID") or (game_id[:4] if len(game_id) >= 4 else _kst_dt(commence_iso).year))
-        home_sp = _clean(g.get("B_PIT_P_NM", "")) or None
-        away_sp = _clean(g.get("T_PIT_P_NM", "")) or None
-        starter_ok = bool(g.get("START_PIT_CK")) and bool(home_sp and away_sp)
+        reversed_event = bool(g.get("_event_reversed"))
+        official_home_sp = _clean(g.get("B_PIT_P_NM", "")) or None
+        official_away_sp = _clean(g.get("T_PIT_P_NM", "")) or None
+        home_sp, away_sp = (official_away_sp, official_home_sp) if reversed_event else (official_home_sp, official_away_sp)
+        starter_ok = _flag_true(g.get("START_PIT_CK")) and bool(home_sp and away_sp)
 
         lineup = {"confirmed": False, "home": [], "away": [], "home_war": None, "away_war": None}
         try:
             lineup = self._lineup(game_id, season)
         except Exception:
             pass
+        # Guard against a stale/wrong lineup response before accepting it as FINAL.
+        source_gid=str(lineup.get("source_game_id") or "")
+        if source_gid and game_id and source_gid != game_id:
+            lineup["confirmed"] = False
+        if reversed_event:
+            lineup = dict(lineup)
+            lineup["home"], lineup["away"] = lineup.get("away", []), lineup.get("home", [])
+            lineup["home_war"], lineup["away_war"] = lineup.get("away_war"), lineup.get("home_war")
+            lineup["home_team"], lineup["away_team"] = lineup.get("away_team"), lineup.get("home_team")
         lineup_ok = bool(lineup.get("confirmed")) and len(lineup.get("home", [])) >= 9 and len(lineup.get("away", [])) >= 9
 
         pmap = self._pitcher_table()
@@ -317,12 +386,14 @@ class KBOOfficialLive:
             "league": "KBO", "stage": stage,
             "starter_confirmed": starter_ok, "lineup_confirmed": lineup_ok,
             "home_starter": home_sp, "away_starter": away_sp,
-            "home_starter_id": _starter_player_id(g, True),
-            "away_starter_id": _starter_player_id(g, False),
+            "home_starter_id": _starter_player_id(g, not reversed_event),
+            "away_starter_id": _starter_player_id(g, reversed_event),
             "home_starter_stats": home_stat, "away_starter_stats": away_stat,
             "home_lineup": lineup.get("home", []), "away_lineup": lineup.get("away", []),
             "home_lineup_strength": lineup.get("home_war"), "away_lineup_strength": lineup.get("away_war"),
-            "source": "KBO official GameCenter", "note": "", "game_id": game_id, "game_url": None,
+            "source": "KBO official GameCenter",
+            "note": "odds home/away reversed; official fields remapped" if reversed_event else "",
+            "game_id": game_id, "game_url": None,
         }
 
 
@@ -360,9 +431,19 @@ class NPBOfficialLive:
         if not heading:
             return out
         section = []
+        # Do not stop at league sub-headings (e.g. セ・リーグ / パ・リーグ).
+        # The official announced-starter page can place both leagues under one
+        # date heading with h3/h4 separators. Older code stopped at the first
+        # sub-heading, which could leave Pacific League starters missing while
+        # Central League starters were collected successfully.
         for node in heading.next_elements:
-            if getattr(node, "name", None) in {"footer", "h1", "h2", "h3", "h4"}:
+            name = getattr(node, "name", None)
+            if name == "footer":
                 break
+            if name in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+                label = _clean(node.get_text(" ", strip=True))
+                if node is not heading and re.search(r"\d+月\d+日の予告先発投手", label):
+                    break
             section.append(node)
 
         # Primary DOM path: official page uses a team-logo image followed by a pitcher link.

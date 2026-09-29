@@ -206,8 +206,6 @@ def prepare_daily_candidates(frame: pd.DataFrame) -> pd.DataFrame:
     rows=[]
     for _,r in frame.iterrows():
         status=str(r.get("v3_decision_status") or "").upper()
-        if status not in {"ROBUST","SENSITIVE"}:
-            continue
         odds=_num(r.get("best_odds")); model=_num(r.get("model_win_prob"))
         market=_num(r.get("consensus_prob"),_num(r.get("break_even")))
         be=_num(r.get("break_even")); push=max(0.0,_num(r.get("push_prob"),0.0))
@@ -223,19 +221,33 @@ def prepare_daily_candidates(frame: pd.DataFrame) -> pd.DataFrame:
         risk_factor=_risk_factor(r)
         drift=_drift_map.get((str(r.get("sport_family") or ""),str(r.get("market") or "")),"")
         reasons=[]
+        # Visibility and actionability are intentionally separate.  Every
+        # positive raw-EV row is shown; only rows passing the stricter v3
+        # safety gates can become a single/actionable pick or accumulator leg.
+        single_eligible=True
         combo_eligible=True
 
+        if status not in {"ROBUST","SENSITIVE"}:
+            single_eligible=False
+            combo_eligible=False
+            if status=="REVIEW": reasons.append("v3 REVIEW — 모델/시장 또는 데이터 추가 검토 필요")
+            elif status=="PASS": reasons.append("v3 PASS — 기준 +EV라도 보수 검증 기준 미통과")
+            elif status=="FRAGILE": reasons.append("v3 FRAGILE — 가정 변화에 취약")
+            elif status=="DATA_HOLD": reasons.append("v3 DATA_HOLD — 핵심 데이터 부족")
+            else: reasons.append(f"v3 판정 {status or '미확인'}")
         if "v3_candidate" in r.index and not _truth(r.get("v3_candidate")):
+            single_eligible=False
             combo_eligible=False
             reasons.append("v3 보수 후보 게이트 미통과")
         adaptive=str(r.get("adaptive_gate") or "OK").upper()
         if adaptive not in {"","OK"}:
+            single_eligible=False
             combo_eligible=False
             if adaptive=="MODEL_CONFLICT_REVIEW": reasons.append("앙상블 모델 충돌로 REVIEW")
             elif adaptive=="PASS_AFTER_CALIBRATION": reasons.append("보수/캘리브레이션 게이트에서 조합 제외")
             else: reasons.append(f"적응형 게이트 {adaptive}")
         if drift=="ALERT":
-            combo_eligible=False; reasons.append("최근 모델 성능 drift ALERT")
+            single_eligible=False; combo_eligible=False; reasons.append("최근 모델 성능 drift ALERT")
         elif drift=="WATCH":
             risk_factor*=0.94; reasons.append("최근 모델 성능 drift WATCH")
 
@@ -246,12 +258,13 @@ def prepare_daily_candidates(frame: pd.DataFrame) -> pd.DataFrame:
         if not pd.isna(rec) and not pd.isna(kick) and kick>now:
             age=(now-rec).total_seconds()/60
             if age>180:
-                combo_eligible=False; reasons.append("분석 스냅샷 3시간 초과·재분석 필요")
+                single_eligible=False; combo_eligible=False; reasons.append("분석 스냅샷 3시간 초과·재분석 필요")
             elif age>90:
                 risk_factor*=0.90; reasons.append("분석 스냅샷 90분 초과")
 
         counter=str(r.get("counter_case_risk") or "").upper()
         if counter=="HIGH":
+            single_eligible=False
             combo_eligible=False
             reasons.append("반증/데이터 위험 HIGH")
 
@@ -260,6 +273,7 @@ def prepare_daily_candidates(frame: pd.DataFrame) -> pd.DataFrame:
         adj_prob=max(0.001,min(max(0.001,1-push-0.001),adj_prob))
         adj_ev=odds*adj_prob+push-1.0
         if adj_ev<=0:
+            single_eligible=False
             combo_eligible=False
             reasons.append("보수 확률 축소 후 EV≤0")
 
@@ -276,10 +290,17 @@ def prepare_daily_candidates(frame: pd.DataFrame) -> pd.DataFrame:
             +0.05*max(0.0,min(1.0,(p10_component+0.10)/0.25))
             -min(unc,15.0)*0.005
         )
+        # Positive-EV underdogs can remain valid *single* candidates while the
+        # accumulator layer stays conservative and requires >=50% risk-adjusted
+        # hit probability per leg.
+        if single_eligible and adj_prob < 0.50:
+            combo_eligible=False
+            reasons.append("2폴 이상 보수확률 50% 미만 — 단일 후보만")
+
         kickoff=r.get("kickoff_kst")
         if pd.isna(kickoff): kickoff=_kickoff_kst(r.get("commence_time"))
         event_id=str(r.get("event_id") or f"{r.get('home_team','')}__{r.get('away_team','')}__{r.get('commence_time','')}")
-        candidate_state="조합 가능" if combo_eligible else "검토 후보"
+        candidate_state="조합 가능" if combo_eligible else "단일 후보" if single_eligible else "검토 후보"
         reason=" · ".join(dict.fromkeys(reasons)) if reasons else "강건성·리스크 게이트 통과"
         rows.append({
             **r.to_dict(),
@@ -299,6 +320,7 @@ def prepare_daily_candidates(frame: pd.DataFrame) -> pd.DataFrame:
             "daily_original_ev":raw_ev,
             "daily_be":be,
             "daily_drift_status":drift or "OK",
+            "daily_single_eligible":bool(single_eligible),
             "daily_combo_eligible":bool(combo_eligible),
             "daily_candidate_state":candidate_state,
             "daily_gate_reason":reason,
@@ -354,17 +376,19 @@ def _combo_row(combo: Iterable[dict], corr_matrix=None) -> dict | None:
 def best_combos(candidates: pd.DataFrame, sizes=(1, 2, 3), top_n=5) -> dict[int, list[dict]]:
     if candidates is None or candidates.empty:
         return {int(n): [] for n in sizes}
-    pool_frame=candidates.copy()
-    if "daily_combo_eligible" in pool_frame.columns:
-        pool_frame=pool_frame[pool_frame["daily_combo_eligible"].fillna(False).astype(bool)].copy()
-    if pool_frame.empty:
-        return {int(n): [] for n in sizes}
-    # The first 24 combo-eligible candidates are enough for a daily search and keep
-    # 3-leg combinations computationally cheap on Streamlit Cloud.
-    records = pool_frame.head(24).to_dict("records")
     corr_matrix = historical_correlations()
     out: dict[int, list[dict]] = {}
     for n in sizes:
+        pool_frame=candidates.copy()
+        eligibility_col="daily_single_eligible" if int(n)==1 else "daily_combo_eligible"
+        if eligibility_col in pool_frame.columns:
+            pool_frame=pool_frame[pool_frame[eligibility_col].fillna(False).astype(bool)].copy()
+        if pool_frame.empty:
+            out[int(n)]=[]
+            continue
+        # The first 24 eligible candidates are enough for a daily search and keep
+        # 3-leg combinations computationally cheap on Streamlit Cloud.
+        records = pool_frame.head(24).to_dict("records")
         rows = []
         for combo in itertools.combinations(records, int(n)):
             row = _combo_row(combo, corr_matrix=corr_matrix)

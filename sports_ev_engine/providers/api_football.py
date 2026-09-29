@@ -96,6 +96,20 @@ class APIFootball:
             if len(found)>=last:break
         return sorted(found.values(),key=lambda x:x["fixture"]["timestamp"],reverse=True)[:last]
 
+
+    def odds_for_league_date(self, league_id, season, date_str, max_pages=3):
+        """Fetch pre-match odds for one competition/date with bounded pagination."""
+        out=[]
+        for page in range(1,max(1,int(max_pages))+1):
+            rows=self._get("odds",{"league":int(league_id),"season":int(season),"date":str(date_str),"page":page})
+            if not rows:break
+            out.extend(rows)
+            if len(rows)<10:break
+        return out
+
+    def odds_fixture(self, fixture_id):
+        return self._get("odds",{"fixture":int(fixture_id)})
+
     def lineups(self,fixture_id):
         return self._get("fixtures/lineups",{"fixture":int(fixture_id)})
 

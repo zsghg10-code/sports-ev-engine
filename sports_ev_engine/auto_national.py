@@ -1,8 +1,9 @@
 """Public ESPN scoreboard adapter. No keys, no access-control workarounds."""
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import pandas as pd
 import requests
+from functools import lru_cache
 from .free_national import free_pool
 from .models.soccer_auto import norm_name
 PROVIDER_BUILD='3.0.0'
@@ -176,12 +177,165 @@ def fetch_match_xg(event,fetch=fetch_summary):
     if not x:return {}
     return {'home_xg':x['home'],'away_xg':x['away'],'source':f'https://www.espn.com/soccer/match/_/gameId/{event["id"]}'}
 
-def collect_recent_xg(events,home,away,kickoff,n=3,fetch=fetch_summary):
+
+FOTMOB_BASES=("https://www.fotmob.com/api/data","https://www.fotmob.com/api")
+FOTMOB_HEADERS={"User-Agent":"Mozilla/5.0 (compatible; SportsEVEngine/3.4.5; measured-xG fallback)","Accept":"application/json,text/plain,*/*"}
+
+
+def _team_equiv(a,b):
+    """Conservative country/team name match across public providers."""
+    na=norm_name(a); nb=norm_name(b)
+    if na==nb:return True
+    def toks(x):
+        return {t for t in x.replace(' and ',' ').split() if t not in {'fc','cf','national','team','the'}}
+    ta,tb=toks(na),toks(nb)
+    return bool(ta and tb and ta==tb)
+
+
+def _fotmob_json(path,params):
+    last=None
+    for base in FOTMOB_BASES:
+        try:
+            r=requests.get(f"{base}/{path}",params=params,headers=FOTMOB_HEADERS,timeout=(5,12))
+            if r.status_code in (403,404):
+                last=ValueError(f"FotMob {r.status_code}")
+                continue
+            r.raise_for_status()
+            ctype=(r.headers.get('content-type') or '').lower()
+            if 'json' not in ctype and not r.text.lstrip().startswith(('{','[')):
+                raise ValueError('FotMob non-JSON response')
+            return r.json()
+        except (requests.RequestException,ValueError) as exc:
+            last=exc
+    if last:raise last
+    raise ValueError('FotMob unavailable')
+
+
+@lru_cache(maxsize=96)
+def _fotmob_day(day_yyyymmdd):
+    return _fotmob_json('matches',{'date':day_yyyymmdd})
+
+
+@lru_cache(maxsize=256)
+def _fotmob_detail(match_id):
+    return _fotmob_json('matchDetails',{'matchId':str(match_id)})
+
+
+def _fotmob_matches(payload):
+    rows=[]
+    for league in (payload or {}).get('leagues') or []:
+        for m in league.get('matches') or []:
+            if isinstance(m,dict):rows.append(m)
+    return rows
+
+
+def _fotmob_match_kickoff(m):
+    raw=((m.get('status') or {}).get('utcTime') or m.get('utcTime') or m.get('matchTimeUTCDate'))
+    if not raw:return pd.NaT
+    return pd.to_datetime(raw,utc=True,errors='coerce')
+
+
+def _find_fotmob_match(event,day_fetch=_fotmob_day):
+    """Find the same completed event without trusting names alone."""
+    kick=pd.to_datetime(event.get('kickoff'),utc=True,errors='coerce')
+    if pd.isna(kick):return None
+    # UTC day first; only inspect adjacent dates when necessary. Day payloads are cached.
+    days=[kick.date(),(kick-timedelta(days=1)).date(),(kick+timedelta(days=1)).date()]
+    best=None
+    for d in days:
+        try: payload=day_fetch(d.strftime('%Y%m%d'))
+        except Exception: continue
+        for m in _fotmob_matches(payload):
+            home=((m.get('home') or {}).get('name') or (m.get('homeTeam') or {}).get('name') or '')
+            away=((m.get('away') or {}).get('name') or (m.get('awayTeam') or {}).get('name') or '')
+            if not (_team_equiv(home,event.get('home','')) and _team_equiv(away,event.get('away',''))):continue
+            mk=_fotmob_match_kickoff(m)
+            delta=abs((mk-kick).total_seconds()) if not pd.isna(mk) else 9e9
+            if delta>8*3600:continue
+            status=m.get('status') or {}
+            finished=status.get('finished') is True or m.get('finished') is True
+            if event.get('completed') and not finished:continue
+            if best is None or delta<best[0]:best=(delta,m)
+        if best and best[0]<=2*3600:break
+    return best[1] if best else None
+
+
+def _fotmob_stats_xg(detail):
+    """Extract the canonical team xG pair from FotMob's All-period stats block."""
+    periods=(((detail or {}).get('content') or {}).get('stats') or {}).get('Periods') or {}
+    allp=periods.get('All') or periods.get('ALL') or periods.get('all') or {}
+    roots=[]
+    if isinstance(allp,dict):
+        roots=allp.get('stats') or []
+    elif isinstance(allp,list):roots=allp
+    found=None
+    def walk(obj):
+        nonlocal found
+        if found is not None:return
+        if isinstance(obj,dict):
+            title=' '.join(str(obj.get(k) or '') for k in ('title','key','name','label')).lower()
+            key=''.join(ch for ch in title if ch.isalnum())
+            vals=obj.get('stats')
+            is_xg=(key in {'xg','expectedgoals','expectedgoalsxg'} or ('expectedgoals' in key and 'ontarget' not in key and 'xgot' not in key))
+            if is_xg and isinstance(vals,(list,tuple)) and len(vals)>=2:
+                h=_num_xg(vals[0]);a=_num_xg(vals[1])
+                if h is not None and a is not None:
+                    found={'home':h,'away':a};return
+            # Some unofficial payload mirrors use home/away scalar fields.
+            if is_xg:
+                h=_num_xg(obj.get('home'));a=_num_xg(obj.get('away'))
+                if h is not None and a is not None:
+                    found={'home':h,'away':a};return
+            for v in obj.values():walk(v)
+        elif isinstance(obj,list):
+            for v in obj:walk(v)
+    walk(roots)
+    return found or {}
+
+
+def fetch_match_xg_fotmob(event,day_fetch=_fotmob_day,detail_fetch=_fotmob_detail):
+    """Measured xG fallback from a matched FotMob finished match; never estimate xG."""
+    m=_find_fotmob_match(event,day_fetch=day_fetch)
+    if not m:return {}
+    mid=m.get('id') or m.get('matchId')
+    if not mid:return {}
+    data=detail_fetch(str(mid))
+    general=(data or {}).get('general') or {}
+    home=((general.get('homeTeam') or {}).get('name') or '')
+    away=((general.get('awayTeam') or {}).get('name') or '')
+    if home and not _team_equiv(home,event.get('home','')):raise ValueError('FotMob xG 홈팀 불일치')
+    if away and not _team_equiv(away,event.get('away','')):raise ValueError('FotMob xG 원정팀 불일치')
+    gx=pd.to_datetime(general.get('matchTimeUTCDate'),utc=True,errors='coerce')
+    ex=pd.to_datetime(event.get('kickoff'),utc=True,errors='coerce')
+    if not pd.isna(gx) and not pd.isna(ex) and abs((gx-ex).total_seconds())>8*3600:
+        raise ValueError('FotMob xG 경기시각 불일치')
+    x=_fotmob_stats_xg(data)
+    if not x:return {}
+    return {'home_xg':x['home'],'away_xg':x['away'],'source':f'https://www.fotmob.com/matches/{mid}'}
+
+
+def fetch_match_xg_multi(event,espn_fetch=fetch_summary,fotmob_day_fetch=_fotmob_day,fotmob_detail_fetch=_fotmob_detail):
+    """Measured-xG cascade: ESPN -> FotMob. Missing stays missing."""
+    errors=[]
+    try:
+        rec=fetch_match_xg(event,fetch=espn_fetch)
+        if rec:
+            rec['provider']='ESPN';return rec
+    except Exception as exc:errors.append(f'ESPN:{type(exc).__name__}')
+    try:
+        rec=fetch_match_xg_fotmob(event,day_fetch=fotmob_day_fetch,detail_fetch=fotmob_detail_fetch)
+        if rec:
+            rec['provider']='FotMob';return rec
+    except Exception as exc:errors.append(f'FotMob:{type(exc).__name__}')
+    return {'errors':errors} if errors else {}
+
+def collect_recent_xg(events,home,away,kickoff,n=3,fetch=fetch_summary,allow_fotmob=None):
     """Collect recent measured xG from ESPN summaries, never synthesize xG."""
     target=pd.Timestamp(kickoff)
     if target.tzinfo is None:target=target.tz_localize('UTC')
     else:target=target.tz_convert('UTC')
-    cache={}
+    if allow_fotmob is None: allow_fotmob=(fetch is fetch_summary)
+    cache={}; providers=set(); attempts={'ESPN','FotMob'} if allow_fotmob else {'ESPN'}
     def profile(team):
         cand=[]
         for e in events or []:
@@ -198,10 +352,20 @@ def collect_recent_xg(events,home,away,kickoff,n=3,fetch=fetch_summary):
             try:
                 rec=cache.get(k)
                 if rec is None:
-                    rec=fetch_match_xg(e,fetch=fetch);cache[k]=rec
+                    if allow_fotmob:
+                        rec=fetch_match_xg_multi(e,espn_fetch=fetch)
+                    else:
+                        rec=fetch_match_xg(e,fetch=fetch)
+                    cache[k]=rec
             except Exception:
                 rec={};cache[k]=rec
-            if not rec:continue
+            if not rec or rec.get('home_xg') is None or rec.get('away_xg') is None:continue
+            if rec.get('provider'):
+                providers.add(str(rec.get('provider')))
+            elif 'espn.com' in str(rec.get('source') or '').lower():
+                providers.add('ESPN')
+            elif 'fotmob.com' in str(rec.get('source') or '').lower():
+                providers.add('FotMob')
             if norm_name(e.get('home',''))==norm_name(team):
                 xf.append(float(rec['home_xg']));xa.append(float(rec['away_xg']))
             else:
@@ -213,6 +377,8 @@ def collect_recent_xg(events,home,away,kickoff,n=3,fetch=fetch_summary):
         'home_xg_for':hp['for'],'home_xg_against':hp['against'],
         'away_xg_for':ap['for'],'away_xg_against':ap['against'],
         'xg_samples_home':hp['games'],'xg_samples_away':ap['games'],
-        'xg_source':'ESPN public match-summary xG fallback',
+        'xg_source':('ESPN public match-summary xG fallback' if providers=={'ESPN'} else 'FotMob public match-details xG fallback' if providers=={'FotMob'} else 'ESPN + FotMob public measured xG fallback' if providers else 'public measured xG fallback'),
+        'xg_sources_tried':' → '.join(sorted(attempts)),
+        'xg_partial': bool((hp['games'] or ap['games']) and not (hp['for'] is not None and ap['for'] is not None)),
         'xg_checked_at':datetime.now(timezone.utc).isoformat(),
     }

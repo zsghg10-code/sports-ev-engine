@@ -1,4 +1,24 @@
-# Sports EV Engine v3.4.3 — xG Source Fallback
+# Sports EV Engine v3.4.7 — NPB starter section fix
+
+- NPB announced-starter parsing now continues across Central/Pacific League sub-headings under the same date.
+- Fixes cases where lineups were confirmed but Pacific League starters displayed as missing.
+- Schedule-detail fallback remains enabled.
+- All v3.4.6 A-match discovery and prior features are retained.
+
+# Sports EV Engine v3.4.6 — All A-match Multi-source Discovery
+
+- `🏆 오늘의 베스트 조합`은 기준 +EV 전체를 숨기지 않고 `검토 후보 / 단일 후보 / 조합 가능`으로 분리합니다. 실제 2~3폴 게이트는 기존보다 느슨하게 하지 않습니다.
+- A매치 xG는 `API-Football → ESPN → FotMob` 실제 측정 xG cascade를 사용합니다. 각 팀 최근 3경기 표본이 완성된 경우에만 모델에 반영하고, 1~2경기는 부분수집으로만 표시합니다.
+- 자세한 내용: `V3_4_5_WIDE_CANDIDATES_XG_KO.md`.
+
+# Sports EV Engine v3.4.4 — Baseball Diagnostics Visibility
+
+v3.4.4 keeps v3.4.3 xG fallback and fixes a KBO/NPB UI inconsistency:
+
+- Base-positive EV rows are always shown in the detailed baseball diagnostics, even when REVIEW or lineup-not-final gates block candidacy.
+- The UI separates `조합 가능`, `단일 +EV 후보`, and `검토 후보`.
+- Each hidden-gate reason is shown explicitly (model-market disagreement, STARTER CONFIRMED, high counter-case risk, conservative EV <= 0, ensemble conflict, etc.).
+- Empty-state copy no longer claims there is no positive EV when positive-EV REVIEW rows exist.
 
 v3.4.2의 경기별 설명/후보 게이트 구조를 유지하면서 A매치 xG 수집을 보강했습니다.
 
@@ -10,3 +30,11 @@ v3.4.2의 경기별 설명/후보 게이트 구조를 유지하면서 A매치 xG
 - 추정 xG 생성 금지
 
 자세한 내용: `V3_4_3_XG_FALLBACK_KO.md`
+## v3.4.6 — All senior internationals, dynamic multi-source discovery
+
+The A-match tab no longer depends only on a static The Odds API competition list. `전체 A매치 · 다중소스 자동발견` discovers senior national-team fixtures by KST date from API-Football and merges prices with this priority: The Odds API active international keys first, API-Football pre-match odds second. Fixtures without real prices remain visible as schedule-active / odds-missing and are not assigned synthetic EVs. See `V3_4_6_ALL_AMATCH_KO.md`.
+
+## v3.4.8 — KBO match safety
+- KBO same-day doubleheader matching now uses official `G_TM` against KST kickoff.
+- Reversed provider home/away is explicitly detected and starter/lineup fields are remapped.
+- KBO confirmation flags are normalized safely and lineup `G_ID` is sanity-checked before FINAL promotion.

@@ -173,16 +173,27 @@ def merge_xg_fallback(ctx, fallback):
     if all(out.get(k) is not None for k in keys):
         out.setdefault("xg_fallback_used",False)
         return out
-    if fallback and all(fallback.get(k) is not None for k in keys):
-        for k in keys: out[k]=fallback[k]
-        out["home_big_chances"]=fallback.get("home_big_chances")
-        out["away_big_chances"]=fallback.get("away_big_chances")
-        out["xg_source"]=fallback.get("xg_source") or "public xG fallback"
-        out["big_chance_source"]=fallback.get("xg_source") or "public xG fallback"
-        out["xg_fallback_used"]=True
+    if fallback:
+        # Always retain the audit trail even when the public fallbacks found only
+        # 1-2 measured matches.  Partial samples are *not* promoted into the model
+        # because the reasoning engine still requires >=3 usable matches/team.
+        out["xg_fallback_attempted"]=True
         out["xg_samples_home"]=fallback.get("xg_samples_home")
         out["xg_samples_away"]=fallback.get("xg_samples_away")
+        out["xg_sources_tried"]=fallback.get("xg_sources_tried")
+        out["xg_partial"]=bool(fallback.get("xg_partial"))
         out["xg_checked_at"]=fallback.get("xg_checked_at")
+        if all(fallback.get(k) is not None for k in keys):
+            for k in keys: out[k]=fallback[k]
+            out["home_big_chances"]=fallback.get("home_big_chances")
+            out["away_big_chances"]=fallback.get("away_big_chances")
+            out["xg_source"]=fallback.get("xg_source") or "public xG fallback"
+            out["big_chance_source"]=fallback.get("xg_source") or "public xG fallback"
+            out["xg_fallback_used"]=True
+            out["xg_partial"]=False
+        else:
+            out.setdefault("xg_fallback_used",False)
+            out["xg_fallback_source"]=fallback.get("xg_source") or "public measured xG fallback"
     return out
 
 
