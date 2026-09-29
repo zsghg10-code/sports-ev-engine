@@ -12,7 +12,7 @@ import pandas as pd
 from .models.soccer_auto import norm_name
 
 PROVIDER_BUILD="3.0.0"
-PATCH_BUILD = '3.4.15-xg-single-pass'
+PATCH_BUILD = '3.4.16-robust-form-xg'
 
 
 def _fixture_match(pool,home,away,kickoff_iso,tolerance_minutes=180):

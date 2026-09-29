@@ -9,14 +9,14 @@ Scenario ranges are stress tests, not statistical confidence intervals.
 """
 from __future__ import annotations
 
-PATCH_BUILD = '3.4.15-xg-single-pass'
+PATCH_BUILD = '3.4.16-robust-form-xg'
 
 from dataclasses import dataclass, asdict
 from itertools import product
 import math
 from typing import Callable, Iterable
 
-ENGINE_ID = "chatgpt-style-v3.4.2-match-specific-explanations"
+ENGINE_ID = "chatgpt-style-v3.4.16-robust-form-xg"
 
 
 def clamp(v, lo, hi):
@@ -104,7 +104,7 @@ def apply_soccer_context(home_lambda: float, away_lambda: float, context: dict |
     # Recent measured xG/xGA is a *replacement blend*, not an additive second
     # form boost.  Observed goals and xG are two noisy estimates of the same latent
     # scoring rate; stacking both as sequential multipliers double-counts the same
-    # recent matches.  v3.4.15 therefore blends them exactly once here.
+    # recent matches.  v3.4.16 therefore blends them exactly once here.
     hxgf=context.get("home_xg_for"); hxga=context.get("home_xg_against")
     axgf=context.get("away_xg_for"); axga=context.get("away_xg_against")
     xg_ok=all(finite(v) for v in (hxgf,hxga,axgf,axga))
@@ -112,9 +112,11 @@ def apply_soccer_context(home_lambda: float, away_lambda: float, context: dict |
         hx=clamp((float(hxgf)+float(axga))/2, .20, 4.50)
         ax=clamp((float(axgf)+float(hxga))/2, .20, 4.50)
         # Guard against a bad/mismatched provider record while still letting real
-        # measured xG move an overheated goal-only model materially.
-        target_h=clamp(hx, base_h*.65, base_h*1.35)
-        target_a=clamp(ax, base_a*.65, base_a*1.35)
+        # measured xG move an overheated goal-only model materially.  v3.4.16
+        # permits a wider correction than v3.4.15 because the base goal-form model
+        # is already robustified for opponent strength and blowout tails.
+        target_h=clamp(hx, base_h*.55, base_h*1.45)
+        target_a=clamp(ax, base_a*.55, base_a*1.45)
         try:
             xg_n=min(int(context.get("xg_samples_home") or 0), int(context.get("xg_samples_away") or 0))
         except (TypeError,ValueError):
@@ -127,15 +129,53 @@ def apply_soccer_context(home_lambda: float, away_lambda: float, context: dict |
             # Complete provider aggregates without an auditable sample count get a
             # smaller weight rather than being discarded or treated as 3+ games.
             xg_weight=.35 if international else .30
+
+        # Goals and xG estimate the same latent scoring rate. If they materially
+        # disagree, the measured xG sample receives more weight instead of allowing
+        # a single 6/7-goal result to dominate the total. This is symmetric: it can
+        # correct an overheated or an underheated goal model.
+        base_total=max(.30,base_h+base_a)
+        xg_total=max(.30,target_h+target_a)
+        # For internationals, compare xG not only with the already-robustified
+        # lambda but also with the *raw* recent-goal environment when available.
+        # That preserves the evidence that a 7-0/6-0 created a goals-vs-xG gap,
+        # even though the robust form step has correctly shrunk the blowout first.
+        raw_goal_total=None
+        try:
+            hrgf=float((home_form or {}).get("raw_gf")); hrga=float((home_form or {}).get("raw_ga"))
+            argf=float((away_form or {}).get("raw_gf")); arga=float((away_form or {}).get("raw_ga"))
+            if all(math.isfinite(v) for v in (hrgf,hrga,argf,arga)):
+                raw_goal_total=max(.30,((hrgf+arga)/2+.10)+((argf+hrga)/2))
+        except (TypeError,ValueError):
+            raw_goal_total=None
+        if international and raw_goal_total is not None:
+            divergence_reference=max((base_total,raw_goal_total), key=lambda v:abs(math.log(v/xg_total)))
+        else:
+            divergence_reference=base_total
+        divergence=abs(math.log(divergence_reference/xg_total))
+        xg_boost=0.0
+        if international and xg_n >= 3 and divergence > .10:
+            xg_boost=min(.20, .08 + max(0.0,divergence-.10)*.80)
+            xg_weight=min(.70,xg_weight+xg_boost)
+        elif (not international) and xg_n >= 5 and divergence > .16:
+            xg_boost=min(.08,max(0.0,divergence-.16)*.35)
+            xg_weight=min(.50,xg_weight+xg_boost)
+
         h=(1-xg_weight)*h+xg_weight*target_h
         a=(1-xg_weight)*a+xg_weight*target_a
-        context["xg_application_mode"]="single_pass_blend"
+        context["xg_application_mode"]="single_pass_robust_blend"
         context["xg_blend_weight"]=xg_weight
+        context["xg_base_total"]=base_total
+        context["xg_raw_goal_form_total"]=raw_goal_total
+        context["xg_target_total"]=xg_total
+        context["xg_divergence_reference_total"]=divergence_reference
+        context["xg_goal_model_divergence_pct"]=(divergence_reference/xg_total-1.0)*100.0
+        context["xg_weight_boost"]=xg_boost
         context["xg_target_home"]=target_h
         context["xg_target_away"]=target_a
         ledger.add("recent_xg",True,"home" if hx>ax else "away" if ax>hx else "neutral",
                    100*((h+a)/(base_h+base_a)-1),.88,context.get("xg_source","measured xG"),
-                   f"single-pass {xg_weight:.0%}; H xGF/xGA {float(hxgf):.2f}/{float(hxga):.2f}; A {float(axgf):.2f}/{float(axga):.2f}")
+                   f"robust single-pass {xg_weight:.0%} (boost {xg_boost:.0%}); H xGF/xGA {float(hxgf):.2f}/{float(hxga):.2f}; A {float(axgf):.2f}/{float(axga):.2f}; goal/xG total gap {(divergence_reference/xg_total-1.0)*100:+.1f}%")
     else:
         ledger.add("recent_xg",False,note="usable xG sample <3 per team or provider did not expose xG")
         miss_penalty(.8)

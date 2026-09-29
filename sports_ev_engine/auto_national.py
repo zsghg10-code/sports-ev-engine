@@ -7,7 +7,7 @@ from functools import lru_cache
 from .free_national import free_pool
 from .models.soccer_auto import norm_name
 PROVIDER_BUILD='3.0.0'
-PATCH_BUILD = '3.4.15-xg-single-pass'
+PATCH_BUILD = '3.4.16-robust-form-xg'
 BASE='https://site.api.espn.com/apis/site/v2/sports/soccer'
 LEAGUES=('uefa.nations','fifa.worldq.uefa','uefa.euro','uefa.euroq','fifa.friendly','fifa.world','concacaf.nations.league','fifa.worldq.concacaf','concacaf.gold','fifa.worldq.conmebol','conmebol.america','fifa.worldq.afc','afc.cup','fifa.worldq.caf','caf.nations','fifa.worldq.ofc')
 
@@ -318,7 +318,7 @@ def fetch_match_xg_fotmob(event,day_fetch=_fotmob_day,detail_fetch=_fotmob_detai
 
 
 SOFA_BASE="https://api.sofascore.com/api/v1"
-SOFA_HEADERS={"User-Agent":"Mozilla/5.0 (compatible; SportsEVEngine/3.4.15; measured-xG fallback)","Accept":"application/json,text/plain,*/*"}
+SOFA_HEADERS={"User-Agent":"Mozilla/5.0 (compatible; SportsEVEngine/3.4.16; measured-xG fallback)","Accept":"application/json,text/plain,*/*"}
 
 
 def _sofa_json(path):

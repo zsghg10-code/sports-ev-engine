@@ -1,5 +1,5 @@
 from __future__ import annotations
-PATCH_BUILD = '3.4.15-xg-single-pass'
+PATCH_BUILD = '3.4.16-robust-form-xg'
 from .adaptive_model import apply_adaptive_layer
 import math
 from datetime import datetime, timezone
@@ -141,8 +141,8 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
     fixtures=[f for f in competition_pool.get("fixtures",[]) if f.get("fixture",{}).get("status",{}).get("short")=="FT" and 0<int(f.get("fixture",{}).get("timestamp") or 0)<cutoff_ts]
     ratings=build_elo(fixtures, home_adv=20.0 if international else 55.0)
 
-    hf=opponent_adjusted_form(fixtures,home_lookup,ratings,cutoff_ts,recent_n=recent_n)
-    af=opponent_adjusted_form(fixtures,away_lookup,ratings,cutoff_ts,recent_n=recent_n)
+    hf=opponent_adjusted_form(fixtures,home_lookup,ratings,cutoff_ts,recent_n=recent_n,international=international)
+    af=opponent_adjusted_form(fixtures,away_lookup,ratings,cutoff_ts,recent_n=recent_n,international=international)
 
     if not hf or not af:
         missing=[]
@@ -159,7 +159,7 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
     neutral=bool(ctx and all(c.get("neutral") for c in ctx.values()))
     hl,al=_build_lambdas(hf,af,he,ae,home_adv=(0.0 if neutral or competition_pool.get("venue_unknown") else 20.0) if international else 55.0)
 
-    # v3.4.15 canonical xG pipeline.  Establish the one authoritative xG quartet
+    # v3.4.16 canonical xG pipeline.  Establish the one authoritative xG quartet
     # *before* any lambda adjustment, then disable the legacy xg_form adjustment.
     deep_ctx=_canonical_xg_context(
         competition_pool,
@@ -276,6 +276,16 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
             "home_recent_ga":hf["ga"],
             "away_recent_gf":af["gf"],
             "away_recent_ga":af["ga"],
+            "home_raw_recent_gf":hf.get("raw_gf"),
+            "home_raw_recent_ga":hf.get("raw_ga"),
+            "away_raw_recent_gf":af.get("raw_gf"),
+            "away_raw_recent_ga":af.get("raw_ga"),
+            "home_robust_recent_gf":hf.get("robust_gf"),
+            "away_robust_recent_gf":af.get("robust_gf"),
+            "home_blowout_matches_shrunk":hf.get("blowout_matches_shrunk",0),
+            "away_blowout_matches_shrunk":af.get("blowout_matches_shrunk",0),
+            "home_form_mode":hf.get("form_mode"),
+            "away_form_mode":af.get("form_mode"),
             "home_form_matches":hf["matches"],
             "away_form_matches":af["matches"],
             "uncertainty_pp":base_unc,
@@ -317,6 +327,12 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
             "xg_canonical_source":deep_ctx.get("xg_canonical_source"),
             "xg_application_mode":deep_ctx.get("xg_application_mode"),
             "xg_blend_weight":deep_ctx.get("xg_blend_weight"),
+            "xg_base_total":deep_ctx.get("xg_base_total"),
+            "xg_raw_goal_form_total":deep_ctx.get("xg_raw_goal_form_total"),
+            "xg_target_total":deep_ctx.get("xg_target_total"),
+            "xg_divergence_reference_total":deep_ctx.get("xg_divergence_reference_total"),
+            "xg_goal_model_divergence_pct":deep_ctx.get("xg_goal_model_divergence_pct"),
+            "xg_weight_boost":deep_ctx.get("xg_weight_boost"),
             "xg_target_home":deep_ctx.get("xg_target_home"),
             "xg_target_away":deep_ctx.get("xg_target_away"),
             "home_big_chances":deep_ctx.get("home_big_chances"),

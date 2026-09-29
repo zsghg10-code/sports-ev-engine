@@ -6,7 +6,7 @@ import requests
 from sports_ev_engine.models.soccer_auto import norm_name
 
 PROVIDER_BUILD = '3.0.0'
-PATCH_BUILD = '3.4.15-xg-single-pass'
+PATCH_BUILD = '3.4.16-robust-form-xg'
 FREE_URL = 'https://raw.githubusercontent.com/martj42/international_results/master/results.csv'
 HISTORY_COLUMNS = 'date,home_team,away_team,home_score,away_score,tournament,neutral,score_basis,home_xg,away_xg,source'.split(',')
 CONTEXT_COLUMNS = 'kickoff,home_team,away_team,team,lineup_confirmed,lineup_players,missing_players,attack_change_pct,defense_change_pct,neutral,source,checked_at'.split(',')
@@ -132,7 +132,7 @@ def adjust_lambdas(hl,al,pool,apply_xg=True):
     elif apply_xg:
         notes.append('xG 미반영(표본 부족/미수집)')
     else:
-        # v3.4.15+: analyze_event canonicalizes measured xG into event_context and
+        # v3.4.16+: analyze_event canonicalizes measured xG into event_context and
         # apply_soccer_context() owns the one-and-only xG blend.  This prevents a
         # history/CSV xG_form from being applied here and then again downstream.
         notes.append('xG 단일경로 처리(컨텍스트 엔진)')

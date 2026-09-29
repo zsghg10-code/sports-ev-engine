@@ -153,6 +153,14 @@ def match_specific_reason(row: Any, policy_reason: Any="") -> str:
         hgf=_num(_get(row,"home_recent_gf")); agf=_num(_get(row,"away_recent_gf")); hga=_num(_get(row,"home_recent_ga")); aga=_num(_get(row,"away_recent_ga"))
         if all(math.isfinite(x) for x in (hgf,agf,hga,aga)):
             pieces.append(f"최근 득점/실점 평균 {home} {hgf:.2f}/{hga:.2f}, {away} {agf:.2f}/{aga:.2f}")
+        hs=int(_num(_get(row,"home_blowout_matches_shrunk"),0) or 0); as_=int(_num(_get(row,"away_blowout_matches_shrunk"),0) or 0)
+        if hs or as_:
+            pieces.append(f"약체/대량득실 이상치 축소 보정 {home} {hs}경기, {away} {as_}경기")
+        xgw=_num(_get(row,"xg_blend_weight")); xggap=_num(_get(row,"xg_goal_model_divergence_pct"))
+        if math.isfinite(xgw):
+            txt=f"실측 xG 단일혼합 {xgw*100:.0f}%"
+            if math.isfinite(xggap):txt+=f"(득점모델 대비 xG 총량 {xggap:+.1f}%)"
+            pieces.append(txt)
 
     mp=_market_phrase(row)
     if mp:pieces.append(mp)

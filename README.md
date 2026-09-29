@@ -1,3 +1,9 @@
+# Sports EV Engine v3.4.16 — robust opponent form + adaptive xG
+
+최신 수정은 **V3_4_16_ROBUST_FORM_XG_KO.md**를 확인하세요. A매치 약체전 대승/대패의 최근 득점 폼 과대반영을 줄이고, 실제 득점과 실측 xG가 크게 어긋날 때 xG 비중을 자동 상향합니다. v3.4.15의 xG single-pass 원칙은 유지합니다.
+
+---
+
 # Sports EV Engine v3.4.15 — measured xG single-pass
 
 최신 수정은 **V3_4_15_XG_SINGLE_PASS_KO.md**를 확인하세요. 실측 xG 중복 경로를 제거하고 canonical single-pass blend 및 핵심 모듈 build contract를 추가했습니다.

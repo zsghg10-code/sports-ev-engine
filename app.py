@@ -35,6 +35,7 @@ from sports_ev_engine.providers.mlb_statsapi import schedule as mlb_schedule, sc
 from sports_ev_engine.providers.mlb_context import MLBContextProvider
 from sports_ev_engine.market import consensus, clean_odds
 from sports_ev_engine import auto_soccer as auto_soccer_provider
+from sports_ev_engine.models import elo as elo_provider
 from sports_ev_engine.auto_soccer import analyze_event
 from sports_ev_engine.competition_form import build_competition_pool
 from sports_ev_engine import reasoning_engine as reasoning_provider
@@ -77,20 +78,20 @@ from sports_ev_engine.feature_attribution import attribution
 from sports_ev_engine.model_drift import drift_rows
 from sports_ev_engine.bankroll import simulate as simulate_bankroll
 
-st.set_page_config(page_title="Sports EV Engine v3.4.15",layout="wide")
-st.title("Sports EV Engine v3.4.15")
-st.caption("BUILD v3.4.15-xg-single-pass · 2026-09-29")
+st.set_page_config(page_title="Sports EV Engine v3.4.16",layout="wide")
+st.title("Sports EV Engine v3.4.16")
+st.caption("BUILD v3.4.16-robust-form-xg · 2026-09-29")
 if any(getattr(module,"PROVIDER_BUILD",None)!="3.0.0" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider,deep_soccer_provider)):
     st.error("앱과 수집 파일 버전이 다릅니다. ZIP의 sports_ev_engine 폴더까지 전부 반영한 뒤 Streamlit 앱을 Reboot하세요.")
     st.stop()
-_PATCH_BUILD = "3.4.15-xg-single-pass"
-_patch_modules=(auto_national_provider,deep_soccer_provider,free_provider,auto_soccer_provider,reasoning_provider,national_context_provider)
+_PATCH_BUILD = "3.4.16-robust-form-xg"
+_patch_modules=(auto_national_provider,deep_soccer_provider,free_provider,auto_soccer_provider,reasoning_provider,national_context_provider,elo_provider)
 _patch_mismatch=[getattr(m,"__name__",str(m)) for m in _patch_modules if getattr(m,"PATCH_BUILD",None)!=_PATCH_BUILD]
 if _patch_mismatch:
-    st.error("v3.4.15 핵심 xG 모듈이 섞여 있습니다: " + ", ".join(_patch_mismatch) + ". DEPLOY_ONLY ZIP의 app.py와 sports_ev_engine 폴더를 함께 덮어쓴 뒤 Reboot하세요.")
+    st.error("v3.4.16 핵심 축구 모델 모듈이 섞여 있습니다: " + ", ".join(_patch_mismatch) + ". DEPLOY_ONLY ZIP의 app.py와 sports_ev_engine 폴더를 함께 덮어쓴 뒤 Reboot하세요.")
     st.stop()
 FootballAccessError=football_provider.FootballAccessError
-st.caption("분석 백엔드 v3.4.15 · measured xG single-pass + API-Football/ESPN/FotMob/SofaScore fallback")
+st.caption("분석 백엔드 v3.4.16 · opponent-strength robust form + adaptive measured-xG single-pass + API-Football/ESPN/FotMob/SofaScore fallback")
 st.caption("독립 모델 → 정밀 컨텍스트 → 반증 검사 → 시장 캘리브레이션 → 27개 스트레스 시나리오 → EV/ROBUST 판정 → 기록·사후검증")
 
 def secret(name):
@@ -107,7 +108,7 @@ SUPABASE_KEY=secret("SUPABASE_SERVICE_ROLE_KEY") or secret("SUPABASE_KEY")
 configure_persistence(SUPABASE_URL,SUPABASE_KEY)
 BASEBALL_KEY=None
 
-_BUILD_ID = "3.4.15-xg-single-pass"
+_BUILD_ID = "3.4.16-robust-form-xg"
 if st.session_state.get("_build_id") != _BUILD_ID:
     for _k in [
         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
