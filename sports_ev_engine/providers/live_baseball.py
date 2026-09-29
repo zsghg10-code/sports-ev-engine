@@ -22,6 +22,8 @@ KBO_GAME_LIST_URL = "https://www.koreabaseball.com/ws/Main.asmx/GetKboGameList"
 KBO_SCHEDULE_BASE = "https://www.koreabaseball.com/ws/Schedule.asmx"
 KBO_REFERER = "https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx"
 KBO_PITCHER_STATS = "https://www.koreabaseball.com/Record/Player/PitcherBasic/Basic1.aspx"
+NAVER_KBO_CALENDAR = "https://api-gw.sports.naver.com/schedule/calendar"
+NAVER_KBO_PREVIEW = "https://api-gw.sports.naver.com/schedule/games/{game_id}/preview"
 
 PROVIDER_BUILD = "3.0.0"
 
@@ -205,6 +207,8 @@ class KBOOfficialLive:
         self.s.headers.update({"User-Agent": UA})
         self._games = {}
         self._pitchers = None
+        self._naver_calendar_cache = {}
+        self._naver_preview_cache = {}
 
     def _game_list(self, date8):
         if date8 in self._games:
@@ -265,6 +269,163 @@ class KBOOfficialLive:
             chosen["_event_reversed"] = bool(reverse)
             return chosen
         return None
+
+    def _naver_calendar(self, date_obj):
+        key = date_obj.strftime("%Y-%m-%d")
+        if key in self._naver_calendar_cache:
+            return self._naver_calendar_cache[key]
+        headers = {
+            "User-Agent": UA,
+            "Referer": "https://m.sports.naver.com",
+            "Origin": "https://m.sports.naver.com",
+            "Accept": "application/json, text/plain, */*",
+        }
+        r = self.s.get(
+            NAVER_KBO_CALENDAR,
+            params={
+                "upperCategoryId": "kbaseball",
+                "categoryIds": ",kbo,kbaseballetc,premier12,apbc",
+                "date": key,
+            },
+            headers=headers,
+            timeout=self.timeout,
+        )
+        r.raise_for_status()
+        data = r.json()
+        if data.get("code") != 200 or not data.get("success", False):
+            raise RuntimeError(f"Naver calendar error: {data.get('message')}")
+        self._naver_calendar_cache[key] = data
+        return data
+
+    def _naver_preview(self, game_id):
+        gid = str(game_id or "").strip()
+        if not gid:
+            return {}
+        if gid in self._naver_preview_cache:
+            return self._naver_preview_cache[gid]
+        headers = {
+            "User-Agent": UA,
+            "Referer": f"https://m.sports.naver.com/game/{gid}/lineup",
+            "Origin": "https://m.sports.naver.com",
+            "Accept": "application/json, text/plain, */*",
+        }
+        r = self.s.get(NAVER_KBO_PREVIEW.format(game_id=gid), headers=headers, timeout=self.timeout)
+        r.raise_for_status()
+        data = r.json()
+        if data.get("code") != 200 or not data.get("success", False):
+            return {}
+        self._naver_preview_cache[gid] = data
+        return data
+
+    @staticmethod
+    def _naver_player_id(player):
+        if not isinstance(player, dict):
+            return None
+        for key in ("playerId", "playerCode", "pcode", "playerNo", "playerNumber", "id"):
+            v = player.get(key)
+            if v is not None and str(v).strip():
+                return str(v).strip()
+        info = player.get("playerInfo") or {}
+        if isinstance(info, dict):
+            for key in ("playerId", "playerCode", "pcode", "id"):
+                v = info.get(key)
+                if v is not None and str(v).strip():
+                    return str(v).strip()
+        return None
+
+    @classmethod
+    def _parse_naver_side(cls, preview_data, key):
+        block = preview_data.get(key) or {}
+        players = block.get("fullLineUp") or []
+        out = []
+        for player in players:
+            if not isinstance(player, dict) or "batorder" not in player:
+                continue
+            try:
+                order = int(str(player.get("batorder")).strip())
+            except Exception:
+                continue
+            if not (1 <= order <= 9):
+                continue
+            name = _clean(player.get("playerName") or (player.get("playerInfo") or {}).get("name"))
+            if not name:
+                continue
+            out.append({
+                "order": order,
+                "position": _clean(player.get("positionName") or player.get("position")),
+                "name": name,
+                "player_id": cls._naver_player_id(player),
+                "war": None,
+                "bats_throws": _clean(player.get("batsThrows")),
+                "backnum": _clean(player.get("backnum")),
+            })
+        # Do not promote duplicate/incomplete batting orders to confirmed.
+        by_order = {p["order"]: p for p in out}
+        return [by_order[i] for i in range(1, 10) if i in by_order]
+
+    def _naver_lineup(self, home, away, commence_iso):
+        event_dt = _kst_dt(commence_iso)
+        data = self._naver_calendar(event_dt.date())
+        date_key = event_dt.strftime("%Y-%m-%d")
+        game_infos = []
+        for day in ((data.get("result") or {}).get("dates") or []):
+            if str(day.get("ymd")) == date_key:
+                game_infos.extend(day.get("gameInfos") or [])
+        if not game_infos:
+            return {"confirmed": False, "home": [], "away": [], "reason": "Naver schedule has no KBO games"}
+
+        target_min = event_dt.hour * 60 + event_dt.minute
+        matches = []
+        for info in game_infos:
+            gid = info.get("gameId")
+            if not gid:
+                continue
+            try:
+                raw = self._naver_preview(gid)
+            except Exception:
+                continue
+            preview = ((raw.get("result") or {}).get("previewData") or {})
+            gi = preview.get("gameInfo") or {}
+            nh = _clean(gi.get("hName") or gi.get("hFullName") or info.get("homeTeamName") or info.get("homeTeamCode"))
+            na = _clean(gi.get("aName") or gi.get("aFullName") or info.get("awayTeamName") or info.get("awayTeamCode"))
+            reverse = False
+            if _same_team(nh, home) and _same_team(na, away):
+                reverse = False
+            elif _same_team(nh, away) and _same_team(na, home):
+                reverse = True
+            else:
+                continue
+            gm = _clock_minutes(gi.get("gtime") or info.get("gameTime") or info.get("startTime"))
+            delta = abs(gm - target_min) if gm is not None else 9999
+            matches.append((delta, str(gid), preview, reverse))
+        if not matches:
+            return {"confirmed": False, "home": [], "away": [], "reason": "Naver team/date match unavailable"}
+        matches.sort(key=lambda x: (x[0], x[1]))
+        _, gid, preview, reverse = matches[0]
+
+        n_home = self._parse_naver_side(preview, "homeTeamLineUp")
+        n_away = self._parse_naver_side(preview, "awayTeamLineUp")
+        home_lu, away_lu = (n_away, n_home) if reverse else (n_home, n_away)
+        confirmed = len(home_lu) == 9 and len(away_lu) == 9
+        home_starter = _clean(((preview.get("homeStarter") or {}).get("playerInfo") or {}).get("name")) or None
+        away_starter = _clean(((preview.get("awayStarter") or {}).get("playerInfo") or {}).get("name")) or None
+        if reverse:
+            home_starter, away_starter = away_starter, home_starter
+        return {
+            "confirmed": confirmed,
+            "home": home_lu,
+            "away": away_lu,
+            "home_war": None,
+            "away_war": None,
+            "home_starter": home_starter,
+            "away_starter": away_starter,
+            "source_game_id": gid,
+            "source": "Naver Sports public preview fallback",
+            "label": "확정 (네이버스포츠 fallback)" if confirmed else "부분수집 (네이버스포츠)",
+            "kind": "starting" if confirmed else "partial",
+            "fallback_used": True,
+            "reason": "" if confirmed else f"Naver batting orders {len(away_lu)}/9 away, {len(home_lu)}/9 home",
+        }
 
     def _lineup(self, game_id, season):
         r = self.s.post(
@@ -361,11 +522,15 @@ class KBOOfficialLive:
         home_sp, away_sp = (official_away_sp, official_home_sp) if reversed_event else (official_home_sp, official_away_sp)
         starter_ok = _flag_true(g.get("START_PIT_CK")) and bool(home_sp and away_sp)
 
-        lineup = {"confirmed": False, "home": [], "away": [], "home_war": None, "away_war": None}
+        lineup = {"confirmed": False, "home": [], "away": [], "home_war": None, "away_war": None,
+                  "source": "KBO official GameCenter", "fallback_used": False}
+        official_lineup_error = None
         try:
             lineup = self._lineup(game_id, season)
-        except Exception:
-            pass
+            lineup["source"] = "KBO official GameCenter"
+            lineup["fallback_used"] = False
+        except Exception as e:
+            official_lineup_error = f"{type(e).__name__}: {e}"
         # Guard against a stale/wrong lineup response before accepting it as FINAL.
         source_gid=str(lineup.get("source_game_id") or "")
         if source_gid and game_id and source_gid != game_id:
@@ -376,6 +541,30 @@ class KBOOfficialLive:
             lineup["home_war"], lineup["away_war"] = lineup.get("away_war"), lineup.get("home_war")
             lineup["home_team"], lineup["away_team"] = lineup.get("away_team"), lineup.get("home_team")
         lineup_ok = bool(lineup.get("confirmed")) and len(lineup.get("home", [])) >= 9 and len(lineup.get("away", [])) >= 9
+
+        # KBO GameCenter occasionally publishes/serves the starter list before its
+        # lineup-analysis payload is available.  Naver Sports exposes the same
+        # pregame batting order through its public preview endpoint, so use it as
+        # a fail-soft fallback.  It is promoted only when both batting orders 1-9
+        # are complete; partial rows remain unconfirmed.
+        if not lineup_ok:
+            try:
+                nav = self._naver_lineup(home, away, commence_iso)
+            except Exception as e:
+                nav = {"confirmed": False, "reason": f"Naver fallback failed: {type(e).__name__}: {e}"}
+            nav_ok = bool(nav.get("confirmed")) and len(nav.get("home", [])) == 9 and len(nav.get("away", [])) == 9
+            if nav_ok:
+                lineup = nav
+                lineup_ok = True
+                if not home_sp and nav.get("home_starter"):
+                    home_sp = nav.get("home_starter")
+                if not away_sp and nav.get("away_starter"):
+                    away_sp = nav.get("away_starter")
+                starter_ok = bool(home_sp and away_sp)
+            else:
+                lineup["fallback_reason"] = nav.get("reason")
+                if official_lineup_error:
+                    lineup["official_error"] = official_lineup_error
 
         pmap = self._pitcher_table()
         home_stat = pmap.get(_norm(home_sp), {}) if home_sp else {}
@@ -391,8 +580,16 @@ class KBOOfficialLive:
             "home_starter_stats": home_stat, "away_starter_stats": away_stat,
             "home_lineup": lineup.get("home", []), "away_lineup": lineup.get("away", []),
             "home_lineup_strength": lineup.get("home_war"), "away_lineup_strength": lineup.get("away_war"),
-            "source": "KBO official GameCenter",
-            "note": "odds home/away reversed; official fields remapped" if reversed_event else "",
+            "lineup_label": lineup.get("label") or ("확정 (KBO 공식)" if lineup_ok else "원본 미수집"),
+            "lineup_kind": lineup.get("kind") or ("starting" if lineup_ok else None),
+            "lineup_source": lineup.get("source") or "KBO official GameCenter",
+            "lineup_fallback_used": bool(lineup.get("fallback_used")),
+            "source": "KBO official GameCenter" + (" + Naver Sports lineup fallback" if lineup.get("fallback_used") else ""),
+            "note": "; ".join(x for x in [
+                "odds home/away reversed; official fields remapped" if reversed_event else "",
+                "KBO official lineup unavailable; Naver Sports public preview used" if lineup.get("fallback_used") else "",
+                str(lineup.get("fallback_reason") or ""),
+            ] if x),
             "game_id": game_id, "game_url": None,
         }
 
@@ -509,8 +706,14 @@ class NPBOfficialLive:
             if len(names)!=2:return {}
             resolved={}
             for club,short_name in zip((home,away),names):
+                # The monthly NPB schedule itself is an official source.  Do not
+                # discard an announced starter merely because the player-profile
+                # resolver cannot produce a unique player id (common with short
+                # surnames / newly added players).  Keep the official name and
+                # treat player_id resolution as enrichment only.
                 entry=self._player_from_stats(club,short_name,game_date.year)
-                if entry:resolved[club]=entry
+                resolved[club]=entry or {"name": short_name, "player_id": None,
+                                         "source": "NPB monthly schedule official starter"}
             return resolved
         return {}
 
@@ -575,7 +778,7 @@ class NPBOfficialLive:
         confirmed = all({p["order"] for p in order} == set(range(1,10)) for order in (home,away))
         return {"confirmed": confirmed, "home": home, "away": away,
                 "kind": "starting" if pregame else "current",
-                "label": "확정(선발 오더)" if pregame else "확인(경기중·최신 오더)"}
+                "label": "확정(타순 1~9)" if pregame else "확인(경기중·최신 타순)"}
 
     def _batting(self, team, year):
         key=(team,year)

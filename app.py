@@ -73,14 +73,14 @@ from sports_ev_engine.feature_attribution import attribution
 from sports_ev_engine.model_drift import drift_rows
 from sports_ev_engine.bankroll import simulate as simulate_bankroll
 
-st.set_page_config(page_title="Sports EV Engine v3.4.8",layout="wide")
-st.title("Sports EV Engine v3.4.8")
-st.caption("BUILD v3.4.8-kbo-match-safety-fix · 2026-09-29")
+st.set_page_config(page_title="Sports EV Engine v3.4.10",layout="wide")
+st.title("Sports EV Engine v3.4.10")
+st.caption("BUILD v3.4.10-npb-starter-official-fallback · 2026-09-29")
 if any(getattr(module,"PROVIDER_BUILD",None)!="3.0.0" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider,deep_soccer_provider)):
     st.error("앱과 수집 파일 버전이 다릅니다. ZIP의 sports_ev_engine 폴더까지 전부 반영한 뒤 Streamlit 앱을 Reboot하세요.")
     st.stop()
 FootballAccessError=football_provider.FootballAccessError
-st.caption("분석 백엔드 v3.4.8 · KBO 더블헤더/홈원정 안전 매칭 + v3.4.7 전체 기능 유지")
+st.caption("분석 백엔드 v3.4.10 · NPB 공식 일정 선발 fallback 강화 + 타순/선발투수 UI 구분")
 st.caption("독립 모델 → 정밀 컨텍스트 → 반증 검사 → 시장 캘리브레이션 → 27개 스트레스 시나리오 → EV/ROBUST 판정 → 기록·사후검증")
 
 def secret(name):
@@ -97,7 +97,7 @@ SUPABASE_KEY=secret("SUPABASE_SERVICE_ROLE_KEY") or secret("SUPABASE_KEY")
 configure_persistence(SUPABASE_URL,SUPABASE_KEY)
 BASEBALL_KEY=None
 
-_BUILD_ID = "3.4.8-kbo-match-safety-fix"
+_BUILD_ID = "3.4.10-npb-starter-official-fallback"
 if st.session_state.get("_build_id") != _BUILD_ID:
     for _k in [
         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
@@ -810,7 +810,7 @@ with tabs[2]:
                         if started:
                             live_rows.append({"경기":match_label_kst(home,away,g.iloc[0]["commence_time"]),"경기시간(KST)":format_kst(g.iloc[0]["commence_time"]),"단계":"시작시간 경과·사전분석 제외",
                                 "라인업":ctx.get("lineup_label") or ("확인" if ctx.get("lineup_confirmed") else "원본 미수집"),
-                                "선발 오더 여부":ctx.get("lineup_kind")=="starting",
+                                "타순 1~9 확정":ctx.get("lineup_kind")=="starting",
                                 "원정 1~9":", ".join(x.get("name","") for x in ctx.get("away_lineup",[])),
                                 "홈 1~9":", ".join(x.get("name","") for x in ctx.get("home_lineup",[])),
                                 "비고":"시작 예정시간이 지났습니다. 최신 오더는 교체 선수를 포함할 수 있으며 사전 모델로 라이브 배당을 분석하지 않습니다."})
@@ -838,8 +838,9 @@ with tabs[2]:
                             "단계":ctx.get("stage"),
                             "원정 선발":ctx.get("away_starter") or "미확인",
                             "홈 선발":ctx.get("home_starter") or "미확인",
-                            "선발확인":bool(ctx.get("starter_confirmed")),
+                            "선발투수 확정":bool(ctx.get("starter_confirmed")),
                             "라인업":(ctx.get("lineup_label") or ("확정" if ctx.get("lineup_confirmed") else "원본 미수집")),
+                            "라인업 소스":ctx.get("lineup_source") or ctx.get("source") or "-",
                             "Advanced":f'{adv.get("advanced_used",0)}/{adv.get("advanced_total",7)}',
                             "최근 타선":bool((adv.get("statuses") or {}).get("recent_form")),
                             "선발 최근":bool((adv.get("statuses") or {}).get("starter_recent")),
