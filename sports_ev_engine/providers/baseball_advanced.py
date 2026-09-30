@@ -15,9 +15,10 @@ import requests
 from bs4 import BeautifulSoup
 
 from sports_ev_engine.providers.official_baseball import canonical_english
-from sports_ev_engine.providers.live_baseball import _kst_dt, _norm, _clean, _num, _npb_ip, _same_team, NPB_FULL_MAP
+from sports_ev_engine.providers.live_baseball import _kst_dt, _norm, _clean, _num, _npb_ip, _same_team, NPB_FULL_MAP, KBO_EN_BY_KR
 
 PROVIDER_BUILD = "3.0.0"
+BASEBALL_ADVANCED_BUILD = "3.4.20"
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -25,6 +26,7 @@ UA = (
 )
 
 KBO_PITCHER_DETAIL = "https://www.koreabaseball.com/Record/Player/PitcherDetail/Basic.aspx?playerId={pid}"
+KBO_BOXSCORE = "https://www.koreabaseball.com/ws/Schedule.asmx/GetBoxScoreScroll"
 KBO_HITTER_BASIC = "https://www.koreabaseball.com/Record/Player/HitterDetail/Basic.aspx?playerId={pid}"
 KBO_HITTER_SITUATION = "https://www.koreabaseball.com/Record/Player/HitterDetail/Situation.aspx?playerId={pid}"
 
@@ -112,6 +114,40 @@ def _factor_from_ratio(ratio, max_move=.04, strength=.35):
 def _safe_float(x):
     try:return float(x)
     except:return None
+
+
+def _mmdd_key(v):
+    """Stable KBO log ordering regardless of whether the source table is newest-first."""
+    m=re.match(r"^(\d{1,2})\.(\d{1,2})",str(v or "").strip())
+    return (int(m.group(1)),int(m.group(2))) if m else (0,0)
+
+
+def _kbo_team(label):
+    raw=_clean(label)
+    return KBO_EN_BY_KR.get(raw, raw)
+
+
+def _same_kbo_team(label, team):
+    return _same_team(_kbo_team(label), canonical_english(team))
+
+
+def _json_table_rows(raw):
+    """Return KBO GameCenter JSON-table rows as plain strings."""
+    if not raw:
+        return []
+    try:
+        obj=json.loads(raw) if isinstance(raw,str) else raw
+    except Exception:
+        return []
+    out=[]
+    for row_obj in (obj or {}).get("rows",[]) or []:
+        vals=[]
+        for cell in (row_obj or {}).get("row",[]) or []:
+            text=_clean((cell or {}).get("Text", ""))
+            vals.append("" if text in {"&nbsp;","-"} else text)
+        if vals:
+            out.append(vals)
+    return out
 
 
 class WeatherProvider:
@@ -223,39 +259,190 @@ class KBOAdvanced:
         self.cache[url]=r.text
         return r.text
 
-    def pitcher_recent(self,pid,n=5):
-        if not pid:return {}
+    def _pitcher_log(self,pid):
+        if not pid:
+            return [], None
         try:
             html=self._fetch(KBO_PITCHER_DETAIL.format(pid=pid))
             tables=pd.read_html(StringIO(html))
         except Exception as e:
-            return {"available":False,"reason":str(e)}
+            return [], str(e)
         df=next((d for d in tables if {"일자","IP","BB","SO","ER"}.issubset(set(map(str,d.columns)))),None)
-        if df is None:return {"available":False,"reason":"recent pitcher table unavailable"}
+        if df is None:
+            return [], "recent pitcher table unavailable"
         rows=[]
         for _,r in df.iterrows():
-            date=str(r.get("일자",""))
-            if not re.match(r"\d{2}\.\d{2}",date):continue
+            if not re.match(r"\d{2}\.\d{2}",str(r.get("일자",""))):
+                continue
             rows.append(r)
-        rows=rows[-int(n):]
-        if not rows:return {"available":False,"reason":"no recent pitcher games"}
+        return rows, None
+
+    @staticmethod
+    def _aggregate_pitcher_rows(rows):
+        if not rows:
+            return {"available":False,"reason":"no pitcher games"}
         bf=sum(_num(r.get("TBF")) or 0 for r in rows)
         bb=sum(_num(r.get("BB")) or 0 for r in rows)
         so=sum(_num(r.get("SO")) or 0 for r in rows)
         er=sum(_num(r.get("ER")) or 0 for r in rows)
+        runs=sum(_num(r.get("R")) or 0 for r in rows)
+        hits=sum(_num(r.get("H")) or 0 for r in rows)
+        hr=sum(_num(r.get("HR")) or 0 for r in rows)
+        np=sum(_num(r.get("NP")) or 0 for r in rows)
         ip=sum(_ip(r.get("IP")) or 0 for r in rows)
-        hand=None
-        text=BeautifulSoup(html,"html.parser").get_text(" ",strip=True)
-        m=re.search(r"포지션\s*:\s*투수\(([^)]+)\)",text)
-        if m:
-            hand="L" if "좌투" in m.group(1) else "R" if "우투" in m.group(1) else None
         return {
-            "available":True,"games":len(rows),"ip":ip,"bb":bb,"so":so,"er":er,"bf":bf,
+            "available":True,"games":len(rows),"ip":ip,"bb":bb,"so":so,"er":er,"r":runs,
+            "h":hits,"hr":hr,"bf":bf,"np":np or None,
             "era":9*er/ip if ip else None,
             "bb_pct":bb/bf if bf else None,"k_pct":so/bf if bf else None,
-            "kbb_pct":(so-bb)/bf if bf else None,"hand":hand,
-            "velocity_delta_kmh":None,"velocity_status":"official pregame source does not expose recent velocity"
+            "kbb_pct":(so-bb)/bf if bf else None,
         }
+
+    def pitcher_recent(self,pid,n=5):
+        rows,err=self._pitcher_log(pid)
+        if err:
+            return {"available":False,"reason":err}
+        rows=sorted(rows,key=lambda r:_mmdd_key(r.get("일자")))[-int(n):]
+        out=self._aggregate_pitcher_rows(rows)
+        if not out.get("available"):
+            out["reason"]="no recent pitcher games"
+            return out
+        try:
+            html=self._fetch(KBO_PITCHER_DETAIL.format(pid=pid))
+            text=BeautifulSoup(html,"html.parser").get_text(" ",strip=True)
+            m=re.search(r"포지션\s*:\s*투수\(([^)]+)\)",text)
+            hand="L" if m and "좌투" in m.group(1) else "R" if m and "우투" in m.group(1) else None
+        except Exception:
+            hand=None
+        out.update({"hand":hand,"velocity_delta_kmh":None,
+                    "velocity_status":"official pregame source does not expose recent velocity"})
+        return out
+
+    def pitcher_vs_opponent(self,pid,opponent,n=10):
+        """Current-season starter results specifically against today's opposing team."""
+        rows,err=self._pitcher_log(pid)
+        if err:
+            return {"available":False,"reason":err,"opponent":canonical_english(opponent)}
+        if not rows or "상대" not in set(map(str,rows[0].index)):
+            return {"available":False,"reason":"opponent column unavailable","opponent":canonical_english(opponent)}
+        matched=[r for r in rows if _same_kbo_team(r.get("상대"),opponent)]
+        matched=sorted(matched,key=lambda r:_mmdd_key(r.get("일자")))[-int(n):]
+        out=self._aggregate_pitcher_rows(matched)
+        out["opponent"]=canonical_english(opponent)
+        out["sample_scope"]="current-season recent-game table"
+        if not out.get("available"):
+            out["reason"]="no current-season starts/appearances vs opponent in published log"
+        return out
+
+    def team_recent(self,team,commence_iso,n=10,max_days=35):
+        """Exact recent team runs from the KBO GameCenter game list."""
+        dt=_kst_dt(commence_iso)
+        rows=[]
+        for days in range(1,max_days+1):
+            date8=(dt-timedelta(days=days)).strftime("%Y%m%d")
+            try: games=self.live._game_list(date8)
+            except Exception: games=[]
+            for g in games:
+                hn=_kbo_team(g.get("HOME_NM","")); an=_kbo_team(g.get("AWAY_NM",""))
+                if not (_same_team(hn,team) or _same_team(an,team)):
+                    continue
+                hs=_num(g.get("B_SCORE_CN")); aas=_num(g.get("T_SCORE_CN"))
+                if hs is None or aas is None:
+                    continue
+                is_home=_same_team(hn,team)
+                rows.append({"date":date8,"rf":hs if is_home else aas,"ra":aas if is_home else hs,
+                             "opponent":an if is_home else hn,"game_id":g.get("G_ID")})
+                if len(rows)>=int(n):
+                    break
+            if len(rows)>=int(n):
+                break
+        if not rows:
+            return {"available":False,"reason":"recent KBO scores unavailable"}
+        return {"available":True,"games":len(rows),
+                "runs_for_per_game":sum(x["rf"] for x in rows)/len(rows),
+                "runs_against_per_game":sum(x["ra"] for x in rows)/len(rows),
+                "raw":rows}
+
+    def _boxscore_pitchers(self,g,team):
+        gid=str(g.get("G_ID") or "").strip()
+        if not gid:
+            return []
+        season=int(g.get("SEASON_ID") or gid[:4])
+        sr=int(g.get("SR_ID") or 0)
+        try:
+            r=self.s.post(KBO_BOXSCORE,data={"leId":1,"srId":sr,"seasonId":season,"gameId":gid},
+                          headers={"Content-Type":"application/x-www-form-urlencoded; charset=UTF-8",
+                                   "X-Requested-With":"XMLHttpRequest",
+                                   "Referer":"https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx",
+                                   "User-Agent":UA},timeout=self.timeout)
+            r.raise_for_status(); obj=r.json()
+        except Exception:
+            return []
+        arr=obj.get("arrPitcher") or []
+        hn=_kbo_team(g.get("HOME_NM","")); an=_kbo_team(g.get("AWAY_NM",""))
+        idx=1 if _same_team(hn,team) else 0 if _same_team(an,team) else None
+        if idx is None or len(arr)<=idx:
+            return []
+        rows=_json_table_rows((arr[idx] or {}).get("table"))
+        out=[]
+        for i,row in enumerate(rows):
+            if len(row)<9:
+                continue
+            out.append({"name":row[0],"entry":row[1],"ip":_ip(row[6]),"bf":_num(row[7]),"np":_num(row[8]),
+                        "h":_num(row[10]) if len(row)>10 else None,"hr":_num(row[11]) if len(row)>11 else None,
+                        "bb":_num(row[12]) if len(row)>12 else None,"so":_num(row[13]) if len(row)>13 else None,
+                        "r":_num(row[14]) if len(row)>14 else None,"er":_num(row[15]) if len(row)>15 else None,
+                        "_idx":i})
+        return out
+
+    def bullpen_exact(self,team,commence_iso,days=3):
+        dt=_kst_dt(commence_iso)
+        total_ip=0.0; total_np=0.0; apps=0; game_days=0; names={}
+        checked_games=0; failed_boxes=0; used_yesterday=False
+        for back in range(1,int(days)+1):
+            date8=(dt-timedelta(days=back)).strftime("%Y%m%d")
+            try: games=self.live._game_list(date8)
+            except Exception: games=[]
+            day_used=False
+            for g in games:
+                hn=_kbo_team(g.get("HOME_NM","")); an=_kbo_team(g.get("AWAY_NM",""))
+                if not (_same_team(hn,team) or _same_team(an,team)):
+                    continue
+                if _num(g.get("B_SCORE_CN")) is None or _num(g.get("T_SCORE_CN")) is None:
+                    continue
+                checked_games+=1
+                pits=self._boxscore_pitchers(g,team)
+                if not pits:
+                    failed_boxes+=1; continue
+                # KBO box score is ordered by appearance; first row is normally the starter.
+                rel=[p for p in pits if not ("선발" in str(p.get("entry") or ""))]
+                if len(rel)==len(pits) and rel:
+                    rel=rel[1:]
+                if not rel:
+                    continue
+                day_used=True
+                for q in rel:
+                    ip=float(q.get("ip") or 0); np=float(q.get("np") or 0)
+                    total_ip+=ip; total_np+=np; apps+=1
+                    name=q.get("name") or "?"
+                    d=names.setdefault(name,{"appearances":0,"pitches":0.0,"ip":0.0})
+                    d["appearances"]+=1; d["pitches"]+=np; d["ip"]+=ip
+            if day_used:
+                game_days+=1
+                if back==1: used_yesterday=True
+        if checked_games and failed_boxes < checked_games:
+            # A parsed complete game with zero relief appearances is valid exact
+            # evidence of a rested bullpen; do not replace it with a fatigue proxy.
+            consecutive=max(0,game_days-1)
+            score=max(0,min(1,total_np/180.0 + .035*max(0,apps-6) + .08*int(used_yesterday) + .05*consecutive))
+            top=sorted(({"name":k,**v} for k,v in names.items()),key=lambda x:(x["pitches"],x["appearances"]),reverse=True)[:6]
+            return {"available":True,"exact":True,"games_last3":checked_games,"days_used":game_days,
+                    "relief_ip_last3":total_ip,"total_relief_pitches":total_np,"reliever_apps_last3":apps,
+                    "used_yesterday":used_yesterday,"score":score,"top_relief_usage":top,
+                    "source":"KBO GameCenter GetBoxScoreScroll"}
+        out=self.schedule_load(team,commence_iso)
+        out["reason"]="exact KBO boxscore bullpen usage unavailable; schedule proxy used"
+        return out
 
     def hitter_detail(self,pid,starter_hand):
         if not pid:return {}
@@ -275,8 +462,8 @@ class KBOAdvanced:
                     if season_ops is not None:break
             recent_ops=None
             if recent is not None:
-                rr=[r for _,r in recent.iterrows() if re.match(r"\d{2}\.\d{2}",str(r.get("일자","")))]
-                rr=rr[-10:]
+                rr=[r for _,r in recent.iterrows() if re.match(r"\d{1,2}\.\d{1,2}",str(r.get("일자","")))]
+                rr=sorted(rr,key=lambda r:_mmdd_key(r.get("일자")))[-10:]
                 if rr:
                     sums={k:sum(_num(r.get(k)) or 0 for r in rr) for k in ["AB","H","2B","3B","HR","BB","HBP"]}
                     recent_ops=_ops_from_counts(sums["AB"],sums["H"],sums["2B"],sums["3B"],sums["HR"],sums["BB"],sums["HBP"],0)
@@ -334,6 +521,11 @@ class KBOAdvanced:
         away_pid=self._pid_from_game(g,False) or ctx.get("away_starter_id")
         result["home_starter_recent"]=self.pitcher_recent(home_pid,5)
         result["away_starter_recent"]=self.pitcher_recent(away_pid,5)
+        # Today's starter vs today's opposing TEAM.  This is not generic head-to-head.
+        result["home_starter_vs_opponent"]=self.pitcher_vs_opponent(home_pid,away,10)
+        result["away_starter_vs_opponent"]=self.pitcher_vs_opponent(away_pid,home,10)
+        result["home_recent"]=self.team_recent(home,commence_iso,recent_n)
+        result["away_recent"]=self.team_recent(away,commence_iso,recent_n)
 
         # Lineup hitter IDs can be supplied by v2.6 live parser. If not, skip cleanly.
         home_lu=ctx.get("home_lineup",[]) or []; away_lu=ctx.get("away_lineup",[]) or []
@@ -363,8 +555,8 @@ class KBOAdvanced:
 
         result["home_lineup_form"]=lineup_metrics(home_lu,hhand)
         result["away_lineup_form"]=lineup_metrics(away_lu,ahand)
-        result["home_bullpen"]=self.schedule_load(home,commence_iso)
-        result["away_bullpen"]=self.schedule_load(away,commence_iso)
+        result["home_bullpen"]=self.bullpen_exact(home,commence_iso)
+        result["away_bullpen"]=self.bullpen_exact(away,commence_iso)
         return result
 
 
@@ -439,6 +631,13 @@ class NPBRecent:
         away_hit=self._contains_team(parts[1].split("|")[0],teamc)
         if home_hit==away_hit:return {"available":False,"reason":"boxscore team mapping ambiguous","url":url}
         idx=1 if home_hit else 0
+        # Identify the opposing club from the box-score title for starter-vs-team history.
+        opponent=None
+        other_part=parts[1].split("|")[0] if home_hit else parts[0]
+        for club,aliases in NPB_SHORT.items():
+            if club==teamc: continue
+            if any(a.lower() in other_part.lower() for a in aliases):
+                opponent=club; break
         bat=bats[idx] if len(bats)>idx else None
         pit=pits[idx] if len(pits)>idx else None
 
@@ -457,7 +656,7 @@ class NPBRecent:
                 if not name or ip is None:continue
                 bf=_num(r.get("BF"));bb=_num(r.get("BB"));so=_num(r.get("SO"));er=_num(r.get("ER"))
                 pitchers.append({"name":name,"ip":ip,"bf":bf,"bb":bb,"so":so,"er":er})
-        return {"available":bool(batting or pitchers),"batting":batting,"pitchers":pitchers,"url":url}
+        return {"available":bool(batting or pitchers),"batting":batting,"pitchers":pitchers,"url":url,"opponent":opponent}
 
     def _official_box_url(self, day, english_url, team):
         """Resolve the regular-season Japanese play-by-play page for exact XBH."""
@@ -561,18 +760,50 @@ class NPBRecent:
                 "k_pct":so/bf if bf else None,"kbb_pct":(so-bb)/bf if bf else None,
                 "velocity_delta_kmh":None,"velocity_status":"NPB public boxscore does not expose recent pitch velocity"}
 
+    def starter_vs_opponent(self,team,starter,opponent,commence_iso,n=5,english_name=None):
+        if not starter:
+            return {"available":False,"reason":"starter unavailable","opponent":canonical_english(opponent)}
+        if not english_name and re.search(r"[ぁ-んァ-ヶ一-龯]",starter):
+            return {"available":False,"reason":"Japanese starter has no verified English player identity","opponent":canonical_english(opponent)}
+        urls=self.recent_game_urls(team,commence_iso,n=40,max_days=120)
+        rows=[]
+        target=canonical_english(opponent)
+        for _,u in urls:
+            g=self.parse_team_game(u,team)
+            if not _same_team(g.get("opponent"),target):
+                continue
+            pits=g.get("pitchers") or []
+            if not pits: continue
+            p=pits[0]
+            if self._same_pitcher(starter,english_name,p.get("name")):
+                rows.append(p)
+                if len(rows)>=int(n): break
+        if not rows:
+            return {"available":False,"reason":"no recent starts vs opponent in official boxscores","opponent":target}
+        bf=sum(x.get("bf") or 0 for x in rows);bb=sum(x.get("bb") or 0 for x in rows)
+        so=sum(x.get("so") or 0 for x in rows);er=sum(x.get("er") or 0 for x in rows);ip=sum(x.get("ip") or 0 for x in rows)
+        return {"available":True,"games":len(rows),"ip":ip,"bb":bb,"so":so,"er":er,"bf":bf,
+                "era":9*er/ip if ip else None,"bb_pct":bb/bf if bf else None,
+                "k_pct":so/bf if bf else None,"kbb_pct":(so-bb)/bf if bf else None,
+                "opponent":target,"sample_scope":"recent official boxscores"}
+
     def bullpen(self,team,commence_iso):
         urls=self.recent_game_urls(team,commence_iso,n=3,max_days=6)
-        total_ip=0;apps=0;consec=0
+        total_ip=0;apps=0;consec=0;parsed_games=0
         for _,u in urls:
-            g=self.parse_team_game(u,team);pits=g.get("pitchers") or []
+            g=self.parse_team_game(u,team)
+            pits=g.get("pitchers") or []
+            if not g.get("available") or not pits:
+                continue
+            parsed_games+=1
             rel=pits[1:] if len(pits)>1 else []
             if rel:
                 apps+=len(rel);total_ip+=sum(p.get("ip") or 0 for p in rel);consec+=1
-        if not urls:return {"available":False}
-        # high score around 8+ relief innings over last three team games
+        if not urls or parsed_games==0:
+            return {"available":False,"exact":False,"reason":"recent NPB bullpen boxscores unavailable"}
+        # high score around 8+ relief innings over last three successfully parsed team games
         score=max(0,min(1,total_ip/9.0 + .05*max(0,apps-9)))
-        return {"available":True,"exact":True,"relief_ip_last3":total_ip,"reliever_apps_last3":apps,"score":score}
+        return {"available":True,"exact":True,"games_last3":parsed_games,"relief_ip_last3":total_ip,"reliever_apps_last3":apps,"score":score}
 
     def enrich(self,home,away,commence_iso,ctx,recent_n=10):
         hrecent=self.team_recent(home,commence_iso,recent_n)
@@ -586,6 +817,8 @@ class NPBRecent:
             "home_recent":hrecent,"away_recent":arecent,
             "home_starter_recent":self.starter_recent(home,ctx.get("home_starter"),commence_iso,5,ctx.get("home_starter_english")),
             "away_starter_recent":self.starter_recent(away,ctx.get("away_starter"),commence_iso,5,ctx.get("away_starter_english")),
+            "home_starter_vs_opponent":self.starter_vs_opponent(home,ctx.get("home_starter"),away,commence_iso,5,ctx.get("home_starter_english")),
+            "away_starter_vs_opponent":self.starter_vs_opponent(away,ctx.get("away_starter"),home,commence_iso,5,ctx.get("away_starter_english")),
             "home_bullpen":self.bullpen(home,commence_iso),
             "away_bullpen":self.bullpen(away,commence_iso),
             # Exact public NPB L/R OPS split was not found in stable official tables.
@@ -618,6 +851,35 @@ class AdvancedBaseballSignals:
         return max(.94,min(1.06,fac))
 
     @staticmethod
+    def _starter_vs_opponent_factor(matchup, season):
+        """Shrink starter-vs-team history hard; small samples must never dominate."""
+        if not matchup or not matchup.get("available"):
+            return None
+        me=matchup.get("era"); se=(season or {}).get("era")
+        ip=float(matchup.get("ip") or 0)
+        if me is None or se in (None,0) or ip<=0:
+            return None
+        reliability=max(.15,min(1.0,ip/24.0))
+        ratio=max(.40,min(2.50,float(me)/float(se)))
+        raw=math.exp(.16*reliability*math.log(ratio))
+        return max(.955,min(1.045,raw))
+
+    @staticmethod
+    def _recent_runs_factor(recent, season_for, opponent_recent=None, opponent_season_ra=None):
+        if not recent or not recent.get("available") or not season_for:
+            return None
+        rf=recent.get("runs_for_per_game")
+        if rf is None or float(season_for)<=0:
+            return None
+        ratios=[max(.35,min(2.50,float(rf)/float(season_for)))]
+        if opponent_recent and opponent_recent.get("available") and opponent_season_ra:
+            ora=opponent_recent.get("runs_against_per_game")
+            if ora is not None and float(opponent_season_ra)>0:
+                ratios.append(max(.35,min(2.50,float(ora)/float(opponent_season_ra))))
+        ratio=math.exp(sum(math.log(x) for x in ratios)/len(ratios))
+        return _factor_from_ratio(ratio,.045,.28)
+
+    @staticmethod
     def _lineup_form_factor(d):
         if not d or not d.get("available"):return None
         r=d.get("recent10_ops");s=d.get("season_ops")
@@ -629,7 +891,7 @@ class AdvancedBaseballSignals:
         sp=d.get("split_ops");s=d.get("season_ops")
         return _factor_from_ratio(sp/s if sp and s else None,.04,.30)
 
-    def collect(self,league,home,away,commence_iso,base_ctx,recent_n=10):
+    def collect(self,league,home,away,commence_iso,base_ctx,recent_n=10,team_stats=None):
         lg=str(league).upper()
         if lg=="KBO":
             data=self.kbo.enrich(home,away,commence_iso,base_ctx,recent_n)
@@ -642,28 +904,47 @@ class AdvancedBaseballSignals:
         # Convert raw signals into conservative scoring multipliers.
         hsf=self._starter_factor(data.get("home_starter_recent"),base_ctx.get("home_starter_stats"))
         asf=self._starter_factor(data.get("away_starter_recent"),base_ctx.get("away_starter_stats"))
+        hsv=self._starter_vs_opponent_factor(data.get("home_starter_vs_opponent"),base_ctx.get("home_starter_stats"))
+        asv=self._starter_vs_opponent_factor(data.get("away_starter_vs_opponent"),base_ctx.get("away_starter_stats"))
         hform=self._lineup_form_factor(data.get("home_lineup_form"))
         aform=self._lineup_form_factor(data.get("away_lineup_form"))
         hsplit=self._split_factor(data.get("home_lineup_form"))
         asplit=self._split_factor(data.get("away_lineup_form"))
 
-        # NPB recent boxscore OBP proxy: use only as a small recent-form nudge.
+        # Before lineups are posted, exact recent KBO team scores still provide a measured form signal.
+        ts=team_stats or {}
+        hs=ts.get(canonical_english(home)) or {}; aws=ts.get(canonical_english(away)) or {}
+        hrun=self._recent_runs_factor(data.get("home_recent"),hs.get("runs_per_game"),data.get("away_recent"),aws.get("runs_allowed_per_game"))
+        arun=self._recent_runs_factor(data.get("away_recent"),aws.get("runs_per_game"),data.get("home_recent"),hs.get("runs_allowed_per_game"))
+        if hrun is not None:
+            hform=math.exp((.60*math.log(hform)+.40*math.log(hrun))) if hform is not None else hrun
+        if arun is not None:
+            aform=math.exp((.60*math.log(aform)+.40*math.log(arun))) if aform is not None else arun
+
+        # NPB recent boxscore OBP proxy is supporting evidence.  Preserve the
+        # stronger recent OPS + runs signal already computed above and blend this
+        # only as a small nudge; older code overwrote hform/aform completely.
         if lg=="NPB":
             hr=(data.get("home_recent") or {}).get("obp_proxy")
             ar=(data.get("away_recent") or {}).get("obp_proxy")
             if hr is not None and ar is not None:
                 avg=(hr+ar)/2
                 if avg>0:
-                    hform=max(.97,min(1.03,1+(hr/avg-1)*.20))
-                    aform=max(.97,min(1.03,1+(ar/avg-1)*.20))
+                    hobp=max(.97,min(1.03,1+(hr/avg-1)*.20))
+                    aobp=max(.97,min(1.03,1+(ar/avg-1)*.20))
+                    hform=math.exp(.80*math.log(hform)+.20*math.log(hobp)) if hform is not None else hobp
+                    aform=math.exp(.80*math.log(aform)+.20*math.log(aobp)) if aform is not None else aobp
 
         home_bp=data.get("home_bullpen") or {}
         away_bp=data.get("away_bullpen") or {}
         hbp=home_bp.get("score") if home_bp.get("available") else None
         abp=away_bp.get("score") if away_bp.get("available") else None
-        # A fatigued opponent bullpen increases your offense, capped at +4%.
-        home_vs_bullpen=1+min(.04,.04*float(abp)) if abp is not None else None
-        away_vs_bullpen=1+min(.04,.04*float(hbp)) if hbp is not None else None
+        # A fatigued opponent bullpen increases your offense. Exact pitch-count logs get full weight;
+        # schedule-only proxy is deliberately half-strength.
+        hcap=.04 if home_bp.get("exact") else .02
+        acap=.04 if away_bp.get("exact") else .02
+        home_vs_bullpen=1+min(acap,acap*float(abp)) if abp is not None else None
+        away_vs_bullpen=1+min(hcap,hcap*float(hbp)) if hbp is not None else None
 
         wf=weather.get("run_factor") if weather.get("available") else None
 
@@ -675,6 +956,9 @@ class AdvancedBaseballSignals:
             # home starter affects AWAY offense and vice versa
             "home_starter_recent_factor":hsf,
             "away_starter_recent_factor":asf,
+            # starter history vs today's opponent affects the OPPOSING offense
+            "home_starter_vs_opponent_factor":hsv,
+            "away_starter_vs_opponent_factor":asv,
             "home_vs_bullpen_factor":home_vs_bullpen,
             "away_vs_bullpen_factor":away_vs_bullpen,
             "weather_factor":wf,
@@ -684,11 +968,13 @@ class AdvancedBaseballSignals:
         statuses={
             "recent_form": bool(hform is not None and aform is not None),
             "starter_recent": bool(hsf is not None and asf is not None),
+            "starter_vs_opponent": bool(hsv is not None and asv is not None),
             "velocity": bool(
                 (data.get("home_starter_recent") or {}).get("velocity_delta_kmh") is not None
                 and (data.get("away_starter_recent") or {}).get("velocity_delta_kmh") is not None
             ),
             "bullpen": bool(hbp is not None and abp is not None),
+            "bullpen_exact": bool(home_bp.get("exact") and away_bp.get("exact")),
             "split": bool(hsplit is not None and asplit is not None),
             "weather": bool(weather.get("available")),
             "lineup": bool(base_ctx.get("lineup_confirmed")),
@@ -700,6 +986,10 @@ class AdvancedBaseballSignals:
         data["advanced_completeness"]=used/len(statuses)
         # Missing factors increase uncertainty, never silently become neutral confidence.
         data["extra_uncertainty_pp"]=(len(statuses)-used)*.30 + float(weather.get("uncertainty_pp") or 0)
-        if lg=="KBO" and statuses["bullpen"]:
-            data.setdefault("notes",[]).append("불펜은 최근 일정 기반 대리지표이며 투수별 실제 투구량은 미확인")
+        if lg=="KBO" and statuses.get("bullpen_exact"):
+            data.setdefault("notes",[]).append("KBO 불펜: 최근 3일 GameCenter 공식 박스스코어의 구원투수 IP/투구수 실제 반영")
+        elif lg=="KBO" and statuses.get("bullpen"):
+            data.setdefault("notes",[]).append("KBO 불펜 정확 박스스코어 실패: 최근 일정 대리지표를 절반 가중치로 사용")
+        if statuses.get("starter_vs_opponent"):
+            data.setdefault("notes",[]).append("양 선발의 오늘 상대팀 상대 기록을 소표본 축소 후 반영")
         return data

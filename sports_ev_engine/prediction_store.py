@@ -20,7 +20,7 @@ import pandas as pd
 from .core.asian import settle_total_under, settle_total_over, settle_home_handicap
 from . import persistent_store
 
-MODEL_VERSION = "3.4.17"
+MODEL_VERSION = "3.4.21"
 DEFAULT_PREDICTIONS = "data/prediction_snapshots.jsonl"
 DEFAULT_SETTLED = "data/settled_predictions.jsonl"
 DEFAULT_MARKET_OBSERVATIONS = "data/market_observations.jsonl"
@@ -289,7 +289,12 @@ def record_frame(frame: pd.DataFrame, sport_key: str | None = None, sport_family
         "conservative_ev_roi", "uncertainty_pp", "grade", "sanity", "stage", "data_quality", "sport_key", "home_lambda", "away_lambda",
         "home_expected_runs", "away_expected_runs", "home_starter", "away_starter", "home_starter_expected_ip", "away_starter_expected_ip",
         "home_starter_recent_bb_pct", "away_starter_recent_bb_pct", "home_starter_recent_k_pct", "away_starter_recent_k_pct",
-        "home_starter_recent_kbb_pct", "away_starter_recent_kbb_pct", "home_bullpen_pitches_last3", "away_bullpen_pitches_last3",
+        "home_starter_recent_kbb_pct", "away_starter_recent_kbb_pct",
+        "home_starter_vs_opponent_games", "away_starter_vs_opponent_games", "home_starter_vs_opponent_ip", "away_starter_vs_opponent_ip",
+        "home_starter_vs_opponent_era", "away_starter_vs_opponent_era", "home_starter_vs_opponent_kbb_pct", "away_starter_vs_opponent_kbb_pct",
+        "home_starter_vs_opponent_team", "away_starter_vs_opponent_team",
+        "home_bullpen_pitches_last3", "away_bullpen_pitches_last3", "home_bullpen_relief_ip_last3", "away_bullpen_relief_ip_last3",
+        "home_bullpen_exact", "away_bullpen_exact", "home_recent_runs_for", "home_recent_runs_against", "away_recent_runs_for", "away_recent_runs_against",
         "lineup_confirmed", "probable_lineup", "lineup_source", "lineup_status", "lineup_fallback_used", "home_probable_players", "away_probable_players", "fixture_id", "starter_confirmed", "reasoning_engine_id", "signal_coverage", "signal_summary", "missing_signals", "counter_case_risk",
         "counter_case_summary", "v3_decision_status", "robust_positive_ratio", "robust_ev_min", "robust_ev_p10", "robust_ev_max",
         "robust_prob_min", "robust_prob_max", "robust_scenario_count", "v3_candidate", "v3_parlay_eligible", "odds_region", "model_weight",
@@ -297,7 +302,7 @@ def record_frame(frame: pd.DataFrame, sport_key: str | None = None, sport_family
         "calibration_n", "calibration_active", "calibration_reliability", "ensemble_disagreement_pp", "ensemble_gate", "ensemble_summary", "adaptive_gate",
         "ensemble_independent_prob", "ensemble_independent_weight", "ensemble_market_prob", "ensemble_market_weight",
         "ensemble_recent_form_prob", "ensemble_recent_form_weight", "ensemble_context_model_prob", "ensemble_context_model_weight",
-        "recent_form_used", "starter_recent_used", "velocity_used", "bullpen_used", "split_used", "weather_used",
+        "recent_form_used", "starter_recent_used", "starter_vs_opponent_used", "velocity_used", "bullpen_used", "split_used", "weather_used",
         "plate_discipline_used", "statcast_quality_used", "statcast_fallback_used", "batted_ball_regression_used", "pitch_mix_used", "starter_workload_used",
         "bullpen_exact_used", "lineup_platoon_exact_used", "pitch_matchup_used", "availability_news_used", "lineup_change_used",
         "market_movement_used", "roof_used", "umpire_used", "travel_rest_used", "bvp_used", "bullpen_manager_used",

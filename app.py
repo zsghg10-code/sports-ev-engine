@@ -78,11 +78,17 @@ from sports_ev_engine.feature_attribution import attribution
 from sports_ev_engine.model_drift import drift_rows
 from sports_ev_engine.bankroll import simulate as simulate_bankroll
 
-st.set_page_config(page_title="Sports EV Engine v3.4.17",layout="wide")
-st.title("Sports EV Engine v3.4.17")
-st.caption("BUILD v3.4.17-kbo-exact-columns · 2026-09-30")
+st.set_page_config(page_title="Sports EV Engine v3.4.21",layout="wide")
+st.title("Sports EV Engine v3.4.21")
+st.caption("BUILD v3.4.21-mlb-team-aggregate-fix · 2026-09-30")
 if any(getattr(module,"PROVIDER_BUILD",None)!="3.0.0" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider,deep_soccer_provider)):
     st.error("앱과 수집 파일 버전이 다릅니다. ZIP의 sports_ev_engine 폴더까지 전부 반영한 뒤 Streamlit 앱을 Reboot하세요.")
+    st.stop()
+if getattr(advanced_provider,"BASEBALL_ADVANCED_BUILD",None)!="3.4.20":
+    st.error("v3.4.21 야구 정밀수집 모듈이 구버전입니다. app.py와 sports_ev_engine/providers/baseball_advanced.py를 함께 덮어쓴 뒤 Reboot하세요.")
+    st.stop()
+if getattr(live_provider,"LIVE_BASEBALL_BUILD",None)!="3.4.20":
+    st.error("v3.4.21 KBO/NPB 라이브 수집 모듈이 구버전입니다. sports_ev_engine/providers/live_baseball.py까지 함께 덮어쓴 뒤 Reboot하세요.")
     st.stop()
 _PATCH_BUILD = "3.4.16-robust-form-xg"
 _patch_modules=(auto_national_provider,deep_soccer_provider,free_provider,auto_soccer_provider,reasoning_provider,national_context_provider,elo_provider)
@@ -108,7 +114,7 @@ SUPABASE_KEY=secret("SUPABASE_SERVICE_ROLE_KEY") or secret("SUPABASE_KEY")
 configure_persistence(SUPABASE_URL,SUPABASE_KEY)
 BASEBALL_KEY=None
 
-_BUILD_ID = "3.4.17-kbo-exact-columns"
+_BUILD_ID = "3.4.21-mlb-team-aggregate-fix"
 if st.session_state.get("_build_id") != _BUILD_ID:
     for _k in [
         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
@@ -853,21 +859,21 @@ with tabs[2]:
                             continue
                         try:
                             ctx["advanced"]=advanced.collect(
-                                league,home,away,g.iloc[0]["commence_time"],ctx,recent_n=brecent
+                                league,home,away,g.iloc[0]["commence_time"],ctx,recent_n=brecent,team_stats=stats
                             )
                         except Exception as advanced_error:
                             ctx["advanced"]={
-                                "advanced_used":0,"advanced_total":7,"advanced_completeness":0.0,
+                                "advanced_used":0,"advanced_total":9,"advanced_completeness":0.0,
                                 "extra_uncertainty_pp":2.1,
                                 "statuses":{},"notes":[f"advanced collection failed: {type(advanced_error).__name__}: {advanced_error}"],
                             }
                         adv=ctx["advanced"]
-                        if league=="NPB" and ctx.get("stage")=="FINAL":
-                            both_starters=all((adv.get(side+"_starter_recent") or {}).get("kbb_pct") is not None for side in ("home","away"))
-                            both_ops=all((adv.get(side+"_lineup_form") or {}).get("recent10_ops") is not None for side in ("home","away"))
-                            if not (both_starters and both_ops):
-                                ctx["stage"]="DATA PARTIAL"
-                                adv.setdefault("notes",[]).append("선발 최근 K-BB% 또는 양 팀 최근 OPS 결측: FINAL 보류")
+                        # FINAL means the two announced starters and both 1-9 batting
+                        # orders are confirmed. Missing advanced signals no longer
+                        # demote a confirmed game; they are expressed through
+                        # advanced_completeness / uncertainty / candidate gates.
+                        if ctx.get("starter_confirmed") and ctx.get("lineup_confirmed"):
+                            ctx["stage"]="FINAL"
                         live_rows.append({
                             "경기":match_label_kst(home,away,g.iloc[0]["commence_time"]),
                             "경기시간(KST)":format_kst(g.iloc[0]["commence_time"]),
@@ -877,10 +883,12 @@ with tabs[2]:
                             "선발투수 확정":bool(ctx.get("starter_confirmed")),
                             "라인업":(ctx.get("lineup_label") or ("확정" if ctx.get("lineup_confirmed") else "원본 미수집")),
                             "라인업 소스":ctx.get("lineup_source") or ctx.get("source") or "-",
-                            "Advanced":f'{adv.get("advanced_used",0)}/{adv.get("advanced_total",7)}',
+                            "Advanced":f'{adv.get("advanced_used",0)}/{adv.get("advanced_total",9)}',
                             "최근 타선":bool((adv.get("statuses") or {}).get("recent_form")),
                             "선발 최근":bool((adv.get("statuses") or {}).get("starter_recent")),
+                            "선발 vs 상대팀":bool((adv.get("statuses") or {}).get("starter_vs_opponent")),
                             "불펜":bool((adv.get("statuses") or {}).get("bullpen")),
+                            "불펜 실제 투구수":bool((adv.get("statuses") or {}).get("bullpen_exact")),
                             "좌우":bool((adv.get("statuses") or {}).get("split")),
                             "구속":bool((adv.get("statuses") or {}).get("velocity")),
                             "날씨":bool((adv.get("statuses") or {}).get("weather")),
@@ -890,6 +898,16 @@ with tabs[2]:
                             "홈 선발 최근 K-BB%":(adv.get("home_starter_recent") or {}).get("kbb_pct"),
                             "원정 선발 최근 경기":(adv.get("away_starter_recent") or {}).get("games"),
                             "원정 선발 최근 K-BB%":(adv.get("away_starter_recent") or {}).get("kbb_pct"),
+                            "홈 선발 vs 원정 경기수":(adv.get("home_starter_vs_opponent") or {}).get("games"),
+                            "홈 선발 vs 원정 ERA":(adv.get("home_starter_vs_opponent") or {}).get("era"),
+                            "홈 선발 vs 원정 K-BB%":(adv.get("home_starter_vs_opponent") or {}).get("kbb_pct"),
+                            "원정 선발 vs 홈 경기수":(adv.get("away_starter_vs_opponent") or {}).get("games"),
+                            "원정 선발 vs 홈 ERA":(adv.get("away_starter_vs_opponent") or {}).get("era"),
+                            "원정 선발 vs 홈 K-BB%":(adv.get("away_starter_vs_opponent") or {}).get("kbb_pct"),
+                            "홈 최근 경기 득점":(adv.get("home_recent") or {}).get("runs_for_per_game"),
+                            "홈 최근 경기 실점":(adv.get("home_recent") or {}).get("runs_against_per_game"),
+                            "원정 최근 경기 득점":(adv.get("away_recent") or {}).get("runs_for_per_game"),
+                            "원정 최근 경기 실점":(adv.get("away_recent") or {}).get("runs_against_per_game"),
                             "홈 팀 최근 OPS":(adv.get("home_lineup_form") or {}).get("recent10_ops"),
                             "원정 팀 최근 OPS":(adv.get("away_lineup_form") or {}).get("recent10_ops"),
                             "홈 OPS 근거 경기":(adv.get("home_lineup_form") or {}).get("ops_games"),
@@ -900,6 +918,10 @@ with tabs[2]:
                             "원정 최근 OBP 대리값":(adv.get("away_recent") or {}).get("obp_proxy"),
                             "홈 불펜 최근 구원 이닝":(adv.get("home_bullpen") or {}).get("relief_ip_last3"),
                             "원정 불펜 최근 구원 이닝":(adv.get("away_bullpen") or {}).get("relief_ip_last3"),
+                            "홈 불펜 최근 3일 투구수":(adv.get("home_bullpen") or {}).get("total_relief_pitches"),
+                            "원정 불펜 최근 3일 투구수":(adv.get("away_bullpen") or {}).get("total_relief_pitches"),
+                            "홈 불펜 수집":("실제 박스스코어" if (adv.get("home_bullpen") or {}).get("exact") else "일정 대리값"),
+                            "원정 불펜 수집":("실제 박스스코어" if (adv.get("away_bullpen") or {}).get("exact") else "일정 대리값"),
                             "원정 1~9":", ".join(x.get("name","") for x in ctx.get("away_lineup",[])[:9]) or "-",
                             "홈 1~9":", ".join(x.get("name","") for x in ctx.get("home_lineup",[])[:9]) or "-",
                             "소스":ctx.get("source"),
@@ -938,7 +960,7 @@ with tabs[2]:
     if st.session_state.get("baseball_live_rows"):
         st.markdown("### 선발 / 라인업 자동수집 상태")
         st.dataframe(pd.DataFrame(st.session_state["baseball_live_rows"]),use_container_width=True,hide_index=True)
-        st.caption("PRE-LINEUP → STARTER/LINEUP CONFIRMED → DATA PARTIAL 또는 FINAL. NPB는 양 선발 최근 K-BB%와 양 팀 최근 OPS까지 확인되어야 FINAL입니다.")
+        st.caption("PRE-LINEUP → STARTER/LINEUP CONFIRMED → FINAL. FINAL은 양 선발+양 팀 1~9 타순 확정만 뜻하며, 정밀지표 결측은 FINAL을 취소하지 않고 불확실성·완성도·후보 게이트에만 반영합니다.")
 
     if "baseball_ranked" in st.session_state and not st.session_state["baseball_ranked"].empty:
         rb=st.session_state["baseball_ranked"]
@@ -959,11 +981,15 @@ with tabs[2]:
             "grade","stage","data_quality","sanity","kickoff_kst","display_pick","best_book","best_odds","books",
             "consensus_prob","raw_independent_prob","model_win_prob","push_prob","break_even",
             "edge_pp","ev_roi","conservative_ev_roi","uncertainty_pp","starter_confirmed","lineup_confirmed",
-            "advanced_completeness","advanced_used","recent_form_used","starter_recent_used",
+            "advanced_completeness","advanced_used","recent_form_used","starter_recent_used","starter_vs_opponent_used",
             "bullpen_used","split_used","velocity_used","weather_used",
             "away_starter","away_starter_era","away_starter_whip",
             "home_starter","home_starter_era","home_starter_whip",
+            "away_starter_vs_opponent_games","away_starter_vs_opponent_ip","away_starter_vs_opponent_era","away_starter_vs_opponent_kbb_pct",
+            "home_starter_vs_opponent_games","home_starter_vs_opponent_ip","home_starter_vs_opponent_era","home_starter_vs_opponent_kbb_pct",
+            "away_bullpen_pitches_last3","home_bullpen_pitches_last3","away_bullpen_relief_ip_last3","home_bullpen_relief_ip_last3","away_bullpen_exact","home_bullpen_exact",
             "away_season_rf","away_season_ra","home_season_rf","home_season_ra",
+            "away_recent_runs_for","away_recent_runs_against","home_recent_runs_for","home_recent_runs_against",
             "away_recent_rf","away_recent_ra","home_recent_rf","home_recent_ra",
             "away_expected_runs","home_expected_runs",
         ]
@@ -978,7 +1004,10 @@ with tabs[2]:
         for c in ["robust_ev_p10","robust_ev_min"]:
             if c in vb:vb[c]=(vb[c]*100).round(1)
         for c in ["edge_pp","uncertainty_pp","away_season_rf","away_season_ra","home_season_rf","home_season_ra",
-            "away_recent_rf","away_recent_ra","home_recent_rf","home_recent_ra","away_expected_runs","home_expected_runs","away_starter_era","home_starter_era","away_starter_whip","home_starter_whip"]:
+            "away_recent_rf","away_recent_ra","home_recent_rf","home_recent_ra","away_expected_runs","home_expected_runs","away_starter_era","home_starter_era","away_starter_whip","home_starter_whip",
+            "away_starter_vs_opponent_ip","home_starter_vs_opponent_ip","away_starter_vs_opponent_era","home_starter_vs_opponent_era",
+            "away_starter_vs_opponent_kbb_pct","home_starter_vs_opponent_kbb_pct","away_bullpen_pitches_last3","home_bullpen_pitches_last3",
+            "away_bullpen_relief_ip_last3","home_bullpen_relief_ip_last3","away_recent_runs_for","away_recent_runs_against","home_recent_runs_for","home_recent_runs_against"]:
             if c in vb: vb[c]=pd.to_numeric(vb[c],errors="coerce").round(2)
         st.dataframe(vb.head(100),use_container_width=True,hide_index=True)
         if vb.empty:
@@ -989,7 +1018,7 @@ with tabs[2]:
                 st.info(f"{len(rb)}개 배당 선택지를 계산했지만 현재 기준 EV가 양수인 선택지가 없습니다.")
         elif diag_counts["parlay"] == 0:
             st.warning("기준 +EV 선택지는 있지만 현재 실제 조합 안전게이트를 통과한 픽은 없습니다. 위 표의 '후보상태/조합 제외 이유'에서 원인을 확인하세요.")
-        st.caption("NPB FINAL은 공식 선발·라인업과 양 선발 최근 K-BB%, 양 팀 최근 OPS가 확인된 상태입니다. 구속·좌우 스플릿 결측은 불확실성에 반영합니다.")
+        st.caption("양 선발의 상대팀 상대 기록은 소표본 축소 후 최대 ±4.5% 범위로만 득점 기대치에 반영합니다. KBO 불펜은 최근 3일 GameCenter 박스스코어 투구수가 있으면 실제값, 실패 시 일정 대리값을 절반 가중치로 사용합니다.")
 
         st.markdown("### 야구 2~6폴")
         sizesb=st.multiselect("야구 폴더 수",[2,3,4,5,6],default=[2,3],key="baseball_parlay_sizes")
@@ -1014,7 +1043,7 @@ with tabs[2]:
         if any(x.get("단계")=="시작시간 경과·사전분석 제외" for x in st.session_state.get("baseball_live_rows",[])):
             st.info("시작 예정시간이 지난 경기는 위 표에서 오더 수집 상태만 확인합니다. 경기중 배당용 분석은 지원하지 않습니다.")
         elif partial:
-            st.warning(f"{partial}경기는 선발 최근 기록 또는 팀 OPS가 없어 DATA PARTIAL입니다. +EV 후보 판단을 보류하고 자동 다폴에서 제외했습니다.")
+            st.warning(f"{partial}경기는 선발/라인업이 아직 확정되지 않았거나 데이터 품질 게이트를 통과하지 못했습니다. 정밀지표 결측만으로 FINAL을 강등하지는 않습니다.")
         elif st.session_state.get("baseball_failures"):
             st.warning("분석 실패 경기 때문에 후보를 계산하지 못했습니다. 아래 경기별 실패 이유를 확인하세요.")
         elif st.session_state.get("baseball_market") is not None and st.session_state["baseball_market"].empty:

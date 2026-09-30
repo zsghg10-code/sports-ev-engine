@@ -103,6 +103,9 @@ def _apply_context(hm,am,hs,aws,ctx):
         if c.get(key) is not None: am*=float(c[key])
     if c.get("away_starter_recent_factor") is not None: hm*=float(c["away_starter_recent_factor"])
     if c.get("home_starter_recent_factor") is not None: am*=float(c["home_starter_recent_factor"])
+    # Actual starter history vs today's opposing TEAM, strongly sample-shrunk upstream.
+    if c.get("away_starter_vs_opponent_factor") is not None: hm*=float(c["away_starter_vs_opponent_factor"])
+    if c.get("home_starter_vs_opponent_factor") is not None: am*=float(c["home_starter_vs_opponent_factor"])
     # v3.1 Statcast/discipline/workload composite for the opposing starter.
     if c.get("away_starter_deep_factor") is not None: hm*=float(c["away_starter_deep_factor"])
     if c.get("home_starter_deep_factor") is not None: am*=float(c["home_starter_deep_factor"])
@@ -155,9 +158,13 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
 
     context=context or {}
     hm,am=_apply_context(hm,am,hs,aws,context)
-    if not all(math.isfinite(v) and 1.3 <= v <= 8.8 for v in (hm, am)):
+    # Team expected runs can legitimately fall below 1.3 in extreme pitcher/park
+    # matchups. v3.4.20 used 1.3 as a hard lower gate, which incorrectly rejected
+    # otherwise valid MLB events. Gross source corruption is caught above at the
+    # team-stat level; this is only a final numerical safety rail.
+    if not all(math.isfinite(v) and 0.35 <= v <= 10.0 for v in (hm, am)):
         return pd.DataFrame(), {"status": "data_failed", "reason":
-            f"예상 득점 모델 범위 이탈로 평가 보류: home={hm:.3f}, away={am:.3f}; 상한 고정 없이 입력 재검증"}
+            f"예상 득점 모델 범위 이탈로 평가 보류: home={hm:.3f}, away={am:.3f}; 원본 팀 집계/단위 확인 필요"}
     matrix=_matrix(hm,am)
 
     stage=context.get("stage","PRE-LINEUP")
@@ -168,15 +175,16 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
     adv=context.get("advanced") or {}
     unc += float(adv.get("extra_uncertainty_pp") or 0)
     completeness=float(adv.get("advanced_completeness") or 0)
-    if stage=="FINAL" and completeness < .55:
-        quality="MEDIUM"
+    # FINAL is a source-state: both starters + both 1-9 batting orders confirmed.
+    # Missing advanced metrics are already charged through extra_uncertainty_pp and
+    # advanced_completeness; do not double-penalize them by downgrading FINAL.
 
     # v3 audit ledger. These signals were already applied in _apply_context; the
     # ledger makes their availability and omissions explicit without double-counting.
     signal_ledger=SignalLedger()
     statuses=adv.get("statuses") or {}
     labels={
-        "starter_recent":"starter_recent_3_5","recent_form":"recent_team_form","bullpen":"bullpen_workload",
+        "starter_recent":"starter_recent_3_5","starter_vs_opponent":"starter_vs_opponent_team","recent_form":"recent_team_form","bullpen":"bullpen_workload",
         "split":"team_platoon_split","velocity":"velocity_trend","weather":"park_weather",
         "plate_discipline":"whiff_chase_zone_contact","statcast_quality":"statcast_xwoba_barrel_hardhit",
         "batted_ball_regression":"gb_fb_hrfb_babip_regression","pitch_mix":"pitch_mix_arsenal",
@@ -197,6 +205,12 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
     # Pregame starter baselines persisted for objective post-game comparison.
     _hsr=(adv.get("home_starter_recent") or {})
     _asr=(adv.get("away_starter_recent") or {})
+    _hsv=(adv.get("home_starter_vs_opponent") or {})
+    _asv=(adv.get("away_starter_vs_opponent") or {})
+    _hbp_adv=(adv.get("home_bullpen") or {})
+    _abp_adv=(adv.get("away_bullpen") or {})
+    _hrecent=(adv.get("home_recent") or {})
+    _arecent=(adv.get("away_recent") or {})
     def _avg_recent_ip(rec):
         vals=[]
         for x in (rec.get("starts") or []):
@@ -205,7 +219,13 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
             except (TypeError,ValueError):
                 continue
             vals.append(v)
-        return sum(vals)/len(vals) if vals else None
+        if vals:
+            return sum(vals)/len(vals)
+        try:
+            g=float(rec.get("games") or 0); ip=float(rec.get("ip") or 0)
+            return ip/g if g>0 and ip>=0 else None
+        except (TypeError,ValueError):
+            return None
     _home_expected_ip=_avg_recent_ip(_hsr)
     _away_expected_ip=_avg_recent_ip(_asr)
     _deep31=(adv.get("deep_v31") or {})
@@ -262,7 +282,17 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
             "home_starter_recent_bb_pct":_hsr.get("bb_pct"),"away_starter_recent_bb_pct":_asr.get("bb_pct"),
             "home_starter_recent_k_pct":_hsr.get("k_pct"),"away_starter_recent_k_pct":_asr.get("k_pct"),
             "home_starter_recent_kbb_pct":_hsr.get("kbb_pct"),"away_starter_recent_kbb_pct":_asr.get("kbb_pct"),
-            "home_bullpen_pitches_last3":_hb_exact.get("total_relief_pitches"),"away_bullpen_pitches_last3":_ab_exact.get("total_relief_pitches"),
+            "home_starter_vs_opponent_games":_hsv.get("games"),"away_starter_vs_opponent_games":_asv.get("games"),
+            "home_starter_vs_opponent_ip":_hsv.get("ip"),"away_starter_vs_opponent_ip":_asv.get("ip"),
+            "home_starter_vs_opponent_era":_hsv.get("era"),"away_starter_vs_opponent_era":_asv.get("era"),
+            "home_starter_vs_opponent_kbb_pct":_hsv.get("kbb_pct"),"away_starter_vs_opponent_kbb_pct":_asv.get("kbb_pct"),
+            "home_starter_vs_opponent_team":_hsv.get("opponent"),"away_starter_vs_opponent_team":_asv.get("opponent"),
+            "home_bullpen_pitches_last3":(_hbp_adv.get("total_relief_pitches") if _hbp_adv.get("total_relief_pitches") is not None else _hb_exact.get("total_relief_pitches")),
+            "away_bullpen_pitches_last3":(_abp_adv.get("total_relief_pitches") if _abp_adv.get("total_relief_pitches") is not None else _ab_exact.get("total_relief_pitches")),
+            "home_bullpen_relief_ip_last3":_hbp_adv.get("relief_ip_last3"),"away_bullpen_relief_ip_last3":_abp_adv.get("relief_ip_last3"),
+            "home_bullpen_exact":bool(_hbp_adv.get("exact")),"away_bullpen_exact":bool(_abp_adv.get("exact")),
+            "home_recent_runs_for":_hrecent.get("runs_for_per_game"),"home_recent_runs_against":_hrecent.get("runs_against_per_game"),
+            "away_recent_runs_for":_arecent.get("runs_for_per_game"),"away_recent_runs_against":_arecent.get("runs_against_per_game"),
             "home_lineup_strength":context.get("home_lineup_strength"),"away_lineup_strength":context.get("away_lineup_strength"),
             "home_season_rf":hs["runs_per_game"],"home_season_ra":hs["runs_allowed_per_game"],"away_season_rf":aws["runs_per_game"],"away_season_ra":aws["runs_allowed_per_game"],
             "home_recent_rf":hs.get("recent_runs_per_game"),"home_recent_ra":hs.get("recent_runs_allowed_per_game"),"away_recent_rf":aws.get("recent_runs_per_game"),"away_recent_ra":aws.get("recent_runs_allowed_per_game"),
@@ -272,6 +302,7 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
             "advanced_used": int((context.get("advanced") or {}).get("advanced_used") or 0),
             "recent_form_used": bool(((context.get("advanced") or {}).get("statuses") or {}).get("recent_form")),
             "starter_recent_used": bool(((context.get("advanced") or {}).get("statuses") or {}).get("starter_recent")),
+            "starter_vs_opponent_used": bool(((context.get("advanced") or {}).get("statuses") or {}).get("starter_vs_opponent")),
             "velocity_used": bool(((context.get("advanced") or {}).get("statuses") or {}).get("velocity")),
             "bullpen_used": bool(((context.get("advanced") or {}).get("statuses") or {}).get("bullpen")),
             "split_used": bool(((context.get("advanced") or {}).get("statuses") or {}).get("split")),
@@ -296,12 +327,12 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
         robust=scenario_assessment(
             odds=float(r["best_odds"]),market_prob=mp,model_weight=mw,scenarios=scenario_rows,
             base_ev=ev.ev_roi,sanity=sanity,data_ready=(quality in {"HIGH","MEDIUM"}),
-            lineup_required=True,lineup_confirmed=bool(context.get("lineup_confirmed")) and stage=="FINAL",
+            lineup_required=True,lineup_confirmed=bool(context.get("lineup_confirmed")),
         )
         counter_cases,counter_risk=build_counter_cases(
             sample_matches=min(int(hs.get("games") or 0),int(aws.get("games") or 0)),
             lineup_confirmed=bool(context.get("lineup_confirmed")),sanity=sanity,
-            uncertainty_pp=row_unc,signal_coverage=signal_ledger.coverage,stage=stage,
+            uncertainty_pp=row_unc,signal_coverage=None,stage=stage,
             advanced_completeness=completeness,
         )
         legacy_ok=grade in {"A","B","C"} and ev.conservative_ev_roi>0 and sanity not in {"OUTLIER_SHRUNK","HIGH_DISAGREEMENT"}

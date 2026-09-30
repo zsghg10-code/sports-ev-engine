@@ -87,10 +87,16 @@ class MLBContextProvider:
     def _stat(self,*,team_id=None,person_id=None,stats="season",group="hitting",season=None,start=None,end=None,sit_code=None):
         if person_id:
             path=f"/people/{int(person_id)}/stats"
+        elif team_id:
+            # IMPORTANT: /stats?teamId=... can return leaderboard/player splits on
+            # some StatsAPI responses. Taking splits[0] then treats one player's
+            # runs/games as the whole team's scoring rate (the v3.4.20 MLB
+            # 0.4~0.6 expected-runs failure). The team-scoped endpoint returns
+            # the aggregate team split we actually need.
+            path=f"/teams/{int(team_id)}/stats"
         else:
             path="/stats"
         params={"stats":stats,"group":group}
-        if team_id:params["teamId"]=int(team_id)
         if season:params["season"]=int(season)
         if start:params["startDate"]=str(start)
         if end:params["endDate"]=str(end)
@@ -167,6 +173,7 @@ class MLBContextProvider:
 
     def team_profile(self,name,team_id,season,kickoff,n=10):
         season_stat=self.season_team(team_id,season)
+        season_stat["season_games"]=season_stat.get("games")
         recent=self.recent_games(team_id,kickoff,n)
         if recent:
             season_stat["recent10_win_pct"]=sum(int(x["win"]) for x in recent)/len(recent)

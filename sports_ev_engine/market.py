@@ -18,7 +18,17 @@ def clean_odds(df):
 def market_id_row(r):
     if r["market"]=="h2h":
         return "h2h"
-    point="" if pd.isna(r.get("point")) else str(float(r.get("point")))
+    if pd.isna(r.get("point")):
+        point=""
+    else:
+        value=float(r.get("point"))
+        # The Odds API encodes a spread as opposite signed points on the two
+        # outcomes (home -1.5 / away +1.5).  They are one two-sided market and
+        # must be de-vigged together.  Using the signed point as market_id split
+        # the pair into two one-row groups, silently deleting every spread.
+        if r["market"]=="spreads":
+            value=abs(value)
+        point=f"{value:g}"
     return f'{r["market"]}|{point}'
 
 def consensus(df, min_books=3):

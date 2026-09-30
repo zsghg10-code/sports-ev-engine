@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from urllib.parse import urljoin
 import json
 import re
+import time
 
 import pandas as pd
 import requests
@@ -23,9 +24,13 @@ KBO_SCHEDULE_BASE = "https://www.koreabaseball.com/ws/Schedule.asmx"
 KBO_REFERER = "https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx"
 KBO_PITCHER_STATS = "https://www.koreabaseball.com/Record/Player/PitcherBasic/Basic1.aspx"
 NAVER_KBO_CALENDAR = "https://api-gw.sports.naver.com/schedule/calendar"
+NAVER_KBO_GAMES = "https://api-gw.sports.naver.com/schedule/games"
 NAVER_KBO_PREVIEW = "https://api-gw.sports.naver.com/schedule/games/{game_id}/preview"
+NAVER_KBO_RELAY = "https://api-gw.sports.naver.com/schedule/games/{game_id}/relay"
+NAVER_KBO_POLLING = "https://api-gw.sports.naver.com/schedule/games/{game_id}/game-polling"
 
 PROVIDER_BUILD = "3.0.0"
+LIVE_BASEBALL_BUILD = "3.4.20"
 
 NPB_GAMES = "https://npb.jp/games/{year}/"
 NPB_STARTERS = "https://npb.jp/announcement/starter/"
@@ -123,7 +128,13 @@ def _npb_ip(v):
 
 
 def _same_team(a, b):
-    ca, cb = canonical_english(a), canonical_english(b)
+    # KBO/Naver frequently mixes Korean short names (롯데/키움/두산...) with
+    # English odds-provider names. Normalize those aliases before the generic
+    # canonical matcher; otherwise a published Naver lineup can be discarded
+    # as a false team mismatch even though the game is correct.
+    aa = KBO_EN_BY_KR.get(_clean(a), a)
+    bb = KBO_EN_BY_KR.get(_clean(b), b)
+    ca, cb = canonical_english(aa), canonical_english(bb)
     if ca == cb:
         return True
     na, nb = _norm(ca), _norm(cb)
@@ -206,12 +217,22 @@ class KBOOfficialLive:
         self.s = requests.Session()
         self.s.headers.update({"User-Agent": UA})
         self._games = {}
+        self._games_cached_at = {}
         self._pitchers = None
         self._naver_calendar_cache = {}
+        self._naver_games_cache = {}
         self._naver_preview_cache = {}
+        self._naver_preview_cached_at = {}
+        self._naver_aux_cache = {}
+        self._naver_aux_cached_at = {}
+        # Mutable pregame feeds must refresh while a long-running monitor stays
+        # alive.  Without TTLs an empty 17:00 lineup response could remain cached
+        # at 18:17 even after the official order had been published.
+        self.live_cache_ttl = 45.0
 
     def _game_list(self, date8):
-        if date8 in self._games:
+        cached_at=self._games_cached_at.get(date8,0.0)
+        if date8 in self._games and (time.monotonic()-cached_at) < self.live_cache_ttl:
             return self._games[date8]
         r = self.s.post(
             KBO_GAME_LIST_URL,
@@ -227,6 +248,7 @@ class KBOOfficialLive:
         data = json.loads(text)
         games = data.get("game", [])
         self._games[date8] = games
+        self._games_cached_at[date8] = time.monotonic()
         return games
 
     def _match_game(self, home, away, commence_iso):
@@ -270,16 +292,35 @@ class KBOOfficialLive:
             return chosen
         return None
 
+    @staticmethod
+    def _naver_headers(referer="https://m.sports.naver.com"):
+        return {
+            "User-Agent": UA,
+            "Referer": referer,
+            "Origin": "https://m.sports.naver.com",
+            "Accept": "application/json, text/plain, */*",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        }
+
+    @staticmethod
+    def _walk_json(obj, path=""):
+        """Yield (path, value) recursively for provider-shape tolerant parsing."""
+        yield path, obj
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                p = f"{path}.{k}" if path else str(k)
+                yield from KBOOfficialLive._walk_json(v, p)
+        elif isinstance(obj, list):
+            for i, v in enumerate(obj):
+                p = f"{path}[{i}]"
+                yield from KBOOfficialLive._walk_json(v, p)
+
     def _naver_calendar(self, date_obj):
+        """Legacy Naver calendar endpoint kept as a fail-soft backup."""
         key = date_obj.strftime("%Y-%m-%d")
         if key in self._naver_calendar_cache:
             return self._naver_calendar_cache[key]
-        headers = {
-            "User-Agent": UA,
-            "Referer": "https://m.sports.naver.com",
-            "Origin": "https://m.sports.naver.com",
-            "Accept": "application/json, text/plain, */*",
-        }
         r = self.s.get(
             NAVER_KBO_CALENDAR,
             params={
@@ -287,34 +328,125 @@ class KBOOfficialLive:
                 "categoryIds": ",kbo,kbaseballetc,premier12,apbc",
                 "date": key,
             },
-            headers=headers,
+            headers=self._naver_headers(),
             timeout=self.timeout,
         )
         r.raise_for_status()
         data = r.json()
-        if data.get("code") != 200 or not data.get("success", False):
+        if data.get("code") not in (None, 200) or data.get("success") is False:
             raise RuntimeError(f"Naver calendar error: {data.get('message')}")
         self._naver_calendar_cache[key] = data
         return data
+
+    @staticmethod
+    def _collect_game_infos(payload):
+        """Find schedule game dictionaries across both old and new Naver shapes."""
+        out = []
+        seen = set()
+        for _, value in KBOOfficialLive._walk_json(payload):
+            if not isinstance(value, dict):
+                continue
+            gid = value.get("gameId") or value.get("game_id") or value.get("id")
+            if gid is None:
+                continue
+            # Avoid player/team dictionaries that happen to have an id field.
+            keys = {str(k).lower() for k in value.keys()}
+            looks_game = (
+                "gameid" in keys or "game_id" in keys or
+                any(x in keys for x in ("hometeamname", "awayteamname", "gametime", "starttime", "statuscode"))
+            )
+            if not looks_game:
+                continue
+            sgid = str(gid).strip()
+            if not sgid or sgid in seen:
+                continue
+            seen.add(sgid)
+            out.append(value)
+        return out
+
+    def _naver_games(self, date_obj):
+        """Modern Naver schedule endpoint; fromDate/toDate replaced old single date flow."""
+        key = date_obj.strftime("%Y-%m-%d")
+        if key in self._naver_games_cache:
+            return self._naver_games_cache[key]
+        data = {}
+        try:
+            r = self.s.get(
+                NAVER_KBO_GAMES,
+                params={"upperCategoryId": "kbaseball", "fromDate": key, "toDate": key},
+                headers=self._naver_headers(), timeout=self.timeout,
+            )
+            r.raise_for_status()
+            data = r.json()
+            if data.get("success") is False:
+                data = {}
+        except Exception:
+            data = {}
+        games = self._collect_game_infos(data)
+        self._naver_games_cache[key] = games
+        return games
+
+    def _naver_schedule_candidates(self, date_obj):
+        """Combine the modern schedule feed and legacy calendar without duplicate gameIds."""
+        out = []
+        seen = set()
+        for info in self._naver_games(date_obj):
+            gid = str(info.get("gameId") or info.get("game_id") or info.get("id") or "").strip()
+            if gid and gid not in seen:
+                seen.add(gid); out.append(info)
+        try:
+            data = self._naver_calendar(date_obj)
+        except Exception:
+            data = {}
+        for info in self._collect_game_infos(data):
+            gid = str(info.get("gameId") or info.get("game_id") or info.get("id") or "").strip()
+            if gid and gid not in seen:
+                seen.add(gid); out.append(info)
+        return out
 
     def _naver_preview(self, game_id):
         gid = str(game_id or "").strip()
         if not gid:
             return {}
-        if gid in self._naver_preview_cache:
+        cached_at=self._naver_preview_cached_at.get(gid,0.0)
+        if gid in self._naver_preview_cache and (time.monotonic()-cached_at) < self.live_cache_ttl:
             return self._naver_preview_cache[gid]
-        headers = {
-            "User-Agent": UA,
-            "Referer": f"https://m.sports.naver.com/game/{gid}/lineup",
-            "Origin": "https://m.sports.naver.com",
-            "Accept": "application/json, text/plain, */*",
-        }
-        r = self.s.get(NAVER_KBO_PREVIEW.format(game_id=gid), headers=headers, timeout=self.timeout)
+        r = self.s.get(
+            NAVER_KBO_PREVIEW.format(game_id=gid),
+            headers=self._naver_headers(f"https://m.sports.naver.com/game/{gid}/lineup"),
+            timeout=self.timeout,
+        )
         r.raise_for_status()
         data = r.json()
-        if data.get("code") != 200 or not data.get("success", False):
+        if data.get("code") not in (None, 200) or data.get("success") is False:
             return {}
         self._naver_preview_cache[gid] = data
+        self._naver_preview_cached_at[gid] = time.monotonic()
+        return data
+
+    def _naver_aux(self, game_id, kind):
+        gid = str(game_id or "").strip()
+        if not gid:
+            return {}
+        key = (gid, kind)
+        cached_at=self._naver_aux_cached_at.get(key,0.0)
+        if key in self._naver_aux_cache and (time.monotonic()-cached_at) < self.live_cache_ttl:
+            return self._naver_aux_cache[key]
+        url = (NAVER_KBO_RELAY if kind == "relay" else NAVER_KBO_POLLING).format(game_id=gid)
+        try:
+            r = self.s.get(
+                url,
+                headers=self._naver_headers(f"https://m.sports.naver.com/game/{gid}/relay"),
+                timeout=self.timeout,
+            )
+            r.raise_for_status()
+            data = r.json()
+            if data.get("success") is False:
+                data = {}
+        except Exception:
+            data = {}
+        self._naver_aux_cache[key] = data
+        self._naver_aux_cached_at[key] = time.monotonic()
         return data
 
     @staticmethod
@@ -334,83 +466,251 @@ class KBOOfficialLive:
         return None
 
     @classmethod
-    def _parse_naver_side(cls, preview_data, key):
-        block = preview_data.get(key) or {}
-        players = block.get("fullLineUp") or []
+    def _parse_naver_players(cls, players):
+        if not isinstance(players, list):
+            return []
         out = []
         for player in players:
-            if not isinstance(player, dict) or "batorder" not in player:
+            if not isinstance(player, dict):
                 continue
+            order_raw = None
+            for key in ("batorder", "batOrder", "battingOrder", "battingOrderNo", "batting_order", "order"):
+                if player.get(key) is not None:
+                    order_raw = player.get(key); break
+            if order_raw is None:
+                info = player.get("playerInfo") or {}
+                if isinstance(info, dict):
+                    for key in ("batorder", "batOrder", "battingOrder", "order"):
+                        if info.get(key) is not None:
+                            order_raw = info.get(key); break
             try:
-                order = int(str(player.get("batorder")).strip())
+                order = int(str(order_raw).strip())
             except Exception:
                 continue
             if not (1 <= order <= 9):
                 continue
-            name = _clean(player.get("playerName") or (player.get("playerInfo") or {}).get("name"))
+            info = player.get("playerInfo") or {}
+            if not isinstance(info, dict):
+                info = {}
+            name = _clean(
+                player.get("playerName") or player.get("name") or player.get("pName") or
+                info.get("name") or info.get("playerName")
+            )
             if not name:
                 continue
             out.append({
                 "order": order,
-                "position": _clean(player.get("positionName") or player.get("position")),
+                "position": _clean(player.get("positionName") or player.get("position") or player.get("pos") or info.get("positionName")),
                 "name": name,
                 "player_id": cls._naver_player_id(player),
                 "war": None,
-                "bats_throws": _clean(player.get("batsThrows")),
-                "backnum": _clean(player.get("backnum")),
+                "bats_throws": _clean(player.get("batsThrows") or info.get("batsThrows")),
+                "backnum": _clean(player.get("backnum") or player.get("backNumber") or info.get("backnum")),
             })
-        # Do not promote duplicate/incomplete batting orders to confirmed.
         by_order = {p["order"]: p for p in out}
         return [by_order[i] for i in range(1, 10) if i in by_order]
 
+    @classmethod
+    def _parse_naver_side(cls, payload, key):
+        """Backwards-compatible direct parser plus recursive aliases."""
+        aliases = {
+            "homeTeamLineUp": ("homeTeamLineUp", "homeTeamLineup", "homeLineUp", "homeLineup", "homeStartingLineup"),
+            "awayTeamLineUp": ("awayTeamLineUp", "awayTeamLineup", "awayLineUp", "awayLineup", "awayStartingLineup"),
+        }.get(key, (key,))
+        if isinstance(payload, dict):
+            for alias in aliases:
+                block = payload.get(alias)
+                if isinstance(block, dict):
+                    for list_key in ("fullLineUp", "fullLineup", "lineUp", "lineup", "players", "startingPlayers"):
+                        got = cls._parse_naver_players(block.get(list_key))
+                        if len(got) >= 9:
+                            return got
+                got = cls._parse_naver_players(block)
+                if len(got) >= 9:
+                    return got
+        side = "home" if key.lower().startswith("home") else "away"
+        best = []
+        for path, value in cls._walk_json(payload):
+            if side not in path.lower():
+                continue
+            got = cls._parse_naver_players(value)
+            if len(got) > len(best):
+                best = got
+        return best
+
+    @classmethod
+    def _extract_naver_lineups(cls, payload):
+        home = cls._parse_naver_side(payload, "homeTeamLineUp")
+        away = cls._parse_naver_side(payload, "awayTeamLineUp")
+        if len(home) == 9 and len(away) == 9:
+            return home, away
+        # Some response shapes put both sides in unnamed lineup blocks. Infer side
+        # only from the JSON path, never by list order alone.
+        home_best, away_best = home, away
+        for path, value in cls._walk_json(payload):
+            got = cls._parse_naver_players(value)
+            if not got:
+                continue
+            low = path.lower()
+            if "home" in low and len(got) > len(home_best):
+                home_best = got
+            if "away" in low and len(got) > len(away_best):
+                away_best = got
+        return home_best, away_best
+
+    @staticmethod
+    def _naver_name_from_info(info, side):
+        if not isinstance(info, dict):
+            return ""
+        pref = "home" if side == "home" else "away"
+        short = "h" if side == "home" else "a"
+        for key in (
+            f"{pref}TeamName", f"{pref}TeamFullName", f"{pref}Name", f"{short}Name", f"{short}FullName",
+            f"{pref}TeamCode", f"{short}Code",
+        ):
+            v = info.get(key)
+            if isinstance(v, str) and _clean(v):
+                return _clean(v)
+        block = info.get(f"{pref}Team") or info.get(pref)
+        if isinstance(block, dict):
+            for key in ("name", "teamName", "fullName", "shortName", "code", "teamCode"):
+                v = block.get(key)
+                if v is not None and _clean(v):
+                    return _clean(v)
+        if isinstance(block, str):
+            return _clean(block)
+        return ""
+
+    @classmethod
+    def _naver_game_info(cls, payload):
+        # Prefer explicit gameInfo dictionaries, otherwise the schedule item itself.
+        if isinstance(payload, dict):
+            gi = payload.get("gameInfo")
+            if isinstance(gi, dict):
+                return gi
+        for path, value in cls._walk_json(payload):
+            if path.lower().endswith("gameinfo") and isinstance(value, dict):
+                return value
+        return payload if isinstance(payload, dict) else {}
+
+    @classmethod
+    def _payload_mentions_team(cls, payload, team):
+        for path, value in cls._walk_json(payload):
+            if isinstance(value, str) and len(value) <= 50 and _same_team(value, team):
+                return True
+        return False
+
+    @classmethod
+    def _extract_naver_starter(cls, payload, side):
+        aliases = ("homeStarter", "homeStartingPitcher") if side == "home" else ("awayStarter", "awayStartingPitcher")
+        if isinstance(payload, dict):
+            for alias in aliases:
+                block = payload.get(alias)
+                if isinstance(block, dict):
+                    info = block.get("playerInfo") or block
+                    if isinstance(info, dict):
+                        name = _clean(info.get("name") or info.get("playerName"))
+                        if name:
+                            return name
+        side_l = side.lower()
+        for path, value in cls._walk_json(payload):
+            low = path.lower()
+            if side_l not in low or not any(tok in low for tok in ("starter", "startingpitcher", "pitcher")):
+                continue
+            if isinstance(value, dict):
+                info = value.get("playerInfo") or value
+                if isinstance(info, dict):
+                    name = _clean(info.get("name") or info.get("playerName"))
+                    if name:
+                        return name
+        return None
+
     def _naver_lineup(self, home, away, commence_iso):
         event_dt = _kst_dt(commence_iso)
-        data = self._naver_calendar(event_dt.date())
-        date_key = event_dt.strftime("%Y-%m-%d")
-        game_infos = []
-        for day in ((data.get("result") or {}).get("dates") or []):
-            if str(day.get("ymd")) == date_key:
-                game_infos.extend(day.get("gameInfos") or [])
+        game_infos = self._naver_schedule_candidates(event_dt.date())
         if not game_infos:
             return {"confirmed": False, "home": [], "away": [], "reason": "Naver schedule has no KBO games"}
 
         target_min = event_dt.hour * 60 + event_dt.minute
         matches = []
+        errors = []
         for info in game_infos:
-            gid = info.get("gameId")
+            gid = str(info.get("gameId") or info.get("game_id") or info.get("id") or "").strip()
             if not gid:
                 continue
             try:
                 raw = self._naver_preview(gid)
-            except Exception:
-                continue
-            preview = ((raw.get("result") or {}).get("previewData") or {})
-            gi = preview.get("gameInfo") or {}
-            nh = _clean(gi.get("hName") or gi.get("hFullName") or info.get("homeTeamName") or info.get("homeTeamCode"))
-            na = _clean(gi.get("aName") or gi.get("aFullName") or info.get("awayTeamName") or info.get("awayTeamCode"))
-            reverse = False
-            if _same_team(nh, home) and _same_team(na, away):
-                reverse = False
-            elif _same_team(nh, away) and _same_team(na, home):
-                reverse = True
-            else:
-                continue
-            gm = _clock_minutes(gi.get("gtime") or info.get("gameTime") or info.get("startTime"))
+            except Exception as e:
+                raw = {}
+                errors.append(f"{gid}:preview:{type(e).__name__}")
+            preview = ((raw.get("result") or {}).get("previewData") or {}) if isinstance(raw, dict) else {}
+            if not preview:
+                preview = raw if isinstance(raw, dict) else {}
+            gi = self._naver_game_info(preview)
+            nh = self._naver_name_from_info(gi, "home") or self._naver_name_from_info(info, "home")
+            na = self._naver_name_from_info(gi, "away") or self._naver_name_from_info(info, "away")
+            reverse = None
+            if nh and na:
+                if _same_team(nh, home) and _same_team(na, away):
+                    reverse = False
+                elif _same_team(nh, away) and _same_team(na, home):
+                    reverse = True
+            if reverse is None:
+                # Provider fields changed several times in 2026. As a last-safe
+                # matcher, require both requested teams to appear in the payload.
+                h_hit = self._payload_mentions_team(preview, home) or self._payload_mentions_team(info, home)
+                a_hit = self._payload_mentions_team(preview, away) or self._payload_mentions_team(info, away)
+                if not (h_hit and a_hit):
+                    continue
+                # Orientation is unknown; use known names if one side can be recovered.
+                if nh and _same_team(nh, away):
+                    reverse = True
+                elif na and _same_team(na, home):
+                    reverse = True
+                else:
+                    reverse = False
+            gm = _clock_minutes(
+                gi.get("gtime") or gi.get("gameTime") or gi.get("startTime") or
+                info.get("gameTime") or info.get("startTime") or info.get("gtime")
+            )
             delta = abs(gm - target_min) if gm is not None else 9999
-            matches.append((delta, str(gid), preview, reverse))
+            matches.append((delta, gid, preview, bool(reverse)))
         if not matches:
-            return {"confirmed": False, "home": [], "away": [], "reason": "Naver team/date match unavailable"}
+            reason = "Naver team/date match unavailable"
+            if errors:
+                reason += " (" + ", ".join(errors[:3]) + ")"
+            return {"confirmed": False, "home": [], "away": [], "reason": reason}
         matches.sort(key=lambda x: (x[0], x[1]))
         _, gid, preview, reverse = matches[0]
 
-        n_home = self._parse_naver_side(preview, "homeTeamLineUp")
-        n_away = self._parse_naver_side(preview, "awayTeamLineUp")
+        sources = [("preview", preview)]
+        # If preview is lagging behind the visible Naver page, relay/game-polling
+        # often already contains the published batting order. Merge side-by-side.
+        for kind in ("relay", "polling"):
+            aux = self._naver_aux(gid, kind)
+            if aux:
+                sources.append((kind, aux))
+
+        n_home, n_away = [], []
+        used = []
+        for label, payload in sources:
+            h, a = self._extract_naver_lineups(payload)
+            if len(h) > len(n_home):
+                n_home = h
+                if h: used.append(f"{label}:home{len(h)}")
+            if len(a) > len(n_away):
+                n_away = a
+                if a: used.append(f"{label}:away{len(a)}")
+            if len(n_home) == 9 and len(n_away) == 9:
+                break
+
         home_lu, away_lu = (n_away, n_home) if reverse else (n_home, n_away)
         confirmed = len(home_lu) == 9 and len(away_lu) == 9
-        home_starter = _clean(((preview.get("homeStarter") or {}).get("playerInfo") or {}).get("name")) or None
-        away_starter = _clean(((preview.get("awayStarter") or {}).get("playerInfo") or {}).get("name")) or None
+        home_starter = self._extract_naver_starter(preview, "home")
+        away_starter = self._extract_naver_starter(preview, "away")
         if reverse:
             home_starter, away_starter = away_starter, home_starter
+        source_detail = "+".join(dict.fromkeys(x.split(":")[0] for x in used)) or "preview"
         return {
             "confirmed": confirmed,
             "home": home_lu,
@@ -420,65 +720,118 @@ class KBOOfficialLive:
             "home_starter": home_starter,
             "away_starter": away_starter,
             "source_game_id": gid,
-            "source": "Naver Sports public preview fallback",
+            "source": f"Naver Sports public {source_detail} fallback",
             "label": "확정 (네이버스포츠 fallback)" if confirmed else "부분수집 (네이버스포츠)",
             "kind": "starting" if confirmed else "partial",
             "fallback_used": True,
-            "reason": "" if confirmed else f"Naver batting orders {len(away_lu)}/9 away, {len(home_lu)}/9 home",
+            "reason": "" if confirmed else f"Naver batting orders {len(away_lu)}/9 away, {len(home_lu)}/9 home; sources={source_detail}",
         }
 
     def _lineup(self, game_id, season):
-        r = self.s.post(
-            f"{KBO_SCHEDULE_BASE}/GetLineUpAnalysis",
-            data={"leId": "1", "srId": "0", "seasonId": str(season), "gameId": str(game_id)},
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-                "Accept": "application/json, text/javascript, */*; q=0.01",
-                "X-Requested-With": "XMLHttpRequest",
-                "Referer": KBO_REFERER,
-                "User-Agent": UA,
-            },
-            timeout=self.timeout,
-        )
-        r.raise_for_status()
-        data = r.json()
-        try:
-            confirmed = _flag_true((data.get("0") or [{}])[0].get("LINEUP_CK"))
-        except Exception:
-            confirmed = False
+        """Fetch KBO official lineup using the game's actual series id first.
 
-        def rows(key):
-            raw = (data.get(key) or [None])[0]
-            out = []
-            for rr,ids in _parse_make_table_rich(raw):
-                if len(rr) < 3:
-                    continue
-                try:
-                    order = int(rr[0])
-                except Exception:
-                    continue
-                if 1 <= order <= 9:
-                    pid = ids[2] if len(ids) > 2 else None
-                    out.append({"order": order, "position": rr[1], "name": rr[2],
-                                "player_id": pid,
-                                "war": _num(rr[3]) if len(rr) > 3 else None})
-            return sorted(out, key=lambda x: x["order"])
+        KBO's GameCenter endpoint can return an empty lineup when srId is forced to
+        regular-season 0 even though the game-list row uses a different series id.
+        Keep the public signature stable and recover srId from the already fetched
+        daily game-list cache, then fail-soft through known KBO series ids.
+        """
+        game_id = str(game_id)
+        sr_hint = None
+        for games in self._games.values():
+            for g in games or []:
+                if str((g or {}).get("G_ID") or "") == game_id:
+                    v = (g or {}).get("SR_ID")
+                    if v is not None and str(v).strip():
+                        sr_hint = str(v).strip()
+                    break
+            if sr_hint is not None:
+                break
+        series_ids = []
+        for v in (sr_hint, "0", "9", "6", "1", "3", "4", "5", "7", "8"):
+            if v is not None and str(v) not in series_ids:
+                series_ids.append(str(v))
 
-        def war(key):
-            m = (data.get(key) or [{}])[0]
-            vals = [_num(m.get("HITTER_12_WAR_RT")), _num(m.get("HITTER_35_WAR_RT")), _num(m.get("HITTER_69_WAR_RT"))]
-            vals = [v for v in vals if v is not None]
-            return sum(vals) if vals else None
+        def parse(data, used_sr):
+            try:
+                confirmed = _flag_true((data.get("0") or [{}])[0].get("LINEUP_CK"))
+            except Exception:
+                confirmed = False
 
-        home_meta=(data.get("1") or [{}])[0] or {}
-        away_meta=(data.get("2") or [{}])[0] or {}
-        return {
-            "confirmed": confirmed, "home": rows("3"), "away": rows("4"),
-            "home_war": war("1"), "away_war": war("2"),
-            "home_team": _clean(home_meta.get("T_NM", "")),
-            "away_team": _clean(away_meta.get("T_NM", "")),
-            "source_game_id": str(home_meta.get("G_ID") or away_meta.get("G_ID") or ""),
-        }
+            def rows(key):
+                raw = (data.get(key) or [None])[0]
+                out = []
+                for rr, ids in _parse_make_table_rich(raw):
+                    if len(rr) < 3:
+                        continue
+                    try:
+                        order = int(rr[0])
+                    except Exception:
+                        continue
+                    if 1 <= order <= 9:
+                        pid = ids[2] if len(ids) > 2 else None
+                        out.append({"order": order, "position": rr[1], "name": rr[2],
+                                    "player_id": pid,
+                                    "war": _num(rr[3]) if len(rr) > 3 else None})
+                by_order = {x["order"]: x for x in out}
+                return [by_order[i] for i in range(1, 10) if i in by_order]
+
+            def war(key):
+                m = (data.get(key) or [{}])[0]
+                vals = [_num(m.get("HITTER_12_WAR_RT")), _num(m.get("HITTER_35_WAR_RT")), _num(m.get("HITTER_69_WAR_RT"))]
+                vals = [v for v in vals if v is not None]
+                return sum(vals) if vals else None
+
+            home_meta = (data.get("1") or [{}])[0] or {}
+            away_meta = (data.get("2") or [{}])[0] or {}
+            home_rows, away_rows = rows("3"), rows("4")
+            return {
+                "confirmed": confirmed,
+                "home": home_rows, "away": away_rows,
+                "home_war": war("1"), "away_war": war("2"),
+                "home_team": _clean(home_meta.get("T_NM", "")),
+                "away_team": _clean(away_meta.get("T_NM", "")),
+                "source_game_id": str(home_meta.get("G_ID") or away_meta.get("G_ID") or ""),
+                "series_id": used_sr,
+            }
+
+        best = None
+        best_score = -1
+        last_error = None
+        for sr in series_ids:
+            try:
+                r = self.s.post(
+                    f"{KBO_SCHEDULE_BASE}/GetLineUpAnalysis",
+                    data={"leId": "1", "srId": sr, "seasonId": str(season), "gameId": game_id},
+                    headers={
+                        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                        "Accept": "application/json, text/javascript, */*; q=0.01",
+                        "X-Requested-With": "XMLHttpRequest",
+                        "Referer": KBO_REFERER,
+                        "User-Agent": UA,
+                    },
+                    timeout=self.timeout,
+                )
+                r.raise_for_status()
+                out = parse(r.json(), sr)
+            except Exception as e:
+                last_error = e
+                continue
+            # Reject an explicitly different game id before ranking the response.
+            source_gid = str(out.get("source_game_id") or "")
+            if source_gid and source_gid != game_id:
+                score = -1
+            else:
+                complete = len(out.get("home") or []) == 9 and len(out.get("away") or []) == 9
+                score = (100 if out.get("confirmed") and complete else 50 if complete else 0) + len(out.get("home") or []) + len(out.get("away") or [])
+            if score > best_score:
+                best_score, best = score, out
+            if score >= 118:  # confirmed + full 9x9
+                return out
+        if best is not None:
+            return best
+        if last_error is not None:
+            raise last_error
+        return {"confirmed": False, "home": [], "away": [], "source_game_id": game_id, "series_id": sr_hint}
 
     def _pitcher_table(self):
         if self._pitchers is not None:
@@ -600,15 +953,20 @@ class NPBOfficialLive:
         self.s = requests.Session()
         self.s.headers.update({"User-Agent": UA, "Accept-Language": "ja,en;q=0.8"})
         self._pages = {}
+        self._pages_cached_at = {}
         self._bat = {}
         self._pit = {}
+        self.live_cache_ttl = 45.0
 
     def _get(self, url):
-        if url not in self._pages:
-            r = self.s.get(url, timeout=self.timeout)
-            r.raise_for_status()
-            r.encoding = "utf-8"
-            self._pages[url] = r.text
+        cached_at=self._pages_cached_at.get(url,0.0)
+        if url in self._pages and (time.monotonic()-cached_at) < self.live_cache_ttl:
+            return self._pages[url]
+        r = self.s.get(url, timeout=self.timeout)
+        r.raise_for_status()
+        r.encoding = "utf-8"
+        self._pages[url] = r.text
+        self._pages_cached_at[url] = time.monotonic()
         return self._pages[url]
 
     def _starter_map(self, game_date=None):
