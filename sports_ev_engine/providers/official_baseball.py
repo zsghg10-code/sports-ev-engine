@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from io import StringIO
 import re
+import math
 import requests
 import pandas as pd
 from bs4 import BeautifulSoup
@@ -171,7 +172,7 @@ def _header_map(rows, required):
         mapping = {}
         for token in required:
             for i, c in enumerate(cells):
-                if c == token or token in c:
+                if _clean(c) == token:
                     mapping[token] = i
                     break
         if len(mapping) == len(required):
@@ -328,36 +329,25 @@ class OfficialBaseballStats:
         return (w + 0.5 * d) / n if n else None
 
     def _kbo_table(self, html, required, kind):
-        rows = _html_rows(html)
-        header = _header_map(rows, required)
-        if not header:
-            # Keep one pandas fallback, but no longer depend on it.
-            try:
-                tables = pd.read_html(StringIO(html))
-                for df in tables:
-                    cols = [str(c).strip() for c in df.columns]
-                    if all(any(tok == c or tok in c for c in cols) for tok in required):
-                        return df
-            except Exception:
-                pass
-            raise RuntimeError(
-                f"KBO {kind} header not found (source={self.last_source}, status={self.last_status})"
-            )
-
+        # Bind header and records to the same table. G must never match AVG,
+        # and R must never match ERA, HR or RBI.
         records = []
-        for cells in rows:
-            team = next((_match_kbo_team(c) for c in cells if _match_kbo_team(c)), None)
-            if not team:
+        for table in BeautifulSoup(html, "html.parser").find_all("table"):
+            rows = _html_rows(str(table))
+            header = _header_map(rows, required)
+            if not header:
                 continue
-            rec = {"team": team}
-            ok = True
-            for token, idx in header.items():
-                if idx >= len(cells):
-                    ok = False
-                    break
-                rec[token] = cells[idx]
-            if ok:
+            for cells in rows:
+                if any(idx >= len(cells) for idx in header.values()):
+                    continue
+                team = KBO_NAME_MAP.get(_clean(cells[header["팀명"]]))
+                if not team:
+                    continue
+                rec = {token: cells[idx] for token, idx in header.items()}
+                rec["team"] = team
                 records.append(rec)
+            if records:
+                break
 
         if len(records) < 8:
             raise RuntimeError(
@@ -393,6 +383,13 @@ class OfficialBaseballStats:
             if not g or runs is None or not pg or ra is None:
                 continue
 
+            values = (g, pg, runs, ra)
+            if (not all(math.isfinite(v) for v in values)
+                    or not (1 <= g <= 200 and g == int(g))
+                    or not (1 <= pg <= 200 and pg == int(pg))
+                    or runs < 0 or ra < 0 or runs != int(runs) or ra != int(ra)
+                    or runs / g > 30 or ra / pg > 30):
+                raise RuntimeError(f"KBO 데이터 오류: {team} G/R 열 또는 단위 검증 실패")
             rr = rmap.get(team, {})
             final[team] = {
                 "team": team,

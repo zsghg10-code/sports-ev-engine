@@ -64,7 +64,12 @@ def candidate_label(row) -> str:
     if _truth(row.get('v3_candidate')):
         return '단일 +EV 후보'
     if _num(row.get('ev_roi'), -1) > 0:
-        return '검토 후보'
+        if (not _truth(row.get('lineup_confirmed'))
+                and str(row.get('stage')) in {'PRE-LINEUP', 'STARTER CONFIRMED'}
+                and str(row.get('sanity')) not in {'OUTLIER_SHRUNK', 'HIGH_DISAGREEMENT'}
+                and _num(row.get('conservative_ev_roi'), -1) > 0):
+            return '라인업 대기 예비 후보'
+        return '검토 후보' 
     return '제외'
 
 
@@ -84,7 +89,7 @@ def build_baseball_diagnostics(frame: pd.DataFrame) -> pd.DataFrame:
         return x
     x['diagnostic_candidate_status']=[candidate_label(r) for _,r in x.iterrows()]
     x['diagnostic_exclusion_reason']=[exclusion_reasons(r) for _,r in x.iterrows()]
-    order={'조합 가능':0,'단일 +EV 후보':1,'검토 후보':2,'제외':3}
+    order={'조합 가능':0,'단일 +EV 후보':1,'라인업 대기 예비 후보':2,'검토 후보':3,'제외':4}
     x['_diag_order']=x['diagnostic_candidate_status'].map(order).fillna(9)
     for c in ['robust_positive_ratio','robust_ev_p10','conservative_ev_roi','ev_roi']:
         if c not in x.columns:
@@ -102,5 +107,5 @@ def diagnostic_counts(frame: pd.DataFrame) -> dict:
         'base_positive':len(d),
         'parlay':int(s.get('조합 가능',0)),
         'single':int(s.get('단일 +EV 후보',0)),
-        'review':int(s.get('검토 후보',0)),
+        'review':int(s.get('검토 후보',0)) + int(s.get('라인업 대기 예비 후보',0)),
     }

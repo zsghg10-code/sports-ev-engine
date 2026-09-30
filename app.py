@@ -78,9 +78,9 @@ from sports_ev_engine.feature_attribution import attribution
 from sports_ev_engine.model_drift import drift_rows
 from sports_ev_engine.bankroll import simulate as simulate_bankroll
 
-st.set_page_config(page_title="Sports EV Engine v3.4.16",layout="wide")
-st.title("Sports EV Engine v3.4.16")
-st.caption("BUILD v3.4.16-robust-form-xg · 2026-09-29")
+st.set_page_config(page_title="Sports EV Engine v3.4.17",layout="wide")
+st.title("Sports EV Engine v3.4.17")
+st.caption("BUILD v3.4.17-kbo-exact-columns · 2026-09-30")
 if any(getattr(module,"PROVIDER_BUILD",None)!="3.0.0" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider,deep_soccer_provider)):
     st.error("앱과 수집 파일 버전이 다릅니다. ZIP의 sports_ev_engine 폴더까지 전부 반영한 뒤 Streamlit 앱을 Reboot하세요.")
     st.stop()
@@ -108,7 +108,7 @@ SUPABASE_KEY=secret("SUPABASE_SERVICE_ROLE_KEY") or secret("SUPABASE_KEY")
 configure_persistence(SUPABASE_URL,SUPABASE_KEY)
 BASEBALL_KEY=None
 
-_BUILD_ID = "3.4.16-robust-form-xg"
+_BUILD_ID = "3.4.17-kbo-exact-columns"
 if st.session_state.get("_build_id") != _BUILD_ID:
     for _k in [
         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
@@ -945,7 +945,7 @@ with tabs[2]:
         if st.session_state.get("baseball_filter_label"):st.caption(f"분석 경기일: {st.session_state['baseball_filter_label']}")
         render_final_decision_layer(rb,"baseball",title="🧠 v3 FINAL Decision Layer · KBO/NPB")
         st.markdown("### 상세 진단 · KBO/NPB 기준 +EV 전체")
-        st.caption("기준 EV가 양수인 선택지는 REVIEW/라인업 미확정이어도 숨기지 않습니다. 실제 조합 가능 여부는 별도 안전게이트로 구분합니다.")
+        st.caption("기준 EV가 양수인 선택지는 REVIEW/라인업 미확정이어도 숨기지 않습니다. 라인업 대기 예비 후보는 미검증 관찰 목록이며, 실제 조합 가능 여부는 별도로 구분합니다. 시즌 득실점과 최근 득실점을 분리 표시합니다.")
         vb=build_baseball_diagnostics(rb)
         diag_counts=diagnostic_counts(rb)
         if diag_counts["base_positive"]:
@@ -963,6 +963,7 @@ with tabs[2]:
             "bullpen_used","split_used","velocity_used","weather_used",
             "away_starter","away_starter_era","away_starter_whip",
             "home_starter","home_starter_era","home_starter_whip",
+            "away_season_rf","away_season_ra","home_season_rf","home_season_ra",
             "away_recent_rf","away_recent_ra","home_recent_rf","home_recent_ra",
             "away_expected_runs","home_expected_runs",
         ]
@@ -976,7 +977,8 @@ with tabs[2]:
             if c in vb:vb[c]=(vb[c]*100).round(1)
         for c in ["robust_ev_p10","robust_ev_min"]:
             if c in vb:vb[c]=(vb[c]*100).round(1)
-        for c in ["edge_pp","uncertainty_pp","away_recent_rf","away_recent_ra","home_recent_rf","home_recent_ra","away_expected_runs","home_expected_runs","away_starter_era","home_starter_era","away_starter_whip","home_starter_whip"]:
+        for c in ["edge_pp","uncertainty_pp","away_season_rf","away_season_ra","home_season_rf","home_season_ra",
+            "away_recent_rf","away_recent_ra","home_recent_rf","home_recent_ra","away_expected_runs","home_expected_runs","away_starter_era","home_starter_era","away_starter_whip","home_starter_whip"]:
             if c in vb: vb[c]=pd.to_numeric(vb[c],errors="coerce").round(2)
         st.dataframe(vb.head(100),use_container_width=True,hide_index=True)
         if vb.empty:

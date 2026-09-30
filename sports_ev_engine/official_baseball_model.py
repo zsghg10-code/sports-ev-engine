@@ -127,6 +127,22 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
         if not aws:missing.append(away)
         return pd.DataFrame(),{"status":"data_failed","reason":"official team stats unavailable: "+", ".join(missing)}
 
+    # Validate before clamping, blending or assigning a positive-EV label.
+    for team, values in ((home, hs), (away, aws)):
+        for key in ("runs_per_game", "runs_allowed_per_game", "games"):
+            try:
+                value = float(values.get(key))
+            except (TypeError, ValueError):
+                value = float("nan")
+            valid = math.isfinite(value)
+            if key == "games":
+                valid = valid and 1 <= value <= 200 and value == int(value)
+            else:
+                valid = valid and 0 <= value <= 30
+            if not valid:
+                return pd.DataFrame(), {"status": "data_failed", "reason":
+                    f"데이터 오류로 평가 보류: {team} {key}={values.get(key)!r}; 원본 열/단위 확인 필요"}
+
     hm=(float(hs["runs_per_game"])+float(aws["runs_allowed_per_game"]))/2*1.025
     am=(float(aws["runs_per_game"])+float(hs["runs_allowed_per_game"]))/2*.985
 
@@ -139,7 +155,9 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
 
     context=context or {}
     hm,am=_apply_context(hm,am,hs,aws,context)
-    hm=max(1.3,min(8.8,hm)); am=max(1.3,min(8.8,am))
+    if not all(math.isfinite(v) and 1.3 <= v <= 8.8 for v in (hm, am)):
+        return pd.DataFrame(), {"status": "data_failed", "reason":
+            f"예상 득점 모델 범위 이탈로 평가 보류: home={hm:.3f}, away={am:.3f}; 상한 고정 없이 입력 재검증"}
     matrix=_matrix(hm,am)
 
     stage=context.get("stage","PRE-LINEUP")
@@ -246,7 +264,8 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
             "home_starter_recent_kbb_pct":_hsr.get("kbb_pct"),"away_starter_recent_kbb_pct":_asr.get("kbb_pct"),
             "home_bullpen_pitches_last3":_hb_exact.get("total_relief_pitches"),"away_bullpen_pitches_last3":_ab_exact.get("total_relief_pitches"),
             "home_lineup_strength":context.get("home_lineup_strength"),"away_lineup_strength":context.get("away_lineup_strength"),
-            "home_recent_rf":hs["runs_per_game"],"home_recent_ra":hs["runs_allowed_per_game"],"away_recent_rf":aws["runs_per_game"],"away_recent_ra":aws["runs_allowed_per_game"],
+            "home_season_rf":hs["runs_per_game"],"home_season_ra":hs["runs_allowed_per_game"],"away_season_rf":aws["runs_per_game"],"away_season_ra":aws["runs_allowed_per_game"],
+            "home_recent_rf":hs.get("recent_runs_per_game"),"home_recent_ra":hs.get("recent_runs_allowed_per_game"),"away_recent_rf":aws.get("recent_runs_per_game"),"away_recent_ra":aws.get("recent_runs_allowed_per_game"),
             "home_form_matches":hs["games"],"away_form_matches":aws["games"],"home_expected_runs":hm,"away_expected_runs":am,
             "home_win_pct":hwp,"away_win_pct":awp,"home_recent10":hr10,"away_recent10":ar10,
             "advanced_completeness": float((context.get("advanced") or {}).get("advanced_completeness") or 0),
