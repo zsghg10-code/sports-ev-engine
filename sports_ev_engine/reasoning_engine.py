@@ -391,3 +391,51 @@ def decision_fields(*, ledger:SignalLedger|None, counter_cases:list, counter_ris
         "v3_parlay_eligible":parlay,
         **robust,
     }
+
+
+def final_probability_assessment(*, odds:float, final_win_prob:float, final_push_prob:float,
+                                 uncertainty_pp:float, scenario_probabilities:Iterable[tuple[float,float,str]],
+                                 data_ready:bool=True, lineup_required:bool=False, lineup_confirmed:bool=True,
+                                 forced_review_reason:str|None=None):
+    """Recompute robustness from the *displayed final probability*.
+
+    v3.4.21 could compute ROBUST from pre-adaptive probabilities and then change
+    model_win_prob during calibration/coherence normalization.  This function is
+    deliberately downstream: the base EV and every status are derived from the
+    final probability shown to the user. ``scenario_probabilities`` must already
+    be expressed on that final probability scale.
+    """
+    if (not data_ready or not finite(odds) or float(odds)<=1 or
+            not finite(final_win_prob) or not finite(final_push_prob)):
+        return dict(robust_status="DATA_HOLD",robust_reason="required final probability/price missing",
+                    robust_positive_ratio=0.0,robust_ev_min=float("nan"),robust_ev_p10=float("nan"),
+                    robust_ev_max=float("nan"),robust_prob_min=float("nan"),robust_prob_max=float("nan"),
+                    robust_scenario_count=0,robust_parlay_eligible=False)
+    push=clamp(final_push_prob,0,1); win=clamp(final_win_prob,0,max(0.0,1-push))
+    base_ev=float(odds)*win+push-1.0
+    conservative_win=max(0.0,win-float(uncertainty_pp or 0.0)/100.0)
+    conservative_ev=float(odds)*conservative_win+push-1.0
+    values=[]; probs=[]
+    for sw,sp,_ in scenario_probabilities:
+        if not finite(sw) or not finite(sp): continue
+        sp=clamp(sp,0,1); sw=clamp(sw,0,max(0.0,1-sp))
+        values.append(float(odds)*sw+sp-1.0); probs.append(sw)
+    if not values:
+        values=[base_ev]; probs=[win]
+    s=sorted(values); p10=s[max(0,math.ceil(.10*len(s))-1)]
+    pos=sum(v>0 for v in values)/len(values)
+    if forced_review_reason:
+        status="REVIEW"; reason=str(forced_review_reason)
+    elif base_ev<=0 or conservative_ev<=0:
+        status="PASS"; reason="final calibrated/conservative EV is non-positive"
+    elif pos>=.85 and p10>0:
+        status="ROBUST"; reason=f"final probability: {pos*100:.0f}% of stress scenarios positive and 10th-percentile EV > 0"
+    elif pos>=.55:
+        status="SENSITIVE"; reason=f"final probability: base EV positive but only {pos*100:.0f}% of stress scenarios stay positive"
+    else:
+        status="FRAGILE"; reason=f"final probability: base EV positive but only {pos*100:.0f}% of stress scenarios stay positive"
+    parlay=status=="ROBUST" and (lineup_confirmed or not lineup_required)
+    return dict(robust_status=status,robust_reason=reason,robust_positive_ratio=pos,
+                robust_ev_min=min(values),robust_ev_p10=p10,robust_ev_max=max(values),
+                robust_prob_min=min(probs),robust_prob_max=max(probs),robust_scenario_count=len(values),
+                robust_parlay_eligible=parlay)

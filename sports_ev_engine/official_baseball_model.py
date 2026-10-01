@@ -4,24 +4,32 @@ import pandas as pd
 from sports_ev_engine.core.ev import analyze_bet
 from sports_ev_engine.providers.official_baseball import canonical_english
 from sports_ev_engine.reasoning_engine import (
-    SignalLedger, build_counter_cases, scenario_assessment, baseball_scenarios, decision_fields
+    SignalLedger, build_counter_cases, scenario_assessment, baseball_scenarios, decision_fields,
+    final_probability_assessment
 )
 
 from .adaptive_model import apply_adaptive_layer
 
-def _nbinom_pmf(k, mean, dispersion=5.0):
-    r=float(dispersion)
+# v3.4.22 audit config: keep the legacy v3.4.21 dispersion unchanged until a
+# sufficiently large historical score sample is available to estimate it. Mean
+# run construction and variance/dispersion are now explicit separate concerns.
+BASEBALL_SCORE_DISTRIBUTION = {
+    "family":"negative_binomial",
+    "dispersion":5.0,
+    "source":"legacy_v3.4.21_fixed_not_refit",
+}
+
+def _nbinom_pmf(k, mean, dispersion=None):
+    r=float(BASEBALL_SCORE_DISTRIBUTION["dispersion"] if dispersion is None else dispersion)
     p=r/(r+mean)
     return math.exp(math.lgamma(k+r)-math.lgamma(r)-math.lgamma(k+1)+r*math.log(p)+k*math.log(1-p))
 
-
-def _matrix(hm,am,max_runs=22):
-    hp=[_nbinom_pmf(i,hm) for i in range(max_runs+1)]
-    ap=[_nbinom_pmf(i,am) for i in range(max_runs+1)]
+def _matrix(hm,am,max_runs=22,dispersion=None):
+    hp=[_nbinom_pmf(i,hm,dispersion) for i in range(max_runs+1)]
+    ap=[_nbinom_pmf(i,am,dispersion) for i in range(max_runs+1)]
     sh,sa=sum(hp),sum(ap)
     hp=[x/sh for x in hp]; ap=[x/sa for x in ap]
     return [[hp[i]*ap[j] for j in range(max_runs+1)] for i in range(max_runs+1)]
-
 
 def _market_probs(market,side,point,matrix):
     win=push=loss=0.0
@@ -72,51 +80,88 @@ def _starter_multiplier(starter, team_era):
     return max(.84,min(1.17,mult))
 
 
-def _apply_context(hm,am,hs,aws,ctx):
-    if not ctx:return hm,am
-    base_hm,base_am=hm,am
+def _apply_context(hm,am,hs,aws,ctx,recent_pair=(1.0,1.0),return_audit=False):
+    """Apply run-rate context and optionally return auditable factor contributions.
 
-    # Opposing starter season quality.
-    hm*=_starter_multiplier(ctx.get("away_starter_stats") or {},aws.get("era"))
-    am*=_starter_multiplier(ctx.get("home_starter_stats") or {},hs.get("era"))
+    Factors are grouped by information family so the UI can show where expected
+    runs moved. Multiplication is equivalent to v3.4.21; only the bookkeeping and
+    duplicate-recent-form audit are new.
+    """
+    ctx=ctx or {}; base_hm,base_am=float(hm),float(am); h=float(hm); a=float(am); audit=[]
+    def snap(name,bh,ba,note=""):
+        audit.append({"factor":name,"home_before":bh,"home_after":h,"home_delta":h-bh,
+                      "away_before":ba,"away_after":a,"away_delta":a-ba,"note":note})
+    def group(name,fn,note=""):
+        nonlocal h,a
+        bh,ba=h,a; fn(); snap(name,bh,ba,note)
 
-    if str(ctx.get("league",""))=="NPB":
-        hf=ctx.get("home_lineup_strength"); af=ctx.get("away_lineup_strength")
-        if hf is not None: hm*=max(.90,min(1.10,float(hf)))
-        if af is not None: am*=max(.90,min(1.10,float(af)))
-    elif str(ctx.get("league",""))=="KBO":
-        hw=ctx.get("home_lineup_strength"); aw=ctx.get("away_lineup_strength")
-        if hw is not None and aw is not None:
-            diff=max(-8.0,min(8.0,float(hw)-float(aw)))
-            rel=math.exp(.008*diff)
-            hm*=rel; am/=rel
+    if not ctx:
+        return (h,a,audit) if return_audit else (h,a)
 
-    adv=ctx.get("advanced") or {}
-    c=adv.get("components") or {}
-    for key in ("home_recent_form_factor","home_split_factor","home_vs_bullpen_factor",
-                "home_vs_bullpen_exact_factor","home_lineup_platoon_factor","home_pitch_matchup_factor",
-                "home_travel_rest_factor","home_bvp_factor"):
-        if c.get(key) is not None: hm*=float(c[key])
-    for key in ("away_recent_form_factor","away_split_factor","away_vs_bullpen_factor",
-                "away_vs_bullpen_exact_factor","away_lineup_platoon_factor","away_pitch_matchup_factor",
-                "away_travel_rest_factor","away_bvp_factor"):
-        if c.get(key) is not None: am*=float(c[key])
-    if c.get("away_starter_recent_factor") is not None: hm*=float(c["away_starter_recent_factor"])
-    if c.get("home_starter_recent_factor") is not None: am*=float(c["home_starter_recent_factor"])
-    # Actual starter history vs today's opposing TEAM, strongly sample-shrunk upstream.
-    if c.get("away_starter_vs_opponent_factor") is not None: hm*=float(c["away_starter_vs_opponent_factor"])
-    if c.get("home_starter_vs_opponent_factor") is not None: am*=float(c["home_starter_vs_opponent_factor"])
-    # v3.1 Statcast/discipline/workload composite for the opposing starter.
-    if c.get("away_starter_deep_factor") is not None: hm*=float(c["away_starter_deep_factor"])
-    if c.get("home_starter_deep_factor") is not None: am*=float(c["home_starter_deep_factor"])
-    if c.get("weather_factor") is not None:
-        hm*=float(c["weather_factor"]); am*=float(c["weather_factor"])
+    def starter():
+        nonlocal h,a
+        h*=_starter_multiplier(ctx.get("away_starter_stats") or {},aws.get("era"))
+        a*=_starter_multiplier(ctx.get("home_starter_stats") or {},hs.get("era"))
+        c=((ctx.get("advanced") or {}).get("components") or {})
+        if c.get("away_starter_recent_factor") is not None:h*=float(c["away_starter_recent_factor"])
+        if c.get("home_starter_recent_factor") is not None:a*=float(c["home_starter_recent_factor"])
+        if c.get("away_starter_vs_opponent_factor") is not None:h*=float(c["away_starter_vs_opponent_factor"])
+        if c.get("home_starter_vs_opponent_factor") is not None:a*=float(c["home_starter_vs_opponent_factor"])
+    group("starter",starter,"season starter + recent 3-5 + starter-vs-opponent (sample-shrunk upstream)")
 
-    # More measured signals are available in v3.1, but the full context layer is
-    # still prevented from overwhelming the independent scoring model.
-    hm=max(base_hm*.84,min(base_hm*1.16,hm))
-    am=max(base_am*.84,min(base_am*1.16,am))
-    return hm,am
+    adv=ctx.get("advanced") or {}; c=adv.get("components") or {}
+    def recent():
+        nonlocal h,a
+        h*=float(recent_pair[0]); a*=float(recent_pair[1])
+        if c.get("home_recent_form_factor") is not None:h*=float(c["home_recent_form_factor"])
+        if c.get("away_recent_form_factor") is not None:a*=float(c["away_recent_form_factor"])
+    group("recent_form",recent,"recent10 strength + measured recent team form; MLB totals ensemble duplicate suppressed downstream")
+
+    def bullpen():
+        nonlocal h,a
+        for key in ("home_vs_bullpen_factor","home_vs_bullpen_exact_factor"):
+            if c.get(key) is not None:h*=float(c[key])
+        for key in ("away_vs_bullpen_factor","away_vs_bullpen_exact_factor"):
+            if c.get(key) is not None:a*=float(c[key])
+    group("bullpen",bullpen,"bullpen workload/availability")
+
+    def platoon_lineup():
+        nonlocal h,a
+        if str(ctx.get("league",""))=="NPB":
+            hf=ctx.get("home_lineup_strength"); af=ctx.get("away_lineup_strength")
+            if hf is not None:h*=max(.90,min(1.10,float(hf)))
+            if af is not None:a*=max(.90,min(1.10,float(af)))
+        elif str(ctx.get("league",""))=="KBO":
+            hw=ctx.get("home_lineup_strength"); aw=ctx.get("away_lineup_strength")
+            if hw is not None and aw is not None:
+                diff=max(-8.0,min(8.0,float(hw)-float(aw))); rel=math.exp(.008*diff); h*=rel; a/=rel
+        for key in ("home_split_factor","home_lineup_platoon_factor","home_pitch_matchup_factor","home_bvp_factor"):
+            if c.get(key) is not None:h*=float(c[key])
+        for key in ("away_split_factor","away_lineup_platoon_factor","away_pitch_matchup_factor","away_bvp_factor"):
+            if c.get(key) is not None:a*=float(c[key])
+    group("platoon_lineup",platoon_lineup,"team split + confirmed lineup platoon/pitch matchup/BvP")
+
+    def deep():
+        nonlocal h,a
+        if c.get("away_starter_deep_factor") is not None:h*=float(c["away_starter_deep_factor"])
+        if c.get("home_starter_deep_factor") is not None:a*=float(c["home_starter_deep_factor"])
+    group("statcast_deep",deep,"Statcast/discipline/pitch-quality composite")
+
+    def weather():
+        nonlocal h,a
+        if c.get("weather_factor") is not None:h*=float(c["weather_factor"]);a*=float(c["weather_factor"])
+    group("weather_park",weather,"park/weather environment")
+
+    def rest():
+        nonlocal h,a
+        if c.get("home_travel_rest_factor") is not None:h*=float(c["home_travel_rest_factor"])
+        if c.get("away_travel_rest_factor") is not None:a*=float(c["away_travel_rest_factor"])
+    group("rest_travel",rest,"travel/time-zone/rest")
+
+    bh,ba=h,a
+    h=max(base_hm*.84,min(base_hm*1.16,h)); a=max(base_am*.84,min(base_am*1.16,a))
+    snap("context_cap",bh,ba,"legacy ±16% context cap retained")
+    return (h,a,audit) if return_audit else (h,a)
 
 
 
@@ -148,16 +193,25 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
 
     hm=(float(hs["runs_per_game"])+float(aws["runs_allowed_per_game"]))/2*1.025
     am=(float(aws["runs_per_game"])+float(hs["runs_allowed_per_game"]))/2*.985
+    _run_audit=[{"factor":"base_expected_runs","home_before":None,"home_after":hm,"home_delta":None,
+                 "away_before":None,"away_after":am,"away_delta":None,
+                 "note":"season runs scored/allowed + legacy home/away run constants"}]
 
     hwp,awp=hs.get("win_pct"),aws.get("win_pct")
     if hwp is not None and awp is not None:
-        gap=float(hwp)-float(awp); hm*=math.exp(.20*gap); am*=math.exp(-.20*gap)
+        _bh,_ba=hm,am; gap=float(hwp)-float(awp); hm*=math.exp(.20*gap); am*=math.exp(-.20*gap)
+        _run_audit.append({"factor":"season_strength","home_before":_bh,"home_after":hm,"home_delta":hm-_bh,
+                           "away_before":_ba,"away_after":am,"away_delta":am-_ba,"note":"season win-pct strength adjustment"})
     hr10,ar10=hs.get("recent10_win_pct"),aws.get("recent10_win_pct")
+    _recent_pair=(1.0,1.0)
     if hr10 is not None and ar10 is not None:
-        gap=float(hr10)-float(ar10); hm*=math.exp(.12*gap); am*=math.exp(-.12*gap)
+        gap=float(hr10)-float(ar10); _recent_pair=(math.exp(.12*gap),math.exp(-.12*gap))
 
     context=context or {}
-    hm,am=_apply_context(hm,am,hs,aws,context)
+    hm,am,_ctx_audit=_apply_context(hm,am,hs,aws,context,recent_pair=_recent_pair,return_audit=True)
+    _run_audit.extend(_ctx_audit)
+    _run_audit.append({"factor":"final_expected_runs","home_before":None,"home_after":hm,"home_delta":None,
+                       "away_before":None,"away_after":am,"away_delta":None,"note":"final mean run model before score distribution"})
     # Team expected runs can legitimately fall below 1.3 in extreme pitcher/park
     # matchups. v3.4.20 used 1.3 as a hard lower gate, which incorrectly rejected
     # otherwise valid MLB events. Gross source corruption is caught above at the
@@ -165,7 +219,8 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
     if not all(math.isfinite(v) and 0.35 <= v <= 10.0 for v in (hm, am)):
         return pd.DataFrame(), {"status": "data_failed", "reason":
             f"예상 득점 모델 범위 이탈로 평가 보류: home={hm:.3f}, away={am:.3f}; 원본 팀 집계/단위 확인 필요"}
-    matrix=_matrix(hm,am)
+    _dispersion=float(BASEBALL_SCORE_DISTRIBUTION["dispersion"])
+    matrix=_matrix(hm,am,dispersion=_dispersion)
 
     stage=context.get("stage","PRE-LINEUP")
     if stage=="FINAL": quality,unc="HIGH",3.5
@@ -267,7 +322,7 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
         d.update({
             "league":str(league).upper(),"stage":stage,
             "display_pick":f'{home}-{away} | {r["selection"]}'+("" if point is None else (f" {point:+g}" if r["market"]=="spreads" else f" {point:g}")),
-            "raw_independent_prob":rw,"model_win_prob":fw,"push_prob":rp,"model_lose_prob":fl,
+            "raw_independent_prob":rw,"raw_push_prob":rp,"model_win_prob":fw,"push_prob":rp,"model_lose_prob":fl,
             "break_even":ev.break_even,"edge_pp":ev.edge_pp,"ev_roi":ev.ev_roi,"conservative_ev_roi":ev.conservative_ev_roi,
             "uncertainty_pp":row_unc,"market_move_pp":move_pp,"market_from_open_pp":move.get("from_open_pp"),"kelly_scaled":ev.kelly_scaled,"grade":grade,"sanity":sanity,
             "raw_market_gap_pp":raw_gap,"final_market_gap_pp":final_gap,"model_weight":mw,
@@ -297,6 +352,8 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
             "home_season_rf":hs["runs_per_game"],"home_season_ra":hs["runs_allowed_per_game"],"away_season_rf":aws["runs_per_game"],"away_season_ra":aws["runs_allowed_per_game"],
             "home_recent_rf":hs.get("recent_runs_per_game"),"home_recent_ra":hs.get("recent_runs_allowed_per_game"),"away_recent_rf":aws.get("recent_runs_per_game"),"away_recent_ra":aws.get("recent_runs_allowed_per_game"),
             "home_form_matches":hs["games"],"away_form_matches":aws["games"],"home_expected_runs":hm,"away_expected_runs":am,
+            "expected_runs_adjustments":_run_audit,"score_distribution_family":BASEBALL_SCORE_DISTRIBUTION["family"],
+            "score_distribution_dispersion":_dispersion,"score_distribution_dispersion_source":BASEBALL_SCORE_DISTRIBUTION["source"],
             "home_win_pct":hwp,"away_win_pct":awp,"home_recent10":hr10,"away_recent10":ar10,
             "advanced_completeness": float((context.get("advanced") or {}).get("advanced_completeness") or 0),
             "advanced_used": int((context.get("advanced") or {}).get("advanced_used") or 0),
@@ -322,7 +379,7 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
         })
 
         scenario_rows=baseball_scenarios(
-            hm,am,lambda mm:_market_probs(r["market"],side,point,mm),_matrix
+            hm,am,lambda mm:_market_probs(r["market"],side,point,mm),lambda h,a:_matrix(h,a,dispersion=_dispersion)
         )
         robust=scenario_assessment(
             odds=float(r["best_odds"]),market_prob=mp,model_weight=mw,scenarios=scenario_rows,
@@ -342,4 +399,55 @@ def analyze_official_event(event_market:pd.DataFrame,stats:dict,league:str,conte
         rows.append(d)
     _family={"MLB":"baseball_mlb","KBO":"baseball_kbo","NPB":"baseball_npb"}.get(str(league).upper(),f"baseball_{str(league).lower()}")
     _frame=apply_adaptive_layer(pd.DataFrame(rows),_family)
+
+    # v3.4.22: calibration/coherence is not allowed to leave behind a stale
+    # pre-calibration ROBUST label. Rebuild stress probabilities around the final
+    # displayed conditional probability, preserving structural scenario deltas.
+    for i,row in _frame.iterrows():
+        side=_side(row); point=None if row["market"]=="h2h" else float(row["point"])
+        base_raw_w,base_raw_p,_=_market_probs(row["market"],side,point,matrix)
+        base_raw_q=base_raw_w/max(1e-9,1-base_raw_p)
+        final_push=max(0.0,float(row.get("push_prob") or 0.0)); resolved=max(1e-9,1-final_push)
+        final_q=float(row.get("model_win_prob"))/resolved
+        scenario_raw=baseball_scenarios(hm,am,lambda mm:_market_probs(row["market"],side,point,mm),lambda h,a:_matrix(h,a,dispersion=_dispersion))
+        final_scenarios=[]
+        for sw,sp,label in scenario_raw:
+            sr=max(1e-9,1-sp); sq=sw/sr
+            # Keep the calibrated final probability as the centre while retaining
+            # the structural run-model sensitivity around it. Cap only to [0,1].
+            fq=max(1e-6,min(1-1e-6,final_q+(sq-base_raw_q)))
+            final_scenarios.append((fq*(1-sp),sp,label))
+        forced=None
+        if bool(row.get("mlb_totals_market_disagreement_gate")):
+            forced=("MLB totals raw-market divergence exceeds "
+                    f"{float(row.get('mlb_totals_divergence_threshold_pp') or 0):.1f}pp without sufficient historical calibration evidence")
+        elif str(row.get("ensemble_gate") or "")=="REVIEW" and not (
+                _family=="baseball_mlb" and str(row.get("market"))=="totals" and bool(row.get("mlb_totals_calibration_evidence_sufficient"))):
+            forced="ensemble component disagreement requires review"
+        robust=final_probability_assessment(
+            odds=float(row["best_odds"]),final_win_prob=float(row["model_win_prob"]),final_push_prob=final_push,
+            uncertainty_pp=float(row.get("uncertainty_pp") or 0),scenario_probabilities=final_scenarios,
+            data_ready=(quality in {"HIGH","MEDIUM"}),lineup_required=True,lineup_confirmed=bool(context.get("lineup_confirmed")),
+            forced_review_reason=forced,
+        )
+        _mlb_totals_evidence=(_family=="baseball_mlb" and str(row.get("market"))=="totals" and bool(row.get("mlb_totals_calibration_evidence_sufficient")))
+        _final_ev=analyze_bet(float(row["best_odds"]),float(row["model_win_prob"]),final_push,float(row.get("uncertainty_pp") or 0))
+        _final_grade=_final_ev.grade
+        if quality!="HIGH" and _final_grade=="A":_final_grade="B"
+        if stage!="FINAL" and _final_grade=="A":_final_grade="B"
+        if stage=="PRE-LINEUP" and _final_grade in {"A","B"}:_final_grade="C"
+        if str(row.get("sanity") or "")=="OUTLIER_SHRUNK" and not _mlb_totals_evidence:_final_grade="REVIEW"
+        _frame.at[i,"grade"]=_final_grade
+        legacy_ok=(float(row.get("ev_roi") or 0)>0 and float(row.get("conservative_ev_roi") or 0)>0 and _final_grade in {"A","B","C"})
+        status=robust.get("robust_status")
+        candidate=status in {"ROBUST","SENSITIVE"} and legacy_ok
+        parlay=status=="ROBUST" and bool(robust.get("robust_parlay_eligible")) and legacy_ok and str(row.get("counter_case_risk") or "")!="HIGH"
+        for k,v in robust.items(): _frame.at[i,k]=v
+        _frame.at[i,"v3_decision_status"]=status
+        _frame.at[i,"v3_candidate"]=candidate
+        _frame.at[i,"v3_parlay_eligible"]=parlay
+        _frame.at[i,"parlay_eligible"]=bool(parlay) and stage=="FINAL" and quality=="HIGH"
+        _frame.at[i,"final_decision_recomputed"]=True
+        _frame.at[i,"final_downgrade_reason"]=robust.get("robust_reason") if status in {"REVIEW","PASS","SENSITIVE","FRAGILE"} else ""
+        _frame.at[i,"final_market_gap_pp"]=(final_q-float(row.get("consensus_prob")))*100
     return _frame,{"status":"ok","home":home,"away":away,"data_quality":quality,"stage":stage,"home_expected_runs":hm,"away_expected_runs":am,"source":context.get("source") or hs.get("source"),"context":context}

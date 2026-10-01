@@ -78,17 +78,17 @@ from sports_ev_engine.feature_attribution import attribution
 from sports_ev_engine.model_drift import drift_rows
 from sports_ev_engine.bankroll import simulate as simulate_bankroll
 
-st.set_page_config(page_title="Sports EV Engine v3.4.21",layout="wide")
-st.title("Sports EV Engine v3.4.21")
-st.caption("BUILD v3.4.21-mlb-team-aggregate-fix · 2026-09-30")
+st.set_page_config(page_title="Sports EV Engine v3.4.22",layout="wide")
+st.title("Sports EV Engine v3.4.22")
+st.caption("BUILD v3.4.22-mlb-totals-calibration · 2026-10-01")
 if any(getattr(module,"PROVIDER_BUILD",None)!="3.0.0" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider,deep_soccer_provider)):
     st.error("앱과 수집 파일 버전이 다릅니다. ZIP의 sports_ev_engine 폴더까지 전부 반영한 뒤 Streamlit 앱을 Reboot하세요.")
     st.stop()
 if getattr(advanced_provider,"BASEBALL_ADVANCED_BUILD",None)!="3.4.20":
-    st.error("v3.4.21 야구 정밀수집 모듈이 구버전입니다. app.py와 sports_ev_engine/providers/baseball_advanced.py를 함께 덮어쓴 뒤 Reboot하세요.")
+    st.error("v3.4.22 야구 정밀수집 모듈이 구버전입니다. app.py와 sports_ev_engine/providers/baseball_advanced.py를 함께 덮어쓴 뒤 Reboot하세요.")
     st.stop()
 if getattr(live_provider,"LIVE_BASEBALL_BUILD",None)!="3.4.20":
-    st.error("v3.4.21 KBO/NPB 라이브 수집 모듈이 구버전입니다. sports_ev_engine/providers/live_baseball.py까지 함께 덮어쓴 뒤 Reboot하세요.")
+    st.error("v3.4.22 KBO/NPB 라이브 수집 모듈이 구버전입니다. sports_ev_engine/providers/live_baseball.py까지 함께 덮어쓴 뒤 Reboot하세요.")
     st.stop()
 _PATCH_BUILD = "3.4.16-robust-form-xg"
 _patch_modules=(auto_national_provider,deep_soccer_provider,free_provider,auto_soccer_provider,reasoning_provider,national_context_provider,elo_provider)
@@ -114,7 +114,7 @@ SUPABASE_KEY=secret("SUPABASE_SERVICE_ROLE_KEY") or secret("SUPABASE_KEY")
 configure_persistence(SUPABASE_URL,SUPABASE_KEY)
 BASEBALL_KEY=None
 
-_BUILD_ID = "3.4.21-mlb-team-aggregate-fix"
+_BUILD_ID = "3.4.22-mlb-totals-calibration"
 if st.session_state.get("_build_id") != _BUILD_ID:
     for _k in [
         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
@@ -226,9 +226,10 @@ def render_final_decision_layer(frame, key_prefix, title="🧠 v3 FINAL Decision
         if summary.get('missing_signals'):
             st.write("MISSING:",summary['missing_signals'])
         detail_cols=[c for c in [
-            "kickoff_kst","display_pick","best_book","best_odds","raw_independent_prob","market_prob","model_win_prob",
-            "robust_positive_ratio","robust_ev_min","robust_ev_p10","robust_ev_max",
-            "counter_case_risk","counter_case_summary","sanity","uncertainty_pp","signal_coverage",
+            "kickoff_kst","display_pick","best_book","best_odds","raw_independent_prob","market_prob","consensus_prob",
+            "pre_calibration_prob_cond","calibrated_prob_cond","model_win_prob","raw_market_gap_final_audit_pp",
+            "calibration_n","calibration_active","calibration_reliability","robust_positive_ratio","robust_ev_min","robust_ev_p10","robust_ev_max",
+            "counter_case_risk","counter_case_summary","sanity","uncertainty_pp","signal_coverage","final_downgrade_reason",
             "lineup_confirmed","stage","data_quality","home_lambda","away_lambda","home_expected_runs","away_expected_runs"
         ] if c in g.columns]
         detail=g[detail_cols].copy()
@@ -1252,7 +1253,8 @@ with tabs[5]:
         cols=[c for c in [
             "v3_decision_status","robust_positive_ratio","robust_ev_p10","robust_ev_min","counter_case_risk","signal_coverage",
             "stage","data_quality","kickoff_kst","display_pick","best_book","best_odds","books","consensus_prob",
-            "raw_independent_prob","model_win_prob","push_prob","break_even","edge_pp","ev_roi","conservative_ev_roi","uncertainty_pp",
+            "raw_independent_prob","pre_calibration_prob_cond","calibrated_prob_cond","model_win_prob","push_prob","break_even","edge_pp","ev_roi","conservative_ev_roi","uncertainty_pp",
+            "raw_market_gap_final_audit_pp","calibration_n","calibration_active","calibration_reliability","mlb_totals_market_disagreement_gate","final_downgrade_reason",
             "home_starter","away_starter","home_starter_era","away_starter_era","home_starter_whip","away_starter_whip",
             "home_recent_rf","home_recent_ra","away_recent_rf","away_recent_ra","home_expected_runs","away_expected_runs",
             "recent_form_used","starter_recent_used","bullpen_used","split_used","velocity_used","weather_used",
@@ -1266,6 +1268,44 @@ with tabs[5]:
         for c in ["robust_ev_p10","robust_ev_min","ev_roi","conservative_ev_roi"]:
             if c in shown:shown[c]=(pd.to_numeric(shown[c],errors="coerce")*100).round(1)
         st.dataframe(shown,use_container_width=True,hide_index=True)
+
+        st.markdown("### MLB 확률·예상득점 감사")
+        _audit_labels={i:str(mr.loc[i].get("display_pick") or mr.loc[i].get("selection") or i) for i in mr.index}
+        _audit_i=st.selectbox("감사할 MLB 옵션",list(mr.index),format_func=lambda i:_audit_labels[i],key="mlb_probability_audit_pick")
+        _audit=mr.loc[_audit_i]
+        _psh=float(pd.to_numeric(pd.Series([_audit.get("push_prob")]),errors="coerce").fillna(0).iloc[0])
+        _resolved=max(1e-9,1-_psh)
+        def _pct(v,conditional=False):
+            try:
+                x=float(v); x=x/_resolved if conditional else x
+                return f"{x*100:.2f}%"
+            except Exception:return "—"
+        _audit_table=pd.DataFrame([{
+            "raw independent":_pct(_audit.get("raw_independent_prob"),True),
+            "market consensus":_pct(_audit.get("consensus_prob")),
+            "pre-calibration":_pct(_audit.get("pre_calibration_prob_cond")),
+            "calibrated final":_pct(_audit.get("model_win_prob"),True),
+            "raw-market gap":f"{float(_audit.get('raw_market_gap_final_audit_pp')):+.2f}pp" if pd.notna(_audit.get('raw_market_gap_final_audit_pp')) else "—",
+            "calibration N":int(_audit.get("calibration_n") or 0),
+            "calibration reliability":f"{float(_audit.get('calibration_reliability') or 0)*100:.1f}%",
+            "final EV":f"{float(_audit.get('ev_roi') or 0)*100:+.2f}%",
+            "conservative EV":f"{float(_audit.get('conservative_ev_roi') or 0)*100:+.2f}%",
+            "robust positive":f"{float(_audit.get('robust_positive_ratio') or 0)*100:.1f}%",
+            "robust EV p10":f"{float(_audit.get('robust_ev_p10') or 0)*100:+.2f}%",
+            "robust EV min":f"{float(_audit.get('robust_ev_min') or 0)*100:+.2f}%",
+            "counter-case":str(_audit.get("counter_case_risk") or "—"),
+            "final decision":str(_audit.get("v3_decision_status") or "—"),
+            "downgrade reason":str(_audit.get("final_downgrade_reason") or "—"),
+        }])
+        st.dataframe(_audit_table,use_container_width=True,hide_index=True)
+        _adj=_audit.get("expected_runs_adjustments")
+        if isinstance(_adj,list) and _adj:
+            _adf=pd.DataFrame(_adj)
+            for c in ["home_before","home_after","home_delta","away_before","away_after","away_delta"]:
+                if c in _adf:_adf[c]=pd.to_numeric(_adf[c],errors="coerce").round(3)
+            st.dataframe(_adf.rename(columns={"factor":"expected-runs adjustment"}),use_container_width=True,hide_index=True)
+            st.caption("위 표는 SHAP이 아니라 실제 평균득점 계산 단계의 factor contribution / expected-runs adjustment입니다. 동일 최근 경기 정보가 totals 앙상블에서 다시 투표되지 않도록 MLB totals recent-form proxy는 억제합니다.")
+        st.caption(f"Score distribution: {_audit.get('score_distribution_family','—')} · dispersion {_audit.get('score_distribution_dispersion','—')} · {_audit.get('score_distribution_dispersion_source','—')}")
 
         st.markdown("### MLB 2~6폴")
         mlb_sizes=st.multiselect("MLB 폴더 수",[2,3,4,5,6],default=[2,3],key="mlb_parlay_sizes")
@@ -1736,8 +1776,8 @@ with tabs[11]:
     if _calrows:
         st.dataframe(pd.DataFrame(_calrows),use_container_width=True,hide_index=True)
     else:
-        st.info("정산 표본이 쌓이면 종목×마켓별 calibration이 자동 학습됩니다. 40건 미만에서는 확률을 건드리지 않습니다.")
-    st.caption("v3.3 최종확률 = 독립모델/시장/최근폼/정밀컨텍스트 앙상블 → 과거 정산표본 calibration. 한 번의 보정은 기존 확률 대비 최대 ±5%p로 제한됩니다.")
+        st.info("정산 표본이 쌓이면 종목×마켓별 calibration이 자동 학습됩니다. 일반 시장은 40건, MLB totals는 60건 미만에서 확률을 건드리지 않습니다.")
+    st.caption("v3.4.22 최종확률 = 독립모델/시장 앙상블 → 과거 정산표본 calibration → coherence 정규화 → ROBUST 재판정. MLB totals는 구조모델에 이미 반영된 최근 득점 proxy를 앙상블에서 중복 가중하지 않습니다.")
 
     st.markdown("### 3) ⏱️ 데이터 품질·신선도")
     _fresh=freshness_rows()
