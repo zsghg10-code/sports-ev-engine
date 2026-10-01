@@ -78,14 +78,14 @@ from sports_ev_engine.feature_attribution import attribution
 from sports_ev_engine.model_drift import drift_rows
 from sports_ev_engine.bankroll import simulate as simulate_bankroll
 
-st.set_page_config(page_title="Sports EV Engine v3.4.22",layout="wide")
-st.title("Sports EV Engine v3.4.22")
-st.caption("BUILD v3.4.22-mlb-totals-calibration · 2026-10-01")
+st.set_page_config(page_title="Sports EV Engine v3.4.23",layout="wide")
+st.title("Sports EV Engine v3.4.23")
+st.caption("BUILD v3.4.23-kbo-npb-data-repair · 2026-10-01")
 if any(getattr(module,"PROVIDER_BUILD",None)!="3.0.0" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider,deep_soccer_provider)):
     st.error("앱과 수집 파일 버전이 다릅니다. ZIP의 sports_ev_engine 폴더까지 전부 반영한 뒤 Streamlit 앱을 Reboot하세요.")
     st.stop()
-if getattr(advanced_provider,"BASEBALL_ADVANCED_BUILD",None)!="3.4.20":
-    st.error("v3.4.22 야구 정밀수집 모듈이 구버전입니다. app.py와 sports_ev_engine/providers/baseball_advanced.py를 함께 덮어쓴 뒤 Reboot하세요.")
+if getattr(advanced_provider,"BASEBALL_ADVANCED_BUILD",None)!="3.4.23":
+    st.error("v3.4.23 야구 정밀수집 모듈이 구버전입니다. app.py와 sports_ev_engine/providers/baseball_advanced.py를 함께 덮어쓴 뒤 Reboot하세요.")
     st.stop()
 if getattr(live_provider,"LIVE_BASEBALL_BUILD",None)!="3.4.20":
     st.error("v3.4.22 KBO/NPB 라이브 수집 모듈이 구버전입니다. sports_ev_engine/providers/live_baseball.py까지 함께 덮어쓴 뒤 Reboot하세요.")

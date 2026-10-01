@@ -1,1 +1,1 @@
-__version__ = "3.4.22-mlb-totals-calibration"
+__version__ = "3.4.23-kbo-npb-data-repair"

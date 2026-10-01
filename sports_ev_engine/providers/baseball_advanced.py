@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from io import StringIO
 from zoneinfo import ZoneInfo
-from urllib.parse import urljoin
+from urllib.parse import urljoin, quote
 import json
 import math
 import re
@@ -18,7 +18,7 @@ from sports_ev_engine.providers.official_baseball import canonical_english
 from sports_ev_engine.providers.live_baseball import _kst_dt, _norm, _clean, _num, _npb_ip, _same_team, NPB_FULL_MAP, KBO_EN_BY_KR
 
 PROVIDER_BUILD = "3.0.0"
-BASEBALL_ADVANCED_BUILD = "3.4.20"
+BASEBALL_ADVANCED_BUILD = "3.4.23"
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -29,6 +29,7 @@ KBO_PITCHER_DETAIL = "https://www.koreabaseball.com/Record/Player/PitcherDetail/
 KBO_BOXSCORE = "https://www.koreabaseball.com/ws/Schedule.asmx/GetBoxScoreScroll"
 KBO_HITTER_BASIC = "https://www.koreabaseball.com/Record/Player/HitterDetail/Basic.aspx?playerId={pid}"
 KBO_HITTER_SITUATION = "https://www.koreabaseball.com/Record/Player/HitterDetail/Situation.aspx?playerId={pid}"
+KBO_PLAYER_SEARCH = "https://www.koreabaseball.com/Player/Search.aspx?searchWord={query}"
 
 NPB_DAY = "https://npb.jp/bis/eng/{year}/games/gm{date}.html"
 
@@ -258,6 +259,34 @@ class KBOAdvanced:
         r=self.s.get(url,timeout=self.timeout); r.raise_for_status(); r.encoding="utf-8"
         self.cache[url]=r.text
         return r.text
+
+    def resolve_player_id(self,name,team=None):
+        """Resolve a missing KBO playerId from KBO's official player search."""
+        name=_clean(name)
+        if not name:return None
+        key=("player_id",name,canonical_english(team) if team else None)
+        if key in self.cache:return self.cache[key]
+        try:
+            html=self._fetch(KBO_PLAYER_SEARCH.format(query=quote(name)))
+            soup=BeautifulSoup(html,"html.parser")
+            candidates=[]
+            for a in soup.find_all("a",href=True):
+                m=re.search(r"playerId=(\d+)",a.get("href",""),re.I)
+                if not m or _clean(a.get_text(" ",strip=True))!=name:
+                    continue
+                row=a.find_parent("tr")
+                row_text=_clean(row.get_text(" ",strip=True)) if row else ""
+                if team:
+                    aliases=[kr for kr,en in KBO_EN_BY_KR.items() if _same_team(en,team)]
+                    if aliases and not any(alias in row_text for alias in aliases):
+                        continue
+                candidates.append(m.group(1))
+            candidates=list(dict.fromkeys(candidates))
+            pid=candidates[0] if len(candidates)==1 else None
+        except Exception:
+            pid=None
+        self.cache[key]=pid
+        return pid
 
     def _pitcher_log(self,pid):
         if not pid:
@@ -489,8 +518,24 @@ class KBOAdvanced:
                     break
             except Exception:
                 pass
+        recent_games=0
+        recent_obp=None
+        try:
+            if recent is not None:
+                rr=[r for _,r in recent.iterrows() if re.match(r"\d{1,2}\.\d{1,2}",str(r.get("일자","")))]
+                rr=sorted(rr,key=lambda r:_mmdd_key(r.get("일자")))[-10:]
+                recent_games=len(rr)
+                ab=sum(_num(r.get("AB")) or 0 for r in rr)
+                h=sum(_num(r.get("H")) or 0 for r in rr)
+                bb=sum(_num(r.get("BB")) or 0 for r in rr)
+                hbp=sum(_num(r.get("HBP")) or 0 for r in rr)
+                den=ab+bb+hbp
+                recent_obp=(h+bb+hbp)/den if den else None
+        except Exception:
+            pass
         return {"available":bool(season_ops or recent_ops or split_ops),
-                "season_ops":season_ops,"recent10_ops":recent_ops,"split_ops":split_ops,"split_ab":split_ab}
+                "season_ops":season_ops,"recent10_ops":recent_ops,"recent10_obp":recent_obp,
+                "recent_games":recent_games,"split_ops":split_ops,"split_ab":split_ab}
 
     def schedule_load(self,team,commence_iso):
         """Fallback bullpen-load proxy when exact reliever logs are unavailable."""
@@ -519,6 +564,8 @@ class KBOAdvanced:
         # the scheduled game. Reuse them when the advanced lookup has no match.
         home_pid=self._pid_from_game(g,True) or ctx.get("home_starter_id")
         away_pid=self._pid_from_game(g,False) or ctx.get("away_starter_id")
+        home_pid=home_pid or self.resolve_player_id(ctx.get("home_starter"),home)
+        away_pid=away_pid or self.resolve_player_id(ctx.get("away_starter"),away)
         result["home_starter_recent"]=self.pitcher_recent(home_pid,5)
         result["away_starter_recent"]=self.pitcher_recent(away_pid,5)
         # Today's starter vs today's opposing TEAM.  This is not generic head-to-head.
@@ -532,29 +579,47 @@ class KBOAdvanced:
         hhand=(result["away_starter_recent"] or {}).get("hand")
         ahand=(result["home_starter_recent"] or {}).get("hand")
 
-        def lineup_metrics(players,opponent_hand):
-            ids=[p.get("player_id") for p in players if p.get("player_id")]
-            if not ids:return {"available":False,"reason":"lineup player ids unavailable"}
+        def lineup_metrics(players,opponent_hand,team):
+            resolved=[]
+            for p in players[:9]:
+                pid=p.get("player_id") or self.resolve_player_id(p.get("name"),team)
+                if pid:resolved.append((pid,p.get("name")))
+            if not resolved:
+                return {"available":False,"reason":"lineup player ids unavailable after official KBO name lookup",
+                        "players":0,"ops_games":0}
             details=[]
             with ThreadPoolExecutor(max_workers=6) as ex:
-                futs={ex.submit(self.hitter_detail,pid,opponent_hand):pid for pid in ids[:9]}
+                futs={ex.submit(self.hitter_detail,pid,opponent_hand):(pid,name) for pid,name in resolved}
                 for f in as_completed(futs):
-                    try:details.append(f.result())
+                    try:
+                        d=f.result()
+                        if d:details.append(d)
                     except Exception:pass
-            rec=[d.get("recent10_ops") for d in details if d.get("recent10_ops")]
-            seas=[d.get("season_ops") for d in details if d.get("season_ops")]
-            spl=[(d.get("split_ops"),d.get("split_ab") or 0) for d in details if d.get("split_ops")]
+            rec=[d.get("recent10_ops") for d in details if d.get("recent10_ops") is not None]
+            seas=[d.get("season_ops") for d in details if d.get("season_ops") is not None]
+            obps=[d.get("recent10_obp") for d in details if d.get("recent10_obp") is not None]
+            games=[int(d.get("recent_games") or 0) for d in details if int(d.get("recent_games") or 0)>0]
+            spl=[(d.get("split_ops"),d.get("split_ab") or 0) for d in details if d.get("split_ops") is not None]
             split=sum(v*max(1,w) for v,w in spl)/sum(max(1,w) for _,w in spl) if spl else None
+            metric_players=sum(1 for d in details if d.get("available"))
             return {
-                "available":bool(details),"players":len(details),
+                "available":bool(metric_players),"players":metric_players,"resolved_ids":len(resolved),
                 "recent10_ops":sum(rec)/len(rec) if rec else None,
                 "season_ops":sum(seas)/len(seas) if seas else None,
-                "split_ops":split,
-                "split_exact":bool(split),
+                "recent10_obp":sum(obps)/len(obps) if obps else None,
+                "ops_games":round(sum(games)/len(games),1) if games else 0,
+                "split_ops":split,"split_exact":bool(split),
+                "reason":None if metric_players else "KBO hitter detail pages returned no usable metrics",
             }
 
-        result["home_lineup_form"]=lineup_metrics(home_lu,hhand)
-        result["away_lineup_form"]=lineup_metrics(away_lu,ahand)
+        result["home_lineup_form"]=lineup_metrics(home_lu,hhand,home)
+        result["away_lineup_form"]=lineup_metrics(away_lu,ahand,away)
+        if result["home_recent"].get("available") and result["home_recent"].get("obp_proxy") is None:
+            result["home_recent"]["obp_proxy"]=result["home_lineup_form"].get("recent10_obp")
+            result["home_recent"]["obp_proxy_source"]="confirmed-lineup hitters recent 10 games"
+        if result["away_recent"].get("available") and result["away_recent"].get("obp_proxy") is None:
+            result["away_recent"]["obp_proxy"]=result["away_lineup_form"].get("recent10_obp")
+            result["away_recent"]["obp_proxy_source"]="confirmed-lineup hitters recent 10 games"
         result["home_bullpen"]=self.bullpen_exact(home,commence_iso)
         result["away_bullpen"]=self.bullpen_exact(away,commence_iso)
         return result
@@ -641,6 +706,17 @@ class NPBRecent:
         bat=bats[idx] if len(bats)>idx else None
         pit=pits[idx] if len(pits)>idx else None
 
+        runs_for=runs_against=None
+        try:
+            for d in pd.read_html(StringIO(html)):
+                cols=[str(x).strip() for x in d.columns]
+                if "R" not in cols or len(d)<2:continue
+                vals=pd.to_numeric(d["R"],errors="coerce").dropna().tolist()
+                if len(vals)>=2:
+                    runs_for=float(vals[idx]); runs_against=float(vals[1-idx]); break
+        except Exception:
+            pass
+
         batting={}
         if bat is not None:
             for c in ["AB","H","BB","HP","SO"]:
@@ -656,7 +732,9 @@ class NPBRecent:
                 if not name or ip is None:continue
                 bf=_num(r.get("BF"));bb=_num(r.get("BB"));so=_num(r.get("SO"));er=_num(r.get("ER"))
                 pitchers.append({"name":name,"ip":ip,"bf":bf,"bb":bb,"so":so,"er":er})
-        return {"available":bool(batting or pitchers),"batting":batting,"pitchers":pitchers,"url":url,"opponent":opponent}
+        return {"available":bool(batting or pitchers or runs_for is not None),
+                "batting":batting,"pitchers":pitchers,"url":url,"opponent":opponent,
+                "runs_for":runs_for,"runs_against":runs_against}
 
     def _official_box_url(self, day, english_url, team):
         """Resolve the regular-season Japanese play-by-play page for exact XBH."""
@@ -724,8 +802,12 @@ class NPBRecent:
         exact=[self._box_batting(day,u,team) for day,u in urls]
         exact=[c for c in exact if c]
         sums={k:sum(c[k] for c in exact) for k in ("ab","h","d2","d3","hr","bb","hp","sf")}
-        ops=_ops_from_counts(sums["ab"],sums["h"],sums["d2"],sums["d3"],sums["hr"],sums["bb"],sums["hp"],sums["sf"]) if len(exact)>=5 else None
+        ops=_ops_from_counts(sums["ab"],sums["h"],sums["d2"],sums["d3"],sums["hr"],sums["bb"],sums["hp"],sums["sf"]) if len(exact)>=2 else None
+        rfs=[g.get("runs_for") for g in games if g.get("runs_for") is not None]
+        ras=[g.get("runs_against") for g in games if g.get("runs_against") is not None]
         return {"available":bool(games),"games":len(games),
+                "runs_for_per_game":sum(rfs)/len(rfs) if rfs else None,
+                "runs_against_per_game":sum(ras)/len(ras) if ras else None,
                 "obp_proxy":sum(obps)/len(obps) if obps else None,
                 "recent10_ops":ops,"ops_games":len(exact),"raw":games}
 
@@ -737,10 +819,22 @@ class NPBRecent:
         surname=_norm((english or "").split(",")[0])
         return bool(target and found and (target==found or target in found or found in target or (surname and (found==surname or found.startswith(surname)))))
 
+    def _resolve_english_starter(self,team,starter,commence_iso,english_name=None):
+        if english_name:return english_name
+        if not starter or not self.live:return None
+        try:
+            entry=self.live._player_from_stats(canonical_english(team),starter,_kst_dt(commence_iso).year)
+            if entry and entry.get("player_id"):
+                return self.live._english_player_name(entry.get("player_id"))
+        except Exception:
+            pass
+        return None
+
     def starter_recent(self,team,starter,commence_iso,n=5,english_name=None):
         if not starter:return {"available":False,"reason":"starter unavailable"}
+        english_name=self._resolve_english_starter(team,starter,commence_iso,english_name)
         if not english_name and re.search(r"[ぁ-んァ-ヶ一-龯]",starter):
-            return {"available":False,"reason":"Japanese starter has no verified English player identity"}
+            return {"available":False,"reason":"NPB official starter identity resolution failed"}
         urls=self.recent_game_urls(team,commence_iso,n=15,max_days=45)
         rows=[]
         for _,u in urls:
@@ -763,8 +857,9 @@ class NPBRecent:
     def starter_vs_opponent(self,team,starter,opponent,commence_iso,n=5,english_name=None):
         if not starter:
             return {"available":False,"reason":"starter unavailable","opponent":canonical_english(opponent)}
+        english_name=self._resolve_english_starter(team,starter,commence_iso,english_name)
         if not english_name and re.search(r"[ぁ-んァ-ヶ一-龯]",starter):
-            return {"available":False,"reason":"Japanese starter has no verified English player identity","opponent":canonical_english(opponent)}
+            return {"available":False,"reason":"NPB official starter identity resolution failed","opponent":canonical_english(opponent)}
         urls=self.recent_game_urls(team,commence_iso,n=40,max_days=120)
         rows=[]
         target=canonical_english(opponent)
@@ -883,7 +978,10 @@ class AdvancedBaseballSignals:
     def _lineup_form_factor(d):
         if not d or not d.get("available"):return None
         r=d.get("recent10_ops");s=d.get("season_ops")
-        return _factor_from_ratio(r/s if r and s else None,.04,.35)
+        if not (r and s):return None
+        games=float(d.get("ops_games") or 0)
+        reliability=max(.20,min(1.0,games/8.0)) if games else 1.0
+        return _factor_from_ratio(r/s,.04,.35*reliability)
 
     @staticmethod
     def _split_factor(d):
