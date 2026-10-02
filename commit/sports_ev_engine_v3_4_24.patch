@@ -1,0 +1,2777 @@
+From 8780778d717df5659f690e6d80f8291bf4f76ede Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Fri, 2 Oct 2026 09:28:45 -0500
+Subject: [PATCH] Release v3.4.24: separate national match readiness from model
+ validation
+
+---
+ V3_4_24_NATIONAL_VALIDATION_KO.md             |  18 ++
+ VERSION                                       |   2 +-
+ VERSION.txt                                   |   2 +-
+ __init__.py                                   |   2 +-
+ analysis_view.py                              |   7 +-
+ app.py                                        |  43 +++--
+ auto_soccer.py                                | 123 +++++++++++++-
+ daily_combo.py                                |  12 +-
+ deep_soccer_context.py                        |   3 +-
+ final_view.py                                 |   5 +
+ national_policy.py                            |  68 +++++++-
+ prediction_store.py                           |  25 ++-
+ sports_ev_engine/VERSION                      |   2 +-
+ sports_ev_engine/VERSION.txt                  |   2 +-
+ sports_ev_engine/__init__.py                  |   2 +-
+ sports_ev_engine/analysis_view.py             |   7 +-
+ sports_ev_engine/app.py                       | 159 +++++++++++++-----
+ sports_ev_engine/auto_national.py             |   2 +-
+ sports_ev_engine/auto_soccer.py               |  44 ++++-
+ sports_ev_engine/daily_combo.py               |  12 +-
+ sports_ev_engine/deep_soccer_context.py       |   4 +-
+ sports_ev_engine/final_view.py                |   5 +
+ sports_ev_engine/free_national.py             |   2 +-
+ sports_ev_engine/models/elo.py                |   2 +-
+ sports_ev_engine/national_context_pipeline.py |   2 +-
+ sports_ev_engine/national_policy.py           |  68 +++++++-
+ sports_ev_engine/prediction_store.py          |   4 +-
+ sports_ev_engine/reasoning_engine.py          |   4 +-
+ sports_ev_engine/sports_ev_engine/__init__.py |   2 +-
+ .../sports_ev_engine/analysis_view.py         |   7 +-
+ .../sports_ev_engine/auto_soccer.py           |  66 +++++++-
+ .../sports_ev_engine/daily_combo.py           |  12 +-
+ .../sports_ev_engine/deep_soccer_context.py   |   4 +-
+ .../sports_ev_engine/final_view.py            |   5 +
+ .../sports_ev_engine/national_policy.py       |  68 +++++++-
+ .../sports_ev_engine/prediction_store.py      |  23 ++-
+ .../sports_ev_engine/validation.py            |  30 +++-
+ sports_ev_engine/validation.py                |  30 +++-
+ sports_ev_engine_v3_4_23_DEPLOY_ONLY/VERSION  |   2 +-
+ .../VERSION.txt                               |   2 +-
+ sports_ev_engine_v3_4_23_DEPLOY_ONLY/app.py   |  43 +++--
+ .../sports_ev_engine/__init__.py              |   2 +-
+ .../sports_ev_engine/analysis_view.py         |   7 +-
+ .../sports_ev_engine/auto_national.py         |   2 +-
+ .../sports_ev_engine/auto_soccer.py           |  44 ++++-
+ .../sports_ev_engine/daily_combo.py           |  12 +-
+ .../sports_ev_engine/deep_soccer_context.py   |   4 +-
+ .../sports_ev_engine/final_view.py            |   5 +
+ .../sports_ev_engine/free_national.py         |   2 +-
+ .../sports_ev_engine/models/elo.py            |   2 +-
+ .../national_context_pipeline.py              |   2 +-
+ .../sports_ev_engine/national_policy.py       |  68 +++++++-
+ .../sports_ev_engine/prediction_store.py      |   4 +-
+ .../sports_ev_engine/reasoning_engine.py      |   4 +-
+ .../sports_ev_engine/validation.py            |  30 +++-
+ tests/test_daily_combo.py                     |   8 +-
+ tests/test_free_national.py                   |   1 +
+ tests/test_national_validation_status.py      |  89 ++++++++++
+ tests/test_v331_amatch_lineup_fix.py          |   5 +-
+ validation.py                                 |  30 +++-
+ 60 files changed, 1064 insertions(+), 182 deletions(-)
+ create mode 100644 V3_4_24_NATIONAL_VALIDATION_KO.md
+ create mode 100644 tests/test_national_validation_status.py
+
+diff --git a/V3_4_24_NATIONAL_VALIDATION_KO.md b/V3_4_24_NATIONAL_VALIDATION_KO.md
+new file mode 100644
+index 0000000..d72063a
+--- /dev/null
++++ b/V3_4_24_NATIONAL_VALIDATION_KO.md
+@@ -0,0 +1,18 @@
++# v3.4.24 A매치 판정·검증 분리
++
++A매치 UI는 최종 후보 / 잠정 후보 / 조합 제외 / 베팅 제외로 통합됩니다.
++
++- 최종 후보: 현재 EV와 가정 변화 검사를 통과하고, 경기 데이터·반증·적응형 게이트까지 충족한 선택지.
++- 잠정 후보: 양의 EV와 가정 변화 검사는 통과했지만 경기 데이터 확인이 남은 선택지. 자동 조합 제외.
++- 조합 제외: 가정 민감성, 모델 충돌, 반증 위험 등 추가 검토가 필요한 선택지.
++- 베팅 제외: EV 미달 또는 분석에 필요한 기본 기록·가격 부족.
++
++경기 데이터 검증은 확정 라인업, 양 팀 실측 xG(각 3경기 이상), 성공적으로 조회한 결장 정보(빈 목록도 정상 조회면 인정), 휴식일, 수집 시각을 확인합니다. 컨텍스트와 xG 수집 시각은 미래 시각이 아니고 각각 3시간 이내여야 합니다. 결측·NaN·잘못된 시각은 통과하지 않습니다. 재수집/재분석 시 조건을 충족하면 자동 승격되며, UI와 통합 조합에서도 신선도를 다시 확인합니다.
++
++모델 성능 검증은 후보 판정과 별도입니다. validation_report.json의 실제 Brier, Log loss, calibration, 날짜순 후기 검증 표본, ROI를 표시합니다. 후기 검증 최소 100경기와 지표·calibration 자료를 갖춰야 확률 성능 검증 항목을 인정합니다. 수익성 검증은 시장 혼합 확률 검증, ROI 검증 플래그, 실제 ROI와 최소 100개 수익률 표본까지 요구합니다. 원모델 검증을 시장 혼합 확률·언더오버·장기 수익성 검증으로 표시하지 않습니다. 기본 제공 보고서는 후기 검증 95경기이고 ROI 검증이 없어 수익성 미검증입니다.
++
++호출 흐름: deep_soccer_context 수집 → auto_soccer 모델 및 가정 검사 → adaptive_model 확률 보정/상호배타 확률 정규화 → 최종 확률로 27개 가정 재계산 → national_policy 단일 판정 → analysis_view/final_view/app UI → prediction_store 상태·근거 저장 → daily_combo 동일 판정 재검사. 새 상태가 없는 오래된 A매치 스냅샷은 자동 조합에 사용하지 않습니다.
++
++실행 레이아웃이 여러 개 있어 루트/패키지/기존 배포 디렉터리의 관련 모듈과 실행 파일을 동기화했습니다. 기존 배포 폴더명은 유지합니다. 야구 수집 모듈의 독립 버전 검사는 유지하며 배팅 판정 정책은 A매치에만 적용됩니다.
++
++검증: python -m pytest -q. 날짜가 고정된 라인업 테스트는 수집 시계를 고정하고, Streamlit 테스트는 테스트 경기의 KST 날짜를 직접 선택합니다. 무료 모드의 유료 키 미설정 안내는 수집 진단에 표시하며 경기 분석 실패로 계산하지 않습니다.
+diff --git a/VERSION b/VERSION
+index 0183856..57ebffd 100644
+--- a/VERSION
++++ b/VERSION
+@@ -1 +1 @@
+-3.4.23
++3.4.24
+diff --git a/VERSION.txt b/VERSION.txt
+index f5db5d9..f592d19 100644
+--- a/VERSION.txt
++++ b/VERSION.txt
+@@ -1 +1 @@
+-3.4.23-kbo-npb-data-repair
++3.4.24-national-validation
+diff --git a/__init__.py b/__init__.py
+index 4cb9c26..9b9e51f 100644
+--- a/__init__.py
++++ b/__init__.py
+@@ -1 +1 @@
+-__version__ = "3.4.12"
++__version__ = "3.4.24-national-validation"
+diff --git a/analysis_view.py b/analysis_view.py
+index a619d64..faa88b6 100644
+--- a/analysis_view.py
++++ b/analysis_view.py
+@@ -30,12 +30,15 @@ def match_summary(frame):
+                 'EV(%)':round(value.point_ev_roi*100,2),
+                 '가정 최저 EV(%)':round(value.scenario_ev_min*100,2),
+                 '가정 최고 EV(%)':round(value.scenario_ev_max*100,2),
+-                '판정':'모델상 양의 EV' if value.point_ev_roi>0 else '현재 배당에서 양의 EV 없음',
++                '판정':value.get('national_status_label', '모델상 양의 EV' if value.point_ev_roi>0 else '현재 배당에서 양의 EV 없음'),
++                '경기 데이터 검증':value.get('match_data_status',''),
++                '미확인 데이터':value.get('match_data_missing',''),
++                '모델 성능 검증':value.get('model_validation_status',''),
+                 '라인업':'확인' if value.lineup_confirmed else '미확인',
+                 '조합':'참고 조합 가능' if value.scenario_parlay_eligible else '제외',
+                 '이유':humanize_policy_reason(value.selection_reason,value)}
+             if 'v3_decision_status' in rows.columns:
+-                item.update({'v3 판정':value.v3_decision_status,
++                item.update({'v3 판정':value.get('national_status_label',value.v3_decision_status),
+                              'Stress 양수 비율(%)':round(float(value.robust_positive_ratio)*100,1),
+                              'v3 최저 EV(%)':round(float(value.robust_ev_min)*100,2),
+                              '반증 위험':value.counter_case_risk,
+diff --git a/app.py b/app.py
+index 15767b3..f1edd18 100644
+--- a/app.py
++++ b/app.py
+@@ -43,10 +43,10 @@ from sports_ev_engine.national_soccer import is_senior_international, build_nati
+ from sports_ev_engine.international_discovery import (discover_api_football_fixtures, flatten_api_football_odds, append_only_missing_events, competition_rows, kst_target_dates)
+ from sports_ev_engine.core.parlay import optimize_parlays
+ from sports_ev_engine.review_policy import candidate_mask, review_mask
+-from sports_ev_engine.national_policy import reference_pairs
++from sports_ev_engine.national_policy import reference_pairs, finalize_national
+ from sports_ev_engine.analysis_view import match_summary
+ from sports_ev_engine.explanations import humanize_policy_reason
+-from sports_ev_engine.validation import validate
++from sports_ev_engine.validation import validate, validation_summary
+ from sports_ev_engine.providers.official_baseball import OfficialBaseballStats
+ from sports_ev_engine.official_baseball_model import analyze_official_event
+ from sports_ev_engine.providers.live_baseball import LiveBaseballContext
+@@ -78,9 +78,9 @@ from sports_ev_engine.feature_attribution import attribution
+ from sports_ev_engine.model_drift import drift_rows
+ from sports_ev_engine.bankroll import simulate as simulate_bankroll
+ 
+-st.set_page_config(page_title="Sports EV Engine v3.4.23",layout="wide")
+-st.title("Sports EV Engine v3.4.23")
+-st.caption("BUILD v3.4.23-kbo-npb-data-repair · 2026-10-01")
++st.set_page_config(page_title="Sports EV Engine v3.4.24",layout="wide")
++st.title("Sports EV Engine v3.4.24")
++st.caption("BUILD v3.4.24-national-validation · 2026-10-02")
+ if any(getattr(module,"PROVIDER_BUILD",None)!="3.0.0" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider,deep_soccer_provider)):
+     st.error("앱과 수집 파일 버전이 다릅니다. ZIP의 sports_ev_engine 폴더까지 전부 반영한 뒤 Streamlit 앱을 Reboot하세요.")
+     st.stop()
+@@ -90,14 +90,14 @@ if getattr(advanced_provider,"BASEBALL_ADVANCED_BUILD",None)!="3.4.23":
+ if getattr(live_provider,"LIVE_BASEBALL_BUILD",None)!="3.4.20":
+     st.error("v3.4.22 KBO/NPB 라이브 수집 모듈이 구버전입니다. sports_ev_engine/providers/live_baseball.py까지 함께 덮어쓴 뒤 Reboot하세요.")
+     st.stop()
+-_PATCH_BUILD = "3.4.16-robust-form-xg"
++_PATCH_BUILD = "3.4.24-national-validation"
+ _patch_modules=(auto_national_provider,deep_soccer_provider,free_provider,auto_soccer_provider,reasoning_provider,national_context_provider,elo_provider)
+ _patch_mismatch=[getattr(m,"__name__",str(m)) for m in _patch_modules if getattr(m,"PATCH_BUILD",None)!=_PATCH_BUILD]
+ if _patch_mismatch:
+-    st.error("v3.4.16 핵심 축구 모델 모듈이 섞여 있습니다: " + ", ".join(_patch_mismatch) + ". DEPLOY_ONLY ZIP의 app.py와 sports_ev_engine 폴더를 함께 덮어쓴 뒤 Reboot하세요.")
++    st.error("v3.4.24 핵심 축구 모델 모듈이 섞여 있습니다: " + ", ".join(_patch_mismatch) + ". DEPLOY_ONLY ZIP의 app.py와 sports_ev_engine 폴더를 함께 덮어쓴 뒤 Reboot하세요.")
+     st.stop()
+ FootballAccessError=football_provider.FootballAccessError
+-st.caption("분석 백엔드 v3.4.16 · opponent-strength robust form + adaptive measured-xG single-pass + API-Football/ESPN/FotMob/SofaScore fallback")
++st.caption("분석 백엔드 v3.4.24 · opponent-strength robust form + adaptive measured-xG single-pass + API-Football/ESPN/FotMob/SofaScore fallback")
+ st.caption("독립 모델 → 정밀 컨텍스트 → 반증 검사 → 시장 캘리브레이션 → 27개 스트레스 시나리오 → EV/ROBUST 판정 → 기록·사후검증")
+ 
+ def secret(name):
+@@ -114,7 +114,7 @@ SUPABASE_KEY=secret("SUPABASE_SERVICE_ROLE_KEY") or secret("SUPABASE_KEY")
+ configure_persistence(SUPABASE_URL,SUPABASE_KEY)
+ BASEBALL_KEY=None
+ 
+-_BUILD_ID = "3.4.22-mlb-totals-calibration"
++_BUILD_ID = "3.4.24-national-validation"
+ if st.session_state.get("_build_id") != _BUILD_ID:
+     for _k in [
+         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
+@@ -210,6 +210,8 @@ def render_final_decision_layer(frame, key_prefix, title="🧠 v3 FINAL Decision
+         f"**데이터 상태:** {summary['data_status']}",
+         f"**Model confidence:** {summary['confidence']}/100",
+     ]
++    if summary.get("match_data_status"):
++        summary_lines += [f"**경기 데이터 검증:** {summary['match_data_status']} · {summary['match_data_missing']}", f"**모델 성능 검증:** {summary['model_validation_status']}"]
+     st.markdown("  \n".join(summary_lines))
+     ratio=summary.get('robust_positive_ratio')
+     n=summary.get('robust_scenario_count',0)
+@@ -559,7 +561,7 @@ with tabs[1]:
+                         st.session_state["national_discovery_status"]=[]
+                 elif auto_all:
+                     st.session_state["national_discovery_status"]=[]
+-                    competition_errors.append({"경기":"다중소스 A매치 자동발견","이유":"API_FOOTBALL_KEY 없음 — The Odds API 활성 국제대회만 조회"})
++                    st.session_state["national_sources"].append({"소스":"다중소스 A매치 자동발견","상태":"API_FOOTBALL_KEY 없음 — The Odds API 활성 국제대회만 조회"})
+ 
+                 raw=append_only_missing_events(raw_primary,raw_fallback)
+                 st.session_state["national_filter_label"]=(f"{national_match_date:%Y-%m-%d} KST" if national_date_only else str(national_scope))
+@@ -723,6 +725,8 @@ with tabs[1]:
+             with st.spinner("각 경기 이전 기록만으로 검증 중..."):
+                 report,_=validate(st.session_state["validation_records"],datetime.now(ZoneInfo("Asia/Seoul")).date(),national_recent,max_events=900)
+                 st.session_state["validation_report"]=report
++                (Path(__file__).parent/"data").mkdir(exist_ok=True)
++                (Path(__file__).parent/"data/validation_report.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
+         report=st.session_state.get("validation_report")
+         if report is None:
+             try:report=json.loads((Path(__file__).parent/'data/validation_report.json').read_text())
+@@ -735,6 +739,9 @@ with tabs[1]:
+             st.download_button("검증 보고서 다운로드",json.dumps(report,ensure_ascii=False,indent=2),file_name="validation_report.json")
+     nr=st.session_state.get("national_ranked")
+     if isinstance(nr,pd.DataFrame) and not nr.empty:
++        nr=nr.copy()
++        nr["model_validation_status"]=validation_summary(report)["status"]
++        nr=pd.DataFrame([finalize_national(r) for r in nr.to_dict("records")],index=nr.index)
+         if st.session_state.get("national_filter_label"):st.caption(f"분석 경기일: {st.session_state['national_filter_label']}")
+         render_final_decision_layer(nr,"national",title="🧠 v3 FINAL Decision Layer · A매치")
+         st.markdown("### 상세 진단 · 전체 경기 자동분석")
+@@ -742,11 +749,12 @@ with tabs[1]:
+         st.dataframe(match_summary(nr),hide_index=True)
+         st.info("분석 확률과 EV는 모델 추정입니다. v3 정밀 모드에서는 제공사가 실제 반환한 xG·확정 라인업·결장·선수 중요도·휴식일을 추가 반영하며, 확보하지 못한 신호는 MISSING으로 남깁니다.")
+         st.markdown("### A매치 후보 · 조합 상태")
++        st.write({"모델 성능 검증":validation_summary(report)})
+         passed_count=int(nr.scenario_candidate.sum())
+         ready_count=int(nr.scenario_parlay_eligible.sum())
+         pairs=reference_pairs(nr)
+         metrics=st.columns(4)
+-        for cell,label,value in zip(metrics,['가정 변화 통과 선택지','그중 라인업 확인','참고용 2폴 표시','성능 검증 완료'],[passed_count,ready_count,len(pairs),0]):
++        for cell,label,value in zip(metrics,['개별 후보','최종 후보','참고용 2폴 표시','성능 검증 완료 항목'],[passed_count,ready_count,len(pairs),validation_summary(report)['completed_count']]):
+             cell.metric(label,value)
+         st.caption("앞의 두 숫자는 경기 수가 아닌 선택지 수입니다. 개별 분석 → 가정 변화 통과 → 라인업 확인 → 서로 다른 경기의 참고용 2폴 순서입니다. 모델 성능 검증은 별도입니다.")
+         with st.expander("미검증은 어떻게 검증하나요?"):
+@@ -755,18 +763,17 @@ with tabs[1]:
+         st.markdown("#### 가정 변화에도 기대값이 양수인 개별 후보")
+         st.caption("양 팀 예상 득점을 각각 −10%·기준·+10%, 원모델 비중을 15%·25%·35%로 바꾼 27개 조합입니다. 이 범위는 실측 오차나 신뢰구간이 아닙니다. 기존 약 8.5%p 일괄 차감은 후보 선정에서 사용하지 않습니다.")
+         st.info("여기서 '가정 변화 통과'는 개별 픽의 강건성 시험 통과를 뜻합니다. 🏆 오늘의 베스트 조합에서는 여기에 데이터 신선도·반증위험·드리프트·라인업 단계 등 별도 안전 게이트를 한 번 더 적용하므로, 통과 픽이 '검토 후보'로는 보이더라도 실제 조합에서는 제외될 수 있습니다.")
+-        counts=nr.selection_status.value_counts()
+-        st.write({"분석 옵션":len(nr),"가정 변화 통과":int(counts.get('SCENARIO_PASS',0)),"가정에 민감":int(counts.get('SENSITIVE',0)),"괴리 검토":int(counts.get('REVIEW',0)),"기대값 미달":int(counts.get('PASS',0)),"자료 보류":int(counts.get('DATA_HOLD',0))})
+-        labels={'SCENARIO_PASS':'가정 변화 통과 · 미검증','SENSITIVE':'가정에 민감 · 조합 제외','REVIEW':'괴리 검토 · 조합 제외','PASS':'기대값 미달','DATA_HOLD':'자료 보류'}
++        counts=nr.national_status_label.value_counts()
++        st.write({"분석 옵션":len(nr),**{label:int(counts.get(label,0)) for label in ('최종 후보','잠정 후보','조합 제외','베팅 제외')}})
+         def policy_table(frame):
+-            cols=['selection_status','display_pick','best_book','best_odds','model_win_prob','break_even','edge_pp','point_ev_roi','scenario_win_min','scenario_win_max','scenario_ev_min','scenario_ev_max','lineup_confirmed','selection_reason']
++            cols=['selection_status','match_data_status','match_data_missing','model_validation_status','display_pick','best_book','best_odds','model_win_prob','break_even','edge_pp','point_ev_roi','scenario_win_min','scenario_win_max','scenario_ev_min','scenario_ev_max','lineup_confirmed','selection_reason']
+             shown=frame[[c for c in cols if c in frame]].copy()
+             for col in ['model_win_prob','break_even','point_ev_roi','scenario_win_min','scenario_win_max','scenario_ev_min','scenario_ev_max']:
+                 shown[col]=(shown[col]*100).round(2)
+-            shown['selection_status']=shown['selection_status'].map(labels)
++            shown['selection_status']=frame['national_status_label']
+             if 'selection_reason' in shown:
+                 shown['selection_reason']=[humanize_policy_reason(v, frame.iloc[i] if i < len(frame) else None) for i,v in enumerate(shown['selection_reason'].tolist())]
+-            return shown.rename(columns={'selection_status':'판정','display_pick':'경기/선택','model_win_prob':'기준 확률(%)','break_even':'BE(%)','edge_pp':'Edge(%p)','point_ev_roi':'기준 EV(%)','scenario_win_min':'가정 최저 확률(%)','scenario_win_max':'가정 최고 확률(%)','scenario_ev_min':'가정 최저 EV(%)','scenario_ev_max':'가정 최고 EV(%)','lineup_confirmed':'라인업 확인','selection_reason':'사람이 읽는 판정 이유'})
++            return shown.rename(columns={'match_data_status':'경기 데이터 검증','match_data_missing':'미확인 데이터','model_validation_status':'모델 성능 검증','selection_status':'판정','display_pick':'경기/선택','model_win_prob':'기준 확률(%)','break_even':'BE(%)','edge_pp':'Edge(%p)','point_ev_roi':'기준 EV(%)','scenario_win_min':'가정 최저 확률(%)','scenario_win_max':'가정 최고 확률(%)','scenario_ev_min':'가정 최저 EV(%)','scenario_ev_max':'가정 최고 EV(%)','lineup_confirmed':'라인업 확인','selection_reason':'사람이 읽는 판정 이유'})
+         passed=nr[nr.scenario_candidate].sort_values('scenario_ev_min',ascending=False)
+         if passed.empty:st.info("설정한 모든 가정에서 기대값이 양수인 후보는 없습니다. 아래 민감 후보와 제외 이유를 확인하세요.")
+         else:st.dataframe(policy_table(passed),hide_index=True)
+@@ -778,7 +785,7 @@ with tabs[1]:
+             st.dataframe(policy_table(nr),hide_index=True)
+         with st.expander("이전 버전 일괄 차감 결과 비교 · 현재 선정에는 미사용"):
+             st.dataframe(nr[['display_pick','legacy_grade','uncertainty_pp','legacy_conservative_ev_roi']],hide_index=True)
+-        st.caption("통과는 설정한 가정 안에서만 의미가 있습니다. xG·결장은 미수집이며 최종 시장 혼합 확률과 수익성은 검증되지 않았습니다. A/B/C 등급과 베팅금액 추천은 제공하지 않습니다.")
++        st.caption("통과는 설정한 가정 안에서만 의미가 있습니다. 경기 데이터 검증과 모델 성능 검증은 별도입니다. 모델 장기 수익성은 아래 검증 보고서의 범위에서 판단합니다. A/B/C 등급과 베팅금액 추천은 제공하지 않습니다.")
+         st.download_button("전체 분석 CSV 다운로드",nr.to_csv(index=False).encode("utf-8-sig"),file_name="national_analysis.csv")
+         st.markdown("#### 라인업 확인 + 가정 변화 통과: 참고용 2폴")
+         combos=pairs
+diff --git a/auto_soccer.py b/auto_soccer.py
+index 6f9815e..0e2ff38 100644
+--- a/auto_soccer.py
++++ b/auto_soccer.py
+@@ -1,4 +1,5 @@
+ from __future__ import annotations
++PATCH_BUILD = '3.4.24-national-validation'
+ from .adaptive_model import apply_adaptive_layer
+ import math
+ from datetime import datetime, timezone
+@@ -7,12 +8,12 @@ import pandas as pd
+ from sports_ev_engine.models.soccer_auto import score_matrix, price_from_matrix, norm_name
+ from sports_ev_engine.models.elo import build_elo, opponent_adjusted_form
+ from sports_ev_engine.core.ev import analyze_bet
+-from sports_ev_engine.national_policy import scenario_matrices, assess, POLICY_ID
++from sports_ev_engine.national_policy import scenario_matrices, assess, POLICY_ID, finalize_national
+ from sports_ev_engine.free_national import adjust_lambdas
+ from sports_ev_engine.review_policy import review_reason, REVIEW_STATES
+ from sports_ev_engine.reasoning_engine import (
+     apply_soccer_context, build_counter_cases, scenario_assessment,
+-    soccer_scenarios, decision_fields,
++    soccer_scenarios, decision_fields, final_probability_assessment,
+ )
+ 
+ def _side_for_row(r):
+@@ -57,6 +58,50 @@ def _build_lambdas(home_form, away_form, home_elo, away_elo, goal_mean=2.55, hom
+     factor=desired/max(total,1e-9)
+     return max(.15,home*factor),max(.15,away*factor)
+ 
++def _canonical_xg_context(competition_pool, context):
++    """Return one coherent xG context and never hybridize/double-apply sources.
++
++    Priority is a complete fixture/deep-context measured xG set.  If that is not
++    available, a validated history/CSV xg_form (both teams, >=3 measured matches
++    by construction) can supply the complete set.  Partial source A + partial
++    source B is deliberately *not* stitched together.
++    """
++    out=dict(context or {})
++    keys=("home_xg_for","home_xg_against","away_xg_for","away_xg_against")
++    def _finite_xg(v):
++        try:return math.isfinite(float(v))
++        except (TypeError,ValueError):return False
++    if all(_finite_xg(out.get(k)) for k in keys):
++        out["xg_canonical_source"]="event_context"
++        out.setdefault("xg_application_mode","single_pass_blend")
++        out.setdefault("xg_collection_status","OK")
++        return out
++
++    xg=competition_pool.get("xg_form") or {}
++    h=xg.get("home"); a=xg.get("away")
++    try:
++        complete=(len(h)>=2 and len(a)>=2 and all(math.isfinite(float(v)) for v in (h[0],h[1],a[0],a[1])))
++    except (TypeError,ValueError):
++        complete=False
++    if complete:
++        # Replace the entire xG quartet atomically.  Never keep two values from a
++        # failed deep source and two from history, which would create a fake model.
++        out.update({
++            "home_xg_for":float(h[0]),"home_xg_against":float(h[1]),
++            "away_xg_for":float(a[0]),"away_xg_against":float(a[1]),
++        })
++        evidence=competition_pool.get("evidence") or {}
++        out["xg_samples_home"]=int((evidence.get("home") or {}).get("xg_matches") or 3)
++        out["xg_samples_away"]=int((evidence.get("away") or {}).get("xg_matches") or 3)
++        out["xg_source"]=competition_pool.get("xg_form_source") or "validated history/CSV measured xG"
++        out["xg_collection_status"]="OK"
++        out["xg_canonical_source"]="history_xg_form"
++        out["xg_application_mode"]="single_pass_blend"
++        out["xg_fallback_used"]=True
++    else:
++        out.setdefault("xg_canonical_source","missing")
++    return out
++
+ def _blend_probability(raw_win, raw_push, market_prob, sample_matches, raw_gap_pp):
+     """
+     Market is a calibration prior, not the answer.
+@@ -96,8 +141,8 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
+     fixtures=[f for f in competition_pool.get("fixtures",[]) if f.get("fixture",{}).get("status",{}).get("short")=="FT" and 0<int(f.get("fixture",{}).get("timestamp") or 0)<cutoff_ts]
+     ratings=build_elo(fixtures, home_adv=20.0 if international else 55.0)
+ 
+-    hf=opponent_adjusted_form(fixtures,home_lookup,ratings,cutoff_ts,recent_n=recent_n)
+-    af=opponent_adjusted_form(fixtures,away_lookup,ratings,cutoff_ts,recent_n=recent_n)
++    hf=opponent_adjusted_form(fixtures,home_lookup,ratings,cutoff_ts,recent_n=recent_n,international=international)
++    af=opponent_adjusted_form(fixtures,away_lookup,ratings,cutoff_ts,recent_n=recent_n,international=international)
+ 
+     if not hf or not af:
+         missing=[]
+@@ -113,12 +158,19 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
+     ctx=competition_pool.get("manual_context",{})
+     neutral=bool(ctx and all(c.get("neutral") for c in ctx.values()))
+     hl,al=_build_lambdas(hf,af,he,ae,home_adv=(0.0 if neutral or competition_pool.get("venue_unknown") else 20.0) if international else 55.0)
++
++    # v3.4.16 canonical xG pipeline.  Establish the one authoritative xG quartet
++    # *before* any lambda adjustment, then disable the legacy xg_form adjustment.
++    deep_ctx=_canonical_xg_context(
++        competition_pool,
++        competition_pool.get("event_context") or {"deep_context_attempted":False},
++    )
+     lineup_ok=False; evidence_note=""
+-    if international:hl,al,lineup_ok,evidence_note=adjust_lambdas(hl,al,competition_pool)
++    if international:
++        hl,al,lineup_ok,evidence_note=adjust_lambdas(hl,al,competition_pool,apply_xg=False)
+ 
+     # v3 context layer: xG, lineup/player importance, injuries and rest are used only
+     # when the provider actually returned them. Missing deep signals are never imputed.
+-    deep_ctx=competition_pool.get("event_context") or {"deep_context_attempted":False}
+     xg_keys=("home_xg_for","home_xg_against","away_xg_for","away_xg_against")
+     xg_missing=international and not all(deep_ctx.get(k) is not None for k in xg_keys)
+     hl,al,context_unc,signal_ledger=apply_soccer_context(
+@@ -224,6 +276,16 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
+             "home_recent_ga":hf["ga"],
+             "away_recent_gf":af["gf"],
+             "away_recent_ga":af["ga"],
++            "home_raw_recent_gf":hf.get("raw_gf"),
++            "home_raw_recent_ga":hf.get("raw_ga"),
++            "away_raw_recent_gf":af.get("raw_gf"),
++            "away_raw_recent_ga":af.get("raw_ga"),
++            "home_robust_recent_gf":hf.get("robust_gf"),
++            "away_robust_recent_gf":af.get("robust_gf"),
++            "home_blowout_matches_shrunk":hf.get("blowout_matches_shrunk",0),
++            "away_blowout_matches_shrunk":af.get("blowout_matches_shrunk",0),
++            "home_form_mode":hf.get("form_mode"),
++            "away_form_mode":af.get("form_mode"),
+             "home_form_matches":hf["matches"],
+             "away_form_matches":af["matches"],
+             "uncertainty_pp":base_unc,
+@@ -262,8 +324,21 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
+             "xg_checked_at":deep_ctx.get("xg_checked_at"),
+             "xg_collection_status":deep_ctx.get("xg_collection_status") or ("MISSING" if xg_missing else "OK"),
+             "xg_fallback_error":deep_ctx.get("xg_fallback_error") or deep_ctx.get("xg_errors"),
++            "xg_canonical_source":deep_ctx.get("xg_canonical_source"),
++            "xg_application_mode":deep_ctx.get("xg_application_mode"),
++            "xg_blend_weight":deep_ctx.get("xg_blend_weight"),
++            "xg_base_total":deep_ctx.get("xg_base_total"),
++            "xg_raw_goal_form_total":deep_ctx.get("xg_raw_goal_form_total"),
++            "xg_target_total":deep_ctx.get("xg_target_total"),
++            "xg_divergence_reference_total":deep_ctx.get("xg_divergence_reference_total"),
++            "xg_goal_model_divergence_pct":deep_ctx.get("xg_goal_model_divergence_pct"),
++            "xg_weight_boost":deep_ctx.get("xg_weight_boost"),
++            "xg_target_home":deep_ctx.get("xg_target_home"),
++            "xg_target_away":deep_ctx.get("xg_target_away"),
+             "home_big_chances":deep_ctx.get("home_big_chances"),
+             "away_big_chances":deep_ctx.get("away_big_chances"),
++            "data_checked_at":deep_ctx.get("data_checked_at"),
++            "injury_available":deep_ctx.get("injury_available"),
+             "home_rest_days":deep_ctx.get("home_rest_days"),
+             "away_rest_days":deep_ctx.get("away_rest_days"),
+             "home_missing_players":deep_ctx.get("home_missing_players"),
+@@ -325,9 +400,8 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
+             d['v3_candidate']=False
+             d['v3_parlay_eligible']=False
+             d['parlay_eligible']=False
+-            d['scenario_candidate']=False
+             d['scenario_parlay_eligible']=False
+-            d['selection_status']='REVIEW'
++            # Preserve scenario evidence; downstream data validation prevents promotion.
+             d['selection_reason']='실측 xG 미수집/수집 오류: 자동후보 제외 · 원확률 검토 필요'
+             d['robust_reason']=d['selection_reason']
+         d['deep_context_attempted']=bool(deep_ctx.get('deep_context_attempted'))
+@@ -340,6 +414,39 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
+ 
+     _family="soccer_national" if international else "soccer_club"
+     _frame=apply_adaptive_layer(pd.DataFrame(rows),_family)
++    if international and not _frame.empty:
++        from .validation import load_validation_report, validation_summary
++        summary=validation_summary(load_validation_report())
++        revised=[]
++        for r in _frame.to_dict("records"):
++            # Adaptive calibration/coherence can move the displayed probability.
++            # Reprice every stress outcome on the same final probability scale.
++            delta=float(r['model_win_prob'])-float(r['pre_adaptive_model_win_prob'])
++            final_scenarios=[]
++            for w,p,label in soccer_scenarios(hl,al,lambda mm: price_from_matrix(mm,r["market"],_side_for_row(r),None if r["market"]=="h2h" else float(r["point"])),score_matrix):
++                for stress_weight in (.15,.25,.35):
++                    fw=stress_weight*w+(1-stress_weight)*float(r['consensus_prob'])*(1-p)
++                    final_scenarios.append((max(0.,min(1-p,fw+delta)),p,label))
++            forced=r.get('adaptive_gate') if r.get('adaptive_gate') not in {'','OK',None} else None
++            if r.get('sanity') in REVIEW_STATES: forced='원모델/시장 괴리 검토'
++            final=final_probability_assessment(
++                odds=float(r['best_odds']),final_win_prob=float(r['model_win_prob']),
++                final_push_prob=float(r['push_prob']),uncertainty_pp=0.,
++                scenario_probabilities=final_scenarios,data_ready=sample>=5,
++                lineup_required=True,lineup_confirmed=lineup_ok,forced_review_reason=forced)
++            r.update(final)
++            r['v3_decision_status']=final['robust_status']
++            scenario_evs=[float(r['best_odds'])*w+p-1 for w,p,_ in final_scenarios]
++            r['scenario_ev_min']=min(scenario_evs)
++            r['scenario_ev_max']=max(scenario_evs)
++            r['scenario_win_min']=min(w for w,p,_ in final_scenarios)
++            r['scenario_win_max']=max(w for w,p,_ in final_scenarios)
++            r['scenario_count']=len(final_scenarios)
++            if r['selection_status'] in {'SCENARIO_PASS','SENSITIVE','PASS'}:
++                r['selection_status']='PASS' if r['point_ev_roi']<=0 else 'SCENARIO_PASS' if r['scenario_ev_min']>0 else 'SENSITIVE'
++            r['model_validation_status']=summary['status']
++            revised.append(finalize_national(r))
++        _frame=pd.DataFrame(revised,index=_frame.index)
+     return _frame,{
+         "status":"ok","home":home,"away":away,
+         "home_form":hf,"away_form":af,
+diff --git a/daily_combo.py b/daily_combo.py
+index bd8c4e1..c618f33 100644
+--- a/daily_combo.py
++++ b/daily_combo.py
+@@ -205,6 +205,10 @@ def prepare_daily_candidates(frame: pd.DataFrame) -> pd.DataFrame:
+         _drift_map={}
+     rows=[]
+     for _,r in frame.iterrows():
++        national = str(r.get('sport_family') or '') == 'soccer_national' or str(r.get('national_status')) in {'FINAL_BET','PROVISIONAL','COMBO_EXCLUDE','NO_BET'}
++        if national:
++            from .national_policy import finalize_national
++            r=pd.Series(finalize_national(r))
+         status=str(r.get("v3_decision_status") or "").upper()
+         odds=_num(r.get("best_odds")); model=_num(r.get("model_win_prob"))
+         market=_num(r.get("consensus_prob"),_num(r.get("break_even")))
+@@ -268,6 +272,10 @@ def prepare_daily_candidates(frame: pd.DataFrame) -> pd.DataFrame:
+             combo_eligible=False
+             reasons.append("반증/데이터 위험 HIGH")
+ 
++        if national and r.get("national_status") != "FINAL_BET":
++            single_eligible=False; combo_eligible=False
++            reasons.append(str(r.get("national_status_label")) + " · " + str(r.get("match_data_missing") or ""))
++
+         maturity=stage_factor*risk_factor
+         adj_prob=market+maturity*(model-market)
+         adj_prob=max(0.001,min(max(0.001,1-push-0.001),adj_prob))
+@@ -300,7 +308,7 @@ def prepare_daily_candidates(frame: pd.DataFrame) -> pd.DataFrame:
+         kickoff=r.get("kickoff_kst")
+         if pd.isna(kickoff): kickoff=_kickoff_kst(r.get("commence_time"))
+         event_id=str(r.get("event_id") or f"{r.get('home_team','')}__{r.get('away_team','')}__{r.get('commence_time','')}")
+-        candidate_state="조합 가능" if combo_eligible else "단일 후보" if single_eligible else "검토 후보"
++        candidate_state=("최종 후보" if combo_eligible else "조합 제외") if national and r.get("national_status")=="FINAL_BET" else str(r.get("national_status_label")) if national else ("조합 가능" if combo_eligible else "단일 후보" if single_eligible else "검토 후보")
+         reason=" · ".join(dict.fromkeys(reasons)) if reasons else "강건성·리스크 게이트 통과"
+         rows.append({
+             **r.to_dict(),
+@@ -416,6 +424,6 @@ def combo_display_rows(combo: dict | None) -> pd.DataFrame:
+             "조합용 보수확률": f"{float(x.get('daily_adjusted_prob') or 0)*100:.1f}%",
+             "EV": f"{float(x.get('daily_original_ev') or 0)*100:+.1f}%",
+             "라인업": x.get("lineup_state", ""),
+-            "판정": x.get("v3_decision_status", ""),
++            "판정": x.get("national_status_label", x.get("v3_decision_status", "")),
+         })
+     return pd.DataFrame(rows)
+diff --git a/deep_soccer_context.py b/deep_soccer_context.py
+index c970edc..09834e3 100644
+--- a/deep_soccer_context.py
++++ b/deep_soccer_context.py
+@@ -12,6 +12,7 @@ import pandas as pd
+ from .models.soccer_auto import norm_name
+ 
+ PROVIDER_BUILD="3.0.0"
++PATCH_BUILD = '3.4.24-national-validation'
+ 
+ 
+ def _fixture_match(pool,home,away,kickoff_iso,tolerance_minutes=180):
+@@ -263,7 +264,7 @@ def collect_deep_context(api,pool,home,away,kickoff_iso,season=None,horizon_hour
+     now=pd.Timestamp.now(tz="UTC")
+     target_utc=target.tz_convert("UTC") if target.tzinfo else target.tz_localize("UTC")
+     hours=(target_utc-now).total_seconds()/3600
+-    ctx={"deep_context_attempted":True,"horizon_hours":horizon_hours,
++    ctx={"data_checked_at":now.isoformat(),"deep_context_attempted":True,"horizon_hours":horizon_hours,
+          "home_rest_days":_rest_days(pool,home,kickoff_iso),"away_rest_days":_rest_days(pool,away,kickoff_iso),
+          "schedule_source":"competition fixture history"}
+     if hours<0 or hours>horizon_hours:
+diff --git a/final_view.py b/final_view.py
+index e3ac2e0..34e6e8f 100644
+--- a/final_view.py
++++ b/final_view.py
+@@ -89,6 +89,8 @@ def _uncertainty_label(row: pd.Series) -> str:
+ 
+ 
+ def _status(row: pd.Series) -> str:
++    if isinstance(row.get("national_status_label"), str) and row.get("national_status_label"):
++        return str(row.get("national_status_label"))
+     status=str(row.get("v3_decision_status") or row.get("robust_status") or row.get("selection_status") or row.get("grade") or "").strip().upper()
+     return status or "미판정"
+ 
+@@ -258,6 +260,9 @@ def event_summary(frame: pd.DataFrame) -> dict:
+         "data_risk":_data_risk_text(focus),
+         "data_status":data_status(frame),
+         "confidence":confidence_score(frame,focus),
++        "match_data_status":focus.get("match_data_status",""),
++        "match_data_missing":focus.get("match_data_missing",""),
++        "model_validation_status":focus.get("model_validation_status",""),
+         "focus_status":_status(focus),
+         "focus_pick":_option_label(focus),
+         "robust_positive_ratio":_num(focus.get("robust_positive_ratio"), float("nan")),
+diff --git a/national_policy.py b/national_policy.py
+index d23bdd3..f5e3c6c 100644
+--- a/national_policy.py
++++ b/national_policy.py
+@@ -3,7 +3,7 @@ import math
+ from itertools import product, combinations
+ from sports_ev_engine.models.soccer_auto import score_matrix, price_from_matrix
+ 
+-POLICY_ID = 'national-scenarios-v293'
++POLICY_ID = 'national-scenarios-v3.4.24'
+ 
+ def scenario_matrices(hl, al):
+     # Illustrative modelling assumptions, not estimated parameter errors.
+@@ -28,7 +28,7 @@ def assess(row, matrices, side, line):
+         status='REVIEW';reason='원모델-시장 괴리 15%p 초과: 기존 검토 기준 유지'
+     elif row['point_ev_roi']>0:
+         if low>0:
+-            status='SCENARIO_PASS';reason='설정한 27개 가정에서 모두 기대값 양수; 수익성 미검증'
++            status='SCENARIO_PASS';reason='설정한 27개 가정에서 모두 기대값 양수'
+         else:
+             status='SENSITIVE';reason='기준 기대값은 양수지만 가정 변화 시 0 이하; 조합 제외'
+     lineup=bool(row.get('lineup_confirmed',False))
+@@ -41,7 +41,9 @@ def assess(row, matrices, side, line):
+ 
+ def reference_pairs(frame):
+     """Experimental pairs of distinct events; independence is an assumption."""
+-    rows=frame[frame.scenario_parlay_eligible].sort_values('scenario_ev_min',ascending=False).head(20).to_dict('records')
++    eligible=frame.scenario_parlay_eligible.fillna(False).map(truth)
++    if 'national_status' in frame: eligible &= frame.national_status.eq('FINAL_BET')
++    rows=frame[eligible].sort_values('scenario_ev_min',ascending=False).head(20).to_dict('records')
+     out=[]
+     for a,b in combinations(rows,2):
+         if a['event_id']==b['event_id']:continue
+@@ -51,3 +53,63 @@ def reference_pairs(frame):
+             '가정 최저 EV(%)':round(100*((1+a['scenario_ev_min'])*(1+b['scenario_ev_min'])-1),2),
+             '조건':'독립 가정 · 적특/반적특 시 수령액 변동 · 실전 미검증'})
+     return sorted(out,key=lambda x:x['가정 최저 EV(%)'],reverse=True)[:5]
++
++
++STATUS_LABELS = {'FINAL_BET':'최종 후보', 'PROVISIONAL':'잠정 후보',
++                 'COMBO_EXCLUDE':'조합 제외', 'NO_BET':'베팅 제외'}
++
++def truth(value):
++    return str(value).strip().lower() in {'true','1','yes','confirmed','final'}
++
++def finite(value):
++    try: return math.isfinite(float(value))
++    except (TypeError, ValueError): return False
++
++def match_data_validation(row, now=None):
++    import pandas as pd
++    now = pd.Timestamp(now) if now is not None else pd.Timestamp.now(tz='UTC')
++    if now.tzinfo is None: now = now.tz_localize('UTC')
++    stamp = pd.to_datetime(row.get('data_checked_at'), utc=True, errors='coerce')
++    xg_stamp = pd.to_datetime(row.get('xg_checked_at'), utc=True, errors='coerce')
++    checks = {
++        '라인업': truth(row.get('lineup_confirmed')),
++        'xG': all(finite(row.get(k)) and float(row.get(k)) >= 0 for k in
++                   ('home_xg_for','home_xg_against','away_xg_for','away_xg_against'))
++              and all(finite(row.get(k)) and float(row.get(k)) >= 3 for k in ('xg_samples_home','xg_samples_away'))
++              and str(row.get('xg_collection_status','')).upper() == 'OK',
++        '결장': truth(row.get('injury_available')),
++        '휴식일': all(finite(row.get(k)) and float(row.get(k)) >= 0 for k in ('home_rest_days','away_rest_days')),
++        '신선도': all(not pd.isna(t) and 0 <= (now-t).total_seconds() <= 10800 for t in (stamp,xg_stamp)),
++    }
++    missing = [key for key,ok in checks.items() if not ok]
++    return {'match_data_verified':not missing, 'match_data_status':'검증 완료' if not missing else '확인 필요',
++            'match_data_missing':' · '.join(missing)}
++
++def finalize_national(row, now=None):
++    """One downstream policy after calibration; profitability never gates picks."""
++    out = dict(row)
++    out.update(match_data_validation(row, now))
++    ev = row.get('point_ev_roi', row.get('ev_roi'))
++    scenario = row.get('selection_status')
++    if scenario is None:
++        scenario='SCENARIO_PASS' if row.get('national_status') in {'FINAL_BET','PROVISIONAL'} else 'DATA_HOLD'
++    robust = row.get('v3_decision_status')
++    if not finite(ev) or float(ev) <= 0 or scenario in {'PASS','DATA_HOLD'}:
++        status = 'NO_BET'
++    elif (scenario in {'REVIEW','SENSITIVE'} or robust in {'FRAGILE','PASS','DATA_HOLD'}
++          or str(row.get('adaptive_gate','OK')) not in {'','OK'}):
++        status = 'COMBO_EXCLUDE'
++    elif not out['match_data_verified']:
++        status = 'PROVISIONAL'
++    elif robust != 'ROBUST' or row.get('counter_case_risk') == 'HIGH':
++        status = 'COMBO_EXCLUDE'
++    else:
++        status = 'FINAL_BET'
++    if status in {'FINAL_BET','PROVISIONAL'}:
++        out['selection_reason']='가정 변화 통과 · ' + ('경기 데이터 검증 완료' if out['match_data_verified'] else '확인 필요: ' + out['match_data_missing'])
++    out['national_status'] = status
++    out['national_status_label'] = STATUS_LABELS[status]
++    out['scenario_candidate'] = out['v3_candidate'] = status in {'FINAL_BET','PROVISIONAL'}
++    out['scenario_parlay_eligible'] = out['v3_parlay_eligible'] = out['parlay_eligible'] = status == 'FINAL_BET'
++    out['model_validation_status'] = row.get('model_validation_status','장기 수익성 미검증')
++    return out
+diff --git a/prediction_store.py b/prediction_store.py
+index 5545364..a958e0a 100644
+--- a/prediction_store.py
++++ b/prediction_store.py
+@@ -20,7 +20,7 @@ import pandas as pd
+ from .core.asian import settle_total_under, settle_total_over, settle_home_handicap
+ from . import persistent_store
+ 
+-MODEL_VERSION = "3.4.14"
++MODEL_VERSION = "3.4.24-national-validation"
+ DEFAULT_PREDICTIONS = "data/prediction_snapshots.jsonl"
+ DEFAULT_SETTLED = "data/settled_predictions.jsonl"
+ DEFAULT_MARKET_OBSERVATIONS = "data/market_observations.jsonl"
+@@ -285,23 +285,34 @@ def record_frame(frame: pd.DataFrame, sport_key: str | None = None, sport_family
+     rows = []
+     keep = [
+         "event_id", "commence_time", "home_team", "away_team", "market", "selection", "point", "best_book", "best_odds", "books",
+-        "consensus_prob", "raw_independent_prob", "model_win_prob", "push_prob", "break_even", "edge_pp", "ev_roi", "point_ev_roi",
++        "consensus_prob", "raw_independent_prob", "raw_push_prob", "model_win_prob", "push_prob", "break_even", "edge_pp", "ev_roi", "point_ev_roi",
+         "conservative_ev_roi", "uncertainty_pp", "grade", "sanity", "stage", "data_quality", "sport_key", "home_lambda", "away_lambda",
+         "home_expected_runs", "away_expected_runs", "home_starter", "away_starter", "home_starter_expected_ip", "away_starter_expected_ip",
+         "home_starter_recent_bb_pct", "away_starter_recent_bb_pct", "home_starter_recent_k_pct", "away_starter_recent_k_pct",
+-        "home_starter_recent_kbb_pct", "away_starter_recent_kbb_pct", "home_bullpen_pitches_last3", "away_bullpen_pitches_last3",
++        "home_starter_recent_kbb_pct", "away_starter_recent_kbb_pct",
++        "home_starter_vs_opponent_games", "away_starter_vs_opponent_games", "home_starter_vs_opponent_ip", "away_starter_vs_opponent_ip",
++        "home_starter_vs_opponent_era", "away_starter_vs_opponent_era", "home_starter_vs_opponent_kbb_pct", "away_starter_vs_opponent_kbb_pct",
++        "home_starter_vs_opponent_team", "away_starter_vs_opponent_team",
++        "home_bullpen_pitches_last3", "away_bullpen_pitches_last3", "home_bullpen_relief_ip_last3", "away_bullpen_relief_ip_last3",
++        "home_bullpen_exact", "away_bullpen_exact", "home_recent_runs_for", "home_recent_runs_against", "away_recent_runs_for", "away_recent_runs_against",
++        "selection_status", "selection_reason", "selection_policy", "scenario_ev_min", "scenario_ev_max", "scenario_count", "scenario_candidate", "scenario_parlay_eligible",
++        "national_status", "national_status_label", "match_data_verified", "match_data_status", "match_data_missing", "model_validation_status", "data_checked_at", "injury_available",
+         "lineup_confirmed", "probable_lineup", "lineup_source", "lineup_status", "lineup_fallback_used", "home_probable_players", "away_probable_players", "fixture_id", "starter_confirmed", "reasoning_engine_id", "signal_coverage", "signal_summary", "missing_signals", "counter_case_risk",
+         "counter_case_summary", "v3_decision_status", "robust_positive_ratio", "robust_ev_min", "robust_ev_p10", "robust_ev_max",
+         "robust_prob_min", "robust_prob_max", "robust_scenario_count", "v3_candidate", "v3_parlay_eligible", "odds_region", "model_weight",
+-        "pre_adaptive_model_win_prob", "ensemble_prob_cond", "calibrated_prob_cond", "adaptive_delta_pp", "calibration_delta_pp",
+-        "calibration_n", "calibration_active", "calibration_reliability", "ensemble_disagreement_pp", "ensemble_gate", "ensemble_summary", "adaptive_gate",
++        "pre_adaptive_model_win_prob", "pre_calibration_prob_cond", "pre_calibration_win_prob", "ensemble_prob_cond", "calibrated_prob_cond", "adaptive_delta_pp", "calibration_delta_pp",
++        "calibration_n", "calibration_active", "calibration_reliability", "calibration_reason", "ensemble_disagreement_pp", "ensemble_gate", "ensemble_summary", "adaptive_gate",
++        "raw_market_gap_pp", "raw_market_gap_final_audit_pp", "final_market_gap_pp", "mlb_totals_divergence_threshold_pp",
++        "mlb_totals_calibration_evidence_sufficient", "mlb_totals_market_disagreement_gate", "recent_form_ensemble_suppressed",
++        "final_decision_recomputed", "final_downgrade_reason", "expected_runs_adjustments", "score_distribution_family",
++        "score_distribution_dispersion", "score_distribution_dispersion_source",
+         "ensemble_independent_prob", "ensemble_independent_weight", "ensemble_market_prob", "ensemble_market_weight",
+         "ensemble_recent_form_prob", "ensemble_recent_form_weight", "ensemble_context_model_prob", "ensemble_context_model_weight",
+-        "recent_form_used", "starter_recent_used", "velocity_used", "bullpen_used", "split_used", "weather_used",
++        "recent_form_used", "starter_recent_used", "starter_vs_opponent_used", "velocity_used", "bullpen_used", "split_used", "weather_used",
+         "plate_discipline_used", "statcast_quality_used", "statcast_fallback_used", "batted_ball_regression_used", "pitch_mix_used", "starter_workload_used",
+         "bullpen_exact_used", "lineup_platoon_exact_used", "pitch_matchup_used", "availability_news_used", "lineup_change_used",
+         "market_movement_used", "roof_used", "umpire_used", "travel_rest_used", "bvp_used", "bullpen_manager_used",
+-        "home_xg_for", "home_xg_against", "away_xg_for", "away_xg_against", "xg_source", "xg_fallback_used", "xg_fallback_attempted", "xg_fallback_source", "xg_sources_tried", "xg_partial", "xg_samples_home", "xg_samples_away", "xg_checked_at", "xg_collection_status", "xg_fallback_error",
++        "home_xg_for", "home_xg_against", "away_xg_for", "away_xg_against", "xg_source", "xg_fallback_used", "xg_fallback_attempted", "xg_fallback_source", "xg_sources_tried", "xg_partial", "xg_samples_home", "xg_samples_away", "xg_checked_at", "xg_collection_status", "xg_fallback_error", "xg_canonical_source", "xg_application_mode", "xg_blend_weight", "xg_target_home", "xg_target_away",
+         "home_big_chances", "away_big_chances", "home_rest_days", "away_rest_days",
+         "home_missing_players", "away_missing_players", "home_formation", "away_formation",
+         "home_recent_gf", "home_recent_ga", "away_recent_gf", "away_recent_ga", "home_elo", "away_elo",
+diff --git a/sports_ev_engine/VERSION b/sports_ev_engine/VERSION
+index 0d697e4..57ebffd 100644
+--- a/sports_ev_engine/VERSION
++++ b/sports_ev_engine/VERSION
+@@ -1 +1 @@
+-3.4.15
++3.4.24
+diff --git a/sports_ev_engine/VERSION.txt b/sports_ev_engine/VERSION.txt
+index 0d697e4..f592d19 100644
+--- a/sports_ev_engine/VERSION.txt
++++ b/sports_ev_engine/VERSION.txt
+@@ -1 +1 @@
+-3.4.15
++3.4.24-national-validation
+diff --git a/sports_ev_engine/__init__.py b/sports_ev_engine/__init__.py
+index c991a3c..9b9e51f 100644
+--- a/sports_ev_engine/__init__.py
++++ b/sports_ev_engine/__init__.py
+@@ -1 +1 @@
+-__version__ = "3.4.23-kbo-npb-data-repair"
++__version__ = "3.4.24-national-validation"
+diff --git a/sports_ev_engine/analysis_view.py b/sports_ev_engine/analysis_view.py
+index a619d64..faa88b6 100644
+--- a/sports_ev_engine/analysis_view.py
++++ b/sports_ev_engine/analysis_view.py
+@@ -30,12 +30,15 @@ def match_summary(frame):
+                 'EV(%)':round(value.point_ev_roi*100,2),
+                 '가정 최저 EV(%)':round(value.scenario_ev_min*100,2),
+                 '가정 최고 EV(%)':round(value.scenario_ev_max*100,2),
+-                '판정':'모델상 양의 EV' if value.point_ev_roi>0 else '현재 배당에서 양의 EV 없음',
++                '판정':value.get('national_status_label', '모델상 양의 EV' if value.point_ev_roi>0 else '현재 배당에서 양의 EV 없음'),
++                '경기 데이터 검증':value.get('match_data_status',''),
++                '미확인 데이터':value.get('match_data_missing',''),
++                '모델 성능 검증':value.get('model_validation_status',''),
+                 '라인업':'확인' if value.lineup_confirmed else '미확인',
+                 '조합':'참고 조합 가능' if value.scenario_parlay_eligible else '제외',
+                 '이유':humanize_policy_reason(value.selection_reason,value)}
+             if 'v3_decision_status' in rows.columns:
+-                item.update({'v3 판정':value.v3_decision_status,
++                item.update({'v3 판정':value.get('national_status_label',value.v3_decision_status),
+                              'Stress 양수 비율(%)':round(float(value.robust_positive_ratio)*100,1),
+                              'v3 최저 EV(%)':round(float(value.robust_ev_min)*100,2),
+                              '반증 위험':value.counter_case_risk,
+diff --git a/sports_ev_engine/app.py b/sports_ev_engine/app.py
+index 8682f7e..f1edd18 100644
+--- a/sports_ev_engine/app.py
++++ b/sports_ev_engine/app.py
+@@ -35,6 +35,7 @@ from sports_ev_engine.providers.mlb_statsapi import schedule as mlb_schedule, sc
+ from sports_ev_engine.providers.mlb_context import MLBContextProvider
+ from sports_ev_engine.market import consensus, clean_odds
+ from sports_ev_engine import auto_soccer as auto_soccer_provider
++from sports_ev_engine.models import elo as elo_provider
+ from sports_ev_engine.auto_soccer import analyze_event
+ from sports_ev_engine.competition_form import build_competition_pool
+ from sports_ev_engine import reasoning_engine as reasoning_provider
+@@ -42,10 +43,10 @@ from sports_ev_engine.national_soccer import is_senior_international, build_nati
+ from sports_ev_engine.international_discovery import (discover_api_football_fixtures, flatten_api_football_odds, append_only_missing_events, competition_rows, kst_target_dates)
+ from sports_ev_engine.core.parlay import optimize_parlays
+ from sports_ev_engine.review_policy import candidate_mask, review_mask
+-from sports_ev_engine.national_policy import reference_pairs
++from sports_ev_engine.national_policy import reference_pairs, finalize_national
+ from sports_ev_engine.analysis_view import match_summary
+ from sports_ev_engine.explanations import humanize_policy_reason
+-from sports_ev_engine.validation import validate
++from sports_ev_engine.validation import validate, validation_summary
+ from sports_ev_engine.providers.official_baseball import OfficialBaseballStats
+ from sports_ev_engine.official_baseball_model import analyze_official_event
+ from sports_ev_engine.providers.live_baseball import LiveBaseballContext
+@@ -77,20 +78,26 @@ from sports_ev_engine.feature_attribution import attribution
+ from sports_ev_engine.model_drift import drift_rows
+ from sports_ev_engine.bankroll import simulate as simulate_bankroll
+ 
+-st.set_page_config(page_title="Sports EV Engine v3.4.15",layout="wide")
+-st.title("Sports EV Engine v3.4.15")
+-st.caption("BUILD v3.4.15-xg-single-pass · 2026-09-29")
++st.set_page_config(page_title="Sports EV Engine v3.4.24",layout="wide")
++st.title("Sports EV Engine v3.4.24")
++st.caption("BUILD v3.4.24-national-validation · 2026-10-02")
+ if any(getattr(module,"PROVIDER_BUILD",None)!="3.0.0" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider,deep_soccer_provider)):
+     st.error("앱과 수집 파일 버전이 다릅니다. ZIP의 sports_ev_engine 폴더까지 전부 반영한 뒤 Streamlit 앱을 Reboot하세요.")
+     st.stop()
+-_PATCH_BUILD = "3.4.15-xg-single-pass"
+-_patch_modules=(auto_national_provider,deep_soccer_provider,free_provider,auto_soccer_provider,reasoning_provider,national_context_provider)
++if getattr(advanced_provider,"BASEBALL_ADVANCED_BUILD",None)!="3.4.23":
++    st.error("v3.4.23 야구 정밀수집 모듈이 구버전입니다. app.py와 sports_ev_engine/providers/baseball_advanced.py를 함께 덮어쓴 뒤 Reboot하세요.")
++    st.stop()
++if getattr(live_provider,"LIVE_BASEBALL_BUILD",None)!="3.4.20":
++    st.error("v3.4.22 KBO/NPB 라이브 수집 모듈이 구버전입니다. sports_ev_engine/providers/live_baseball.py까지 함께 덮어쓴 뒤 Reboot하세요.")
++    st.stop()
++_PATCH_BUILD = "3.4.24-national-validation"
++_patch_modules=(auto_national_provider,deep_soccer_provider,free_provider,auto_soccer_provider,reasoning_provider,national_context_provider,elo_provider)
+ _patch_mismatch=[getattr(m,"__name__",str(m)) for m in _patch_modules if getattr(m,"PATCH_BUILD",None)!=_PATCH_BUILD]
+ if _patch_mismatch:
+-    st.error("v3.4.15 핵심 xG 모듈이 섞여 있습니다: " + ", ".join(_patch_mismatch) + ". DEPLOY_ONLY ZIP의 app.py와 sports_ev_engine 폴더를 함께 덮어쓴 뒤 Reboot하세요.")
++    st.error("v3.4.24 핵심 축구 모델 모듈이 섞여 있습니다: " + ", ".join(_patch_mismatch) + ". DEPLOY_ONLY ZIP의 app.py와 sports_ev_engine 폴더를 함께 덮어쓴 뒤 Reboot하세요.")
+     st.stop()
+ FootballAccessError=football_provider.FootballAccessError
+-st.caption("분석 백엔드 v3.4.15 · measured xG single-pass + API-Football/ESPN/FotMob/SofaScore fallback")
++st.caption("분석 백엔드 v3.4.24 · opponent-strength robust form + adaptive measured-xG single-pass + API-Football/ESPN/FotMob/SofaScore fallback")
+ st.caption("독립 모델 → 정밀 컨텍스트 → 반증 검사 → 시장 캘리브레이션 → 27개 스트레스 시나리오 → EV/ROBUST 판정 → 기록·사후검증")
+ 
+ def secret(name):
+@@ -107,7 +114,7 @@ SUPABASE_KEY=secret("SUPABASE_SERVICE_ROLE_KEY") or secret("SUPABASE_KEY")
+ configure_persistence(SUPABASE_URL,SUPABASE_KEY)
+ BASEBALL_KEY=None
+ 
+-_BUILD_ID = "3.4.15-xg-single-pass"
++_BUILD_ID = "3.4.24-national-validation"
+ if st.session_state.get("_build_id") != _BUILD_ID:
+     for _k in [
+         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
+@@ -203,6 +210,8 @@ def render_final_decision_layer(frame, key_prefix, title="🧠 v3 FINAL Decision
+         f"**데이터 상태:** {summary['data_status']}",
+         f"**Model confidence:** {summary['confidence']}/100",
+     ]
++    if summary.get("match_data_status"):
++        summary_lines += [f"**경기 데이터 검증:** {summary['match_data_status']} · {summary['match_data_missing']}", f"**모델 성능 검증:** {summary['model_validation_status']}"]
+     st.markdown("  \n".join(summary_lines))
+     ratio=summary.get('robust_positive_ratio')
+     n=summary.get('robust_scenario_count',0)
+@@ -219,9 +228,10 @@ def render_final_decision_layer(frame, key_prefix, title="🧠 v3 FINAL Decision
+         if summary.get('missing_signals'):
+             st.write("MISSING:",summary['missing_signals'])
+         detail_cols=[c for c in [
+-            "kickoff_kst","display_pick","best_book","best_odds","raw_independent_prob","market_prob","model_win_prob",
+-            "robust_positive_ratio","robust_ev_min","robust_ev_p10","robust_ev_max",
+-            "counter_case_risk","counter_case_summary","sanity","uncertainty_pp","signal_coverage",
++            "kickoff_kst","display_pick","best_book","best_odds","raw_independent_prob","market_prob","consensus_prob",
++            "pre_calibration_prob_cond","calibrated_prob_cond","model_win_prob","raw_market_gap_final_audit_pp",
++            "calibration_n","calibration_active","calibration_reliability","robust_positive_ratio","robust_ev_min","robust_ev_p10","robust_ev_max",
++            "counter_case_risk","counter_case_summary","sanity","uncertainty_pp","signal_coverage","final_downgrade_reason",
+             "lineup_confirmed","stage","data_quality","home_lambda","away_lambda","home_expected_runs","away_expected_runs"
+         ] if c in g.columns]
+         detail=g[detail_cols].copy()
+@@ -551,7 +561,7 @@ with tabs[1]:
+                         st.session_state["national_discovery_status"]=[]
+                 elif auto_all:
+                     st.session_state["national_discovery_status"]=[]
+-                    competition_errors.append({"경기":"다중소스 A매치 자동발견","이유":"API_FOOTBALL_KEY 없음 — The Odds API 활성 국제대회만 조회"})
++                    st.session_state["national_sources"].append({"소스":"다중소스 A매치 자동발견","상태":"API_FOOTBALL_KEY 없음 — The Odds API 활성 국제대회만 조회"})
+ 
+                 raw=append_only_missing_events(raw_primary,raw_fallback)
+                 st.session_state["national_filter_label"]=(f"{national_match_date:%Y-%m-%d} KST" if national_date_only else str(national_scope))
+@@ -715,6 +725,8 @@ with tabs[1]:
+             with st.spinner("각 경기 이전 기록만으로 검증 중..."):
+                 report,_=validate(st.session_state["validation_records"],datetime.now(ZoneInfo("Asia/Seoul")).date(),national_recent,max_events=900)
+                 st.session_state["validation_report"]=report
++                (Path(__file__).parent/"data").mkdir(exist_ok=True)
++                (Path(__file__).parent/"data/validation_report.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
+         report=st.session_state.get("validation_report")
+         if report is None:
+             try:report=json.loads((Path(__file__).parent/'data/validation_report.json').read_text())
+@@ -727,6 +739,9 @@ with tabs[1]:
+             st.download_button("검증 보고서 다운로드",json.dumps(report,ensure_ascii=False,indent=2),file_name="validation_report.json")
+     nr=st.session_state.get("national_ranked")
+     if isinstance(nr,pd.DataFrame) and not nr.empty:
++        nr=nr.copy()
++        nr["model_validation_status"]=validation_summary(report)["status"]
++        nr=pd.DataFrame([finalize_national(r) for r in nr.to_dict("records")],index=nr.index)
+         if st.session_state.get("national_filter_label"):st.caption(f"분석 경기일: {st.session_state['national_filter_label']}")
+         render_final_decision_layer(nr,"national",title="🧠 v3 FINAL Decision Layer · A매치")
+         st.markdown("### 상세 진단 · 전체 경기 자동분석")
+@@ -734,11 +749,12 @@ with tabs[1]:
+         st.dataframe(match_summary(nr),hide_index=True)
+         st.info("분석 확률과 EV는 모델 추정입니다. v3 정밀 모드에서는 제공사가 실제 반환한 xG·확정 라인업·결장·선수 중요도·휴식일을 추가 반영하며, 확보하지 못한 신호는 MISSING으로 남깁니다.")
+         st.markdown("### A매치 후보 · 조합 상태")
++        st.write({"모델 성능 검증":validation_summary(report)})
+         passed_count=int(nr.scenario_candidate.sum())
+         ready_count=int(nr.scenario_parlay_eligible.sum())
+         pairs=reference_pairs(nr)
+         metrics=st.columns(4)
+-        for cell,label,value in zip(metrics,['가정 변화 통과 선택지','그중 라인업 확인','참고용 2폴 표시','성능 검증 완료'],[passed_count,ready_count,len(pairs),0]):
++        for cell,label,value in zip(metrics,['개별 후보','최종 후보','참고용 2폴 표시','성능 검증 완료 항목'],[passed_count,ready_count,len(pairs),validation_summary(report)['completed_count']]):
+             cell.metric(label,value)
+         st.caption("앞의 두 숫자는 경기 수가 아닌 선택지 수입니다. 개별 분석 → 가정 변화 통과 → 라인업 확인 → 서로 다른 경기의 참고용 2폴 순서입니다. 모델 성능 검증은 별도입니다.")
+         with st.expander("미검증은 어떻게 검증하나요?"):
+@@ -747,18 +763,17 @@ with tabs[1]:
+         st.markdown("#### 가정 변화에도 기대값이 양수인 개별 후보")
+         st.caption("양 팀 예상 득점을 각각 −10%·기준·+10%, 원모델 비중을 15%·25%·35%로 바꾼 27개 조합입니다. 이 범위는 실측 오차나 신뢰구간이 아닙니다. 기존 약 8.5%p 일괄 차감은 후보 선정에서 사용하지 않습니다.")
+         st.info("여기서 '가정 변화 통과'는 개별 픽의 강건성 시험 통과를 뜻합니다. 🏆 오늘의 베스트 조합에서는 여기에 데이터 신선도·반증위험·드리프트·라인업 단계 등 별도 안전 게이트를 한 번 더 적용하므로, 통과 픽이 '검토 후보'로는 보이더라도 실제 조합에서는 제외될 수 있습니다.")
+-        counts=nr.selection_status.value_counts()
+-        st.write({"분석 옵션":len(nr),"가정 변화 통과":int(counts.get('SCENARIO_PASS',0)),"가정에 민감":int(counts.get('SENSITIVE',0)),"괴리 검토":int(counts.get('REVIEW',0)),"기대값 미달":int(counts.get('PASS',0)),"자료 보류":int(counts.get('DATA_HOLD',0))})
+-        labels={'SCENARIO_PASS':'가정 변화 통과 · 미검증','SENSITIVE':'가정에 민감 · 조합 제외','REVIEW':'괴리 검토 · 조합 제외','PASS':'기대값 미달','DATA_HOLD':'자료 보류'}
++        counts=nr.national_status_label.value_counts()
++        st.write({"분석 옵션":len(nr),**{label:int(counts.get(label,0)) for label in ('최종 후보','잠정 후보','조합 제외','베팅 제외')}})
+         def policy_table(frame):
+-            cols=['selection_status','display_pick','best_book','best_odds','model_win_prob','break_even','edge_pp','point_ev_roi','scenario_win_min','scenario_win_max','scenario_ev_min','scenario_ev_max','lineup_confirmed','selection_reason']
++            cols=['selection_status','match_data_status','match_data_missing','model_validation_status','display_pick','best_book','best_odds','model_win_prob','break_even','edge_pp','point_ev_roi','scenario_win_min','scenario_win_max','scenario_ev_min','scenario_ev_max','lineup_confirmed','selection_reason']
+             shown=frame[[c for c in cols if c in frame]].copy()
+             for col in ['model_win_prob','break_even','point_ev_roi','scenario_win_min','scenario_win_max','scenario_ev_min','scenario_ev_max']:
+                 shown[col]=(shown[col]*100).round(2)
+-            shown['selection_status']=shown['selection_status'].map(labels)
++            shown['selection_status']=frame['national_status_label']
+             if 'selection_reason' in shown:
+                 shown['selection_reason']=[humanize_policy_reason(v, frame.iloc[i] if i < len(frame) else None) for i,v in enumerate(shown['selection_reason'].tolist())]
+-            return shown.rename(columns={'selection_status':'판정','display_pick':'경기/선택','model_win_prob':'기준 확률(%)','break_even':'BE(%)','edge_pp':'Edge(%p)','point_ev_roi':'기준 EV(%)','scenario_win_min':'가정 최저 확률(%)','scenario_win_max':'가정 최고 확률(%)','scenario_ev_min':'가정 최저 EV(%)','scenario_ev_max':'가정 최고 EV(%)','lineup_confirmed':'라인업 확인','selection_reason':'사람이 읽는 판정 이유'})
++            return shown.rename(columns={'match_data_status':'경기 데이터 검증','match_data_missing':'미확인 데이터','model_validation_status':'모델 성능 검증','selection_status':'판정','display_pick':'경기/선택','model_win_prob':'기준 확률(%)','break_even':'BE(%)','edge_pp':'Edge(%p)','point_ev_roi':'기준 EV(%)','scenario_win_min':'가정 최저 확률(%)','scenario_win_max':'가정 최고 확률(%)','scenario_ev_min':'가정 최저 EV(%)','scenario_ev_max':'가정 최고 EV(%)','lineup_confirmed':'라인업 확인','selection_reason':'사람이 읽는 판정 이유'})
+         passed=nr[nr.scenario_candidate].sort_values('scenario_ev_min',ascending=False)
+         if passed.empty:st.info("설정한 모든 가정에서 기대값이 양수인 후보는 없습니다. 아래 민감 후보와 제외 이유를 확인하세요.")
+         else:st.dataframe(policy_table(passed),hide_index=True)
+@@ -770,7 +785,7 @@ with tabs[1]:
+             st.dataframe(policy_table(nr),hide_index=True)
+         with st.expander("이전 버전 일괄 차감 결과 비교 · 현재 선정에는 미사용"):
+             st.dataframe(nr[['display_pick','legacy_grade','uncertainty_pp','legacy_conservative_ev_roi']],hide_index=True)
+-        st.caption("통과는 설정한 가정 안에서만 의미가 있습니다. xG·결장은 미수집이며 최종 시장 혼합 확률과 수익성은 검증되지 않았습니다. A/B/C 등급과 베팅금액 추천은 제공하지 않습니다.")
++        st.caption("통과는 설정한 가정 안에서만 의미가 있습니다. 경기 데이터 검증과 모델 성능 검증은 별도입니다. 모델 장기 수익성은 아래 검증 보고서의 범위에서 판단합니다. A/B/C 등급과 베팅금액 추천은 제공하지 않습니다.")
+         st.download_button("전체 분석 CSV 다운로드",nr.to_csv(index=False).encode("utf-8-sig"),file_name="national_analysis.csv")
+         st.markdown("#### 라인업 확인 + 가정 변화 통과: 참고용 2폴")
+         combos=pairs
+@@ -852,21 +867,21 @@ with tabs[2]:
+                             continue
+                         try:
+                             ctx["advanced"]=advanced.collect(
+-                                league,home,away,g.iloc[0]["commence_time"],ctx,recent_n=brecent
++                                league,home,away,g.iloc[0]["commence_time"],ctx,recent_n=brecent,team_stats=stats
+                             )
+                         except Exception as advanced_error:
+                             ctx["advanced"]={
+-                                "advanced_used":0,"advanced_total":7,"advanced_completeness":0.0,
++                                "advanced_used":0,"advanced_total":9,"advanced_completeness":0.0,
+                                 "extra_uncertainty_pp":2.1,
+                                 "statuses":{},"notes":[f"advanced collection failed: {type(advanced_error).__name__}: {advanced_error}"],
+                             }
+                         adv=ctx["advanced"]
+-                        if league=="NPB" and ctx.get("stage")=="FINAL":
+-                            both_starters=all((adv.get(side+"_starter_recent") or {}).get("kbb_pct") is not None for side in ("home","away"))
+-                            both_ops=all((adv.get(side+"_lineup_form") or {}).get("recent10_ops") is not None for side in ("home","away"))
+-                            if not (both_starters and both_ops):
+-                                ctx["stage"]="DATA PARTIAL"
+-                                adv.setdefault("notes",[]).append("선발 최근 K-BB% 또는 양 팀 최근 OPS 결측: FINAL 보류")
++                        # FINAL means the two announced starters and both 1-9 batting
++                        # orders are confirmed. Missing advanced signals no longer
++                        # demote a confirmed game; they are expressed through
++                        # advanced_completeness / uncertainty / candidate gates.
++                        if ctx.get("starter_confirmed") and ctx.get("lineup_confirmed"):
++                            ctx["stage"]="FINAL"
+                         live_rows.append({
+                             "경기":match_label_kst(home,away,g.iloc[0]["commence_time"]),
+                             "경기시간(KST)":format_kst(g.iloc[0]["commence_time"]),
+@@ -876,10 +891,12 @@ with tabs[2]:
+                             "선발투수 확정":bool(ctx.get("starter_confirmed")),
+                             "라인업":(ctx.get("lineup_label") or ("확정" if ctx.get("lineup_confirmed") else "원본 미수집")),
+                             "라인업 소스":ctx.get("lineup_source") or ctx.get("source") or "-",
+-                            "Advanced":f'{adv.get("advanced_used",0)}/{adv.get("advanced_total",7)}',
++                            "Advanced":f'{adv.get("advanced_used",0)}/{adv.get("advanced_total",9)}',
+                             "최근 타선":bool((adv.get("statuses") or {}).get("recent_form")),
+                             "선발 최근":bool((adv.get("statuses") or {}).get("starter_recent")),
++                            "선발 vs 상대팀":bool((adv.get("statuses") or {}).get("starter_vs_opponent")),
+                             "불펜":bool((adv.get("statuses") or {}).get("bullpen")),
++                            "불펜 실제 투구수":bool((adv.get("statuses") or {}).get("bullpen_exact")),
+                             "좌우":bool((adv.get("statuses") or {}).get("split")),
+                             "구속":bool((adv.get("statuses") or {}).get("velocity")),
+                             "날씨":bool((adv.get("statuses") or {}).get("weather")),
+@@ -889,6 +906,16 @@ with tabs[2]:
+                             "홈 선발 최근 K-BB%":(adv.get("home_starter_recent") or {}).get("kbb_pct"),
+                             "원정 선발 최근 경기":(adv.get("away_starter_recent") or {}).get("games"),
+                             "원정 선발 최근 K-BB%":(adv.get("away_starter_recent") or {}).get("kbb_pct"),
++                            "홈 선발 vs 원정 경기수":(adv.get("home_starter_vs_opponent") or {}).get("games"),
++                            "홈 선발 vs 원정 ERA":(adv.get("home_starter_vs_opponent") or {}).get("era"),
++                            "홈 선발 vs 원정 K-BB%":(adv.get("home_starter_vs_opponent") or {}).get("kbb_pct"),
++                            "원정 선발 vs 홈 경기수":(adv.get("away_starter_vs_opponent") or {}).get("games"),
++                            "원정 선발 vs 홈 ERA":(adv.get("away_starter_vs_opponent") or {}).get("era"),
++                            "원정 선발 vs 홈 K-BB%":(adv.get("away_starter_vs_opponent") or {}).get("kbb_pct"),
++                            "홈 최근 경기 득점":(adv.get("home_recent") or {}).get("runs_for_per_game"),
++                            "홈 최근 경기 실점":(adv.get("home_recent") or {}).get("runs_against_per_game"),
++                            "원정 최근 경기 득점":(adv.get("away_recent") or {}).get("runs_for_per_game"),
++                            "원정 최근 경기 실점":(adv.get("away_recent") or {}).get("runs_against_per_game"),
+                             "홈 팀 최근 OPS":(adv.get("home_lineup_form") or {}).get("recent10_ops"),
+                             "원정 팀 최근 OPS":(adv.get("away_lineup_form") or {}).get("recent10_ops"),
+                             "홈 OPS 근거 경기":(adv.get("home_lineup_form") or {}).get("ops_games"),
+@@ -899,6 +926,10 @@ with tabs[2]:
+                             "원정 최근 OBP 대리값":(adv.get("away_recent") or {}).get("obp_proxy"),
+                             "홈 불펜 최근 구원 이닝":(adv.get("home_bullpen") or {}).get("relief_ip_last3"),
+                             "원정 불펜 최근 구원 이닝":(adv.get("away_bullpen") or {}).get("relief_ip_last3"),
++                            "홈 불펜 최근 3일 투구수":(adv.get("home_bullpen") or {}).get("total_relief_pitches"),
++                            "원정 불펜 최근 3일 투구수":(adv.get("away_bullpen") or {}).get("total_relief_pitches"),
++                            "홈 불펜 수집":("실제 박스스코어" if (adv.get("home_bullpen") or {}).get("exact") else "일정 대리값"),
++                            "원정 불펜 수집":("실제 박스스코어" if (adv.get("away_bullpen") or {}).get("exact") else "일정 대리값"),
+                             "원정 1~9":", ".join(x.get("name","") for x in ctx.get("away_lineup",[])[:9]) or "-",
+                             "홈 1~9":", ".join(x.get("name","") for x in ctx.get("home_lineup",[])[:9]) or "-",
+                             "소스":ctx.get("source"),
+@@ -937,14 +968,14 @@ with tabs[2]:
+     if st.session_state.get("baseball_live_rows"):
+         st.markdown("### 선발 / 라인업 자동수집 상태")
+         st.dataframe(pd.DataFrame(st.session_state["baseball_live_rows"]),use_container_width=True,hide_index=True)
+-        st.caption("PRE-LINEUP → STARTER/LINEUP CONFIRMED → DATA PARTIAL 또는 FINAL. NPB는 양 선발 최근 K-BB%와 양 팀 최근 OPS까지 확인되어야 FINAL입니다.")
++        st.caption("PRE-LINEUP → STARTER/LINEUP CONFIRMED → FINAL. FINAL은 양 선발+양 팀 1~9 타순 확정만 뜻하며, 정밀지표 결측은 FINAL을 취소하지 않고 불확실성·완성도·후보 게이트에만 반영합니다.")
+ 
+     if "baseball_ranked" in st.session_state and not st.session_state["baseball_ranked"].empty:
+         rb=st.session_state["baseball_ranked"]
+         if st.session_state.get("baseball_filter_label"):st.caption(f"분석 경기일: {st.session_state['baseball_filter_label']}")
+         render_final_decision_layer(rb,"baseball",title="🧠 v3 FINAL Decision Layer · KBO/NPB")
+         st.markdown("### 상세 진단 · KBO/NPB 기준 +EV 전체")
+-        st.caption("기준 EV가 양수인 선택지는 REVIEW/라인업 미확정이어도 숨기지 않습니다. 실제 조합 가능 여부는 별도 안전게이트로 구분합니다.")
++        st.caption("기준 EV가 양수인 선택지는 REVIEW/라인업 미확정이어도 숨기지 않습니다. 라인업 대기 예비 후보는 미검증 관찰 목록이며, 실제 조합 가능 여부는 별도로 구분합니다. 시즌 득실점과 최근 득실점을 분리 표시합니다.")
+         vb=build_baseball_diagnostics(rb)
+         diag_counts=diagnostic_counts(rb)
+         if diag_counts["base_positive"]:
+@@ -958,10 +989,15 @@ with tabs[2]:
+             "grade","stage","data_quality","sanity","kickoff_kst","display_pick","best_book","best_odds","books",
+             "consensus_prob","raw_independent_prob","model_win_prob","push_prob","break_even",
+             "edge_pp","ev_roi","conservative_ev_roi","uncertainty_pp","starter_confirmed","lineup_confirmed",
+-            "advanced_completeness","advanced_used","recent_form_used","starter_recent_used",
++            "advanced_completeness","advanced_used","recent_form_used","starter_recent_used","starter_vs_opponent_used",
+             "bullpen_used","split_used","velocity_used","weather_used",
+             "away_starter","away_starter_era","away_starter_whip",
+             "home_starter","home_starter_era","home_starter_whip",
++            "away_starter_vs_opponent_games","away_starter_vs_opponent_ip","away_starter_vs_opponent_era","away_starter_vs_opponent_kbb_pct",
++            "home_starter_vs_opponent_games","home_starter_vs_opponent_ip","home_starter_vs_opponent_era","home_starter_vs_opponent_kbb_pct",
++            "away_bullpen_pitches_last3","home_bullpen_pitches_last3","away_bullpen_relief_ip_last3","home_bullpen_relief_ip_last3","away_bullpen_exact","home_bullpen_exact",
++            "away_season_rf","away_season_ra","home_season_rf","home_season_ra",
++            "away_recent_runs_for","away_recent_runs_against","home_recent_runs_for","home_recent_runs_against",
+             "away_recent_rf","away_recent_ra","home_recent_rf","home_recent_ra",
+             "away_expected_runs","home_expected_runs",
+         ]
+@@ -975,7 +1011,11 @@ with tabs[2]:
+             if c in vb:vb[c]=(vb[c]*100).round(1)
+         for c in ["robust_ev_p10","robust_ev_min"]:
+             if c in vb:vb[c]=(vb[c]*100).round(1)
+-        for c in ["edge_pp","uncertainty_pp","away_recent_rf","away_recent_ra","home_recent_rf","home_recent_ra","away_expected_runs","home_expected_runs","away_starter_era","home_starter_era","away_starter_whip","home_starter_whip"]:
++        for c in ["edge_pp","uncertainty_pp","away_season_rf","away_season_ra","home_season_rf","home_season_ra",
++            "away_recent_rf","away_recent_ra","home_recent_rf","home_recent_ra","away_expected_runs","home_expected_runs","away_starter_era","home_starter_era","away_starter_whip","home_starter_whip",
++            "away_starter_vs_opponent_ip","home_starter_vs_opponent_ip","away_starter_vs_opponent_era","home_starter_vs_opponent_era",
++            "away_starter_vs_opponent_kbb_pct","home_starter_vs_opponent_kbb_pct","away_bullpen_pitches_last3","home_bullpen_pitches_last3",
++            "away_bullpen_relief_ip_last3","home_bullpen_relief_ip_last3","away_recent_runs_for","away_recent_runs_against","home_recent_runs_for","home_recent_runs_against"]:
+             if c in vb: vb[c]=pd.to_numeric(vb[c],errors="coerce").round(2)
+         st.dataframe(vb.head(100),use_container_width=True,hide_index=True)
+         if vb.empty:
+@@ -986,7 +1026,7 @@ with tabs[2]:
+                 st.info(f"{len(rb)}개 배당 선택지를 계산했지만 현재 기준 EV가 양수인 선택지가 없습니다.")
+         elif diag_counts["parlay"] == 0:
+             st.warning("기준 +EV 선택지는 있지만 현재 실제 조합 안전게이트를 통과한 픽은 없습니다. 위 표의 '후보상태/조합 제외 이유'에서 원인을 확인하세요.")
+-        st.caption("NPB FINAL은 공식 선발·라인업과 양 선발 최근 K-BB%, 양 팀 최근 OPS가 확인된 상태입니다. 구속·좌우 스플릿 결측은 불확실성에 반영합니다.")
++        st.caption("양 선발의 상대팀 상대 기록은 소표본 축소 후 최대 ±4.5% 범위로만 득점 기대치에 반영합니다. KBO 불펜은 최근 3일 GameCenter 박스스코어 투구수가 있으면 실제값, 실패 시 일정 대리값을 절반 가중치로 사용합니다.")
+ 
+         st.markdown("### 야구 2~6폴")
+         sizesb=st.multiselect("야구 폴더 수",[2,3,4,5,6],default=[2,3],key="baseball_parlay_sizes")
+@@ -1011,7 +1051,7 @@ with tabs[2]:
+         if any(x.get("단계")=="시작시간 경과·사전분석 제외" for x in st.session_state.get("baseball_live_rows",[])):
+             st.info("시작 예정시간이 지난 경기는 위 표에서 오더 수집 상태만 확인합니다. 경기중 배당용 분석은 지원하지 않습니다.")
+         elif partial:
+-            st.warning(f"{partial}경기는 선발 최근 기록 또는 팀 OPS가 없어 DATA PARTIAL입니다. +EV 후보 판단을 보류하고 자동 다폴에서 제외했습니다.")
++            st.warning(f"{partial}경기는 선발/라인업이 아직 확정되지 않았거나 데이터 품질 게이트를 통과하지 못했습니다. 정밀지표 결측만으로 FINAL을 강등하지는 않습니다.")
+         elif st.session_state.get("baseball_failures"):
+             st.warning("분석 실패 경기 때문에 후보를 계산하지 못했습니다. 아래 경기별 실패 이유를 확인하세요.")
+         elif st.session_state.get("baseball_market") is not None and st.session_state["baseball_market"].empty:
+@@ -1220,7 +1260,8 @@ with tabs[5]:
+         cols=[c for c in [
+             "v3_decision_status","robust_positive_ratio","robust_ev_p10","robust_ev_min","counter_case_risk","signal_coverage",
+             "stage","data_quality","kickoff_kst","display_pick","best_book","best_odds","books","consensus_prob",
+-            "raw_independent_prob","model_win_prob","push_prob","break_even","edge_pp","ev_roi","conservative_ev_roi","uncertainty_pp",
++            "raw_independent_prob","pre_calibration_prob_cond","calibrated_prob_cond","model_win_prob","push_prob","break_even","edge_pp","ev_roi","conservative_ev_roi","uncertainty_pp",
++            "raw_market_gap_final_audit_pp","calibration_n","calibration_active","calibration_reliability","mlb_totals_market_disagreement_gate","final_downgrade_reason",
+             "home_starter","away_starter","home_starter_era","away_starter_era","home_starter_whip","away_starter_whip",
+             "home_recent_rf","home_recent_ra","away_recent_rf","away_recent_ra","home_expected_runs","away_expected_runs",
+             "recent_form_used","starter_recent_used","bullpen_used","split_used","velocity_used","weather_used",
+@@ -1235,6 +1276,44 @@ with tabs[5]:
+             if c in shown:shown[c]=(pd.to_numeric(shown[c],errors="coerce")*100).round(1)
+         st.dataframe(shown,use_container_width=True,hide_index=True)
+ 
++        st.markdown("### MLB 확률·예상득점 감사")
++        _audit_labels={i:str(mr.loc[i].get("display_pick") or mr.loc[i].get("selection") or i) for i in mr.index}
++        _audit_i=st.selectbox("감사할 MLB 옵션",list(mr.index),format_func=lambda i:_audit_labels[i],key="mlb_probability_audit_pick")
++        _audit=mr.loc[_audit_i]
++        _psh=float(pd.to_numeric(pd.Series([_audit.get("push_prob")]),errors="coerce").fillna(0).iloc[0])
++        _resolved=max(1e-9,1-_psh)
++        def _pct(v,conditional=False):
++            try:
++                x=float(v); x=x/_resolved if conditional else x
++                return f"{x*100:.2f}%"
++            except Exception:return "—"
++        _audit_table=pd.DataFrame([{
++            "raw independent":_pct(_audit.get("raw_independent_prob"),True),
++            "market consensus":_pct(_audit.get("consensus_prob")),
++            "pre-calibration":_pct(_audit.get("pre_calibration_prob_cond")),
++            "calibrated final":_pct(_audit.get("model_win_prob"),True),
++            "raw-market gap":f"{float(_audit.get('raw_market_gap_final_audit_pp')):+.2f}pp" if pd.notna(_audit.get('raw_market_gap_final_audit_pp')) else "—",
++            "calibration N":int(_audit.get("calibration_n") or 0),
++            "calibration reliability":f"{float(_audit.get('calibration_reliability') or 0)*100:.1f}%",
++            "final EV":f"{float(_audit.get('ev_roi') or 0)*100:+.2f}%",
++            "conservative EV":f"{float(_audit.get('conservative_ev_roi') or 0)*100:+.2f}%",
++            "robust positive":f"{float(_audit.get('robust_positive_ratio') or 0)*100:.1f}%",
++            "robust EV p10":f"{float(_audit.get('robust_ev_p10') or 0)*100:+.2f}%",
++            "robust EV min":f"{float(_audit.get('robust_ev_min') or 0)*100:+.2f}%",
++            "counter-case":str(_audit.get("counter_case_risk") or "—"),
++            "final decision":str(_audit.get("v3_decision_status") or "—"),
++            "downgrade reason":str(_audit.get("final_downgrade_reason") or "—"),
++        }])
++        st.dataframe(_audit_table,use_container_width=True,hide_index=True)
++        _adj=_audit.get("expected_runs_adjustments")
++        if isinstance(_adj,list) and _adj:
++            _adf=pd.DataFrame(_adj)
++            for c in ["home_before","home_after","home_delta","away_before","away_after","away_delta"]:
++                if c in _adf:_adf[c]=pd.to_numeric(_adf[c],errors="coerce").round(3)
++            st.dataframe(_adf.rename(columns={"factor":"expected-runs adjustment"}),use_container_width=True,hide_index=True)
++            st.caption("위 표는 SHAP이 아니라 실제 평균득점 계산 단계의 factor contribution / expected-runs adjustment입니다. 동일 최근 경기 정보가 totals 앙상블에서 다시 투표되지 않도록 MLB totals recent-form proxy는 억제합니다.")
++        st.caption(f"Score distribution: {_audit.get('score_distribution_family','—')} · dispersion {_audit.get('score_distribution_dispersion','—')} · {_audit.get('score_distribution_dispersion_source','—')}")
++
+         st.markdown("### MLB 2~6폴")
+         mlb_sizes=st.multiselect("MLB 폴더 수",[2,3,4,5,6],default=[2,3],key="mlb_parlay_sizes")
+         mlb_final_only=st.checkbox("MLB 자동 다폴은 FINAL 경기만 사용",value=True,key="mlb_final_only")
+@@ -1704,8 +1783,8 @@ with tabs[11]:
+     if _calrows:
+         st.dataframe(pd.DataFrame(_calrows),use_container_width=True,hide_index=True)
+     else:
+-        st.info("정산 표본이 쌓이면 종목×마켓별 calibration이 자동 학습됩니다. 40건 미만에서는 확률을 건드리지 않습니다.")
+-    st.caption("v3.3 최종확률 = 독립모델/시장/최근폼/정밀컨텍스트 앙상블 → 과거 정산표본 calibration. 한 번의 보정은 기존 확률 대비 최대 ±5%p로 제한됩니다.")
++        st.info("정산 표본이 쌓이면 종목×마켓별 calibration이 자동 학습됩니다. 일반 시장은 40건, MLB totals는 60건 미만에서 확률을 건드리지 않습니다.")
++    st.caption("v3.4.22 최종확률 = 독립모델/시장 앙상블 → 과거 정산표본 calibration → coherence 정규화 → ROBUST 재판정. MLB totals는 구조모델에 이미 반영된 최근 득점 proxy를 앙상블에서 중복 가중하지 않습니다.")
+ 
+     st.markdown("### 3) ⏱️ 데이터 품질·신선도")
+     _fresh=freshness_rows()
+diff --git a/sports_ev_engine/auto_national.py b/sports_ev_engine/auto_national.py
+index ef8ca0d..7161ec6 100644
+--- a/sports_ev_engine/auto_national.py
++++ b/sports_ev_engine/auto_national.py
+@@ -7,7 +7,7 @@ from functools import lru_cache
+ from .free_national import free_pool
+ from .models.soccer_auto import norm_name
+ PROVIDER_BUILD='3.0.0'
+-PATCH_BUILD = '3.4.16-robust-form-xg'
++PATCH_BUILD = '3.4.24-national-validation'
+ BASE='https://site.api.espn.com/apis/site/v2/sports/soccer'
+ LEAGUES=('uefa.nations','fifa.worldq.uefa','uefa.euro','uefa.euroq','fifa.friendly','fifa.world','concacaf.nations.league','fifa.worldq.concacaf','concacaf.gold','fifa.worldq.conmebol','conmebol.america','fifa.worldq.afc','afc.cup','fifa.worldq.caf','caf.nations','fifa.worldq.ofc')
+ 
+diff --git a/sports_ev_engine/auto_soccer.py b/sports_ev_engine/auto_soccer.py
+index 9d78ee6..0e2ff38 100644
+--- a/sports_ev_engine/auto_soccer.py
++++ b/sports_ev_engine/auto_soccer.py
+@@ -1,5 +1,5 @@
+ from __future__ import annotations
+-PATCH_BUILD = '3.4.16-robust-form-xg'
++PATCH_BUILD = '3.4.24-national-validation'
+ from .adaptive_model import apply_adaptive_layer
+ import math
+ from datetime import datetime, timezone
+@@ -8,12 +8,12 @@ import pandas as pd
+ from sports_ev_engine.models.soccer_auto import score_matrix, price_from_matrix, norm_name
+ from sports_ev_engine.models.elo import build_elo, opponent_adjusted_form
+ from sports_ev_engine.core.ev import analyze_bet
+-from sports_ev_engine.national_policy import scenario_matrices, assess, POLICY_ID
++from sports_ev_engine.national_policy import scenario_matrices, assess, POLICY_ID, finalize_national
+ from sports_ev_engine.free_national import adjust_lambdas
+ from sports_ev_engine.review_policy import review_reason, REVIEW_STATES
+ from sports_ev_engine.reasoning_engine import (
+     apply_soccer_context, build_counter_cases, scenario_assessment,
+-    soccer_scenarios, decision_fields,
++    soccer_scenarios, decision_fields, final_probability_assessment,
+ )
+ 
+ def _side_for_row(r):
+@@ -337,6 +337,8 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
+             "xg_target_away":deep_ctx.get("xg_target_away"),
+             "home_big_chances":deep_ctx.get("home_big_chances"),
+             "away_big_chances":deep_ctx.get("away_big_chances"),
++            "data_checked_at":deep_ctx.get("data_checked_at"),
++            "injury_available":deep_ctx.get("injury_available"),
+             "home_rest_days":deep_ctx.get("home_rest_days"),
+             "away_rest_days":deep_ctx.get("away_rest_days"),
+             "home_missing_players":deep_ctx.get("home_missing_players"),
+@@ -398,9 +400,8 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
+             d['v3_candidate']=False
+             d['v3_parlay_eligible']=False
+             d['parlay_eligible']=False
+-            d['scenario_candidate']=False
+             d['scenario_parlay_eligible']=False
+-            d['selection_status']='REVIEW'
++            # Preserve scenario evidence; downstream data validation prevents promotion.
+             d['selection_reason']='실측 xG 미수집/수집 오류: 자동후보 제외 · 원확률 검토 필요'
+             d['robust_reason']=d['selection_reason']
+         d['deep_context_attempted']=bool(deep_ctx.get('deep_context_attempted'))
+@@ -413,6 +414,39 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
+ 
+     _family="soccer_national" if international else "soccer_club"
+     _frame=apply_adaptive_layer(pd.DataFrame(rows),_family)
++    if international and not _frame.empty:
++        from .validation import load_validation_report, validation_summary
++        summary=validation_summary(load_validation_report())
++        revised=[]
++        for r in _frame.to_dict("records"):
++            # Adaptive calibration/coherence can move the displayed probability.
++            # Reprice every stress outcome on the same final probability scale.
++            delta=float(r['model_win_prob'])-float(r['pre_adaptive_model_win_prob'])
++            final_scenarios=[]
++            for w,p,label in soccer_scenarios(hl,al,lambda mm: price_from_matrix(mm,r["market"],_side_for_row(r),None if r["market"]=="h2h" else float(r["point"])),score_matrix):
++                for stress_weight in (.15,.25,.35):
++                    fw=stress_weight*w+(1-stress_weight)*float(r['consensus_prob'])*(1-p)
++                    final_scenarios.append((max(0.,min(1-p,fw+delta)),p,label))
++            forced=r.get('adaptive_gate') if r.get('adaptive_gate') not in {'','OK',None} else None
++            if r.get('sanity') in REVIEW_STATES: forced='원모델/시장 괴리 검토'
++            final=final_probability_assessment(
++                odds=float(r['best_odds']),final_win_prob=float(r['model_win_prob']),
++                final_push_prob=float(r['push_prob']),uncertainty_pp=0.,
++                scenario_probabilities=final_scenarios,data_ready=sample>=5,
++                lineup_required=True,lineup_confirmed=lineup_ok,forced_review_reason=forced)
++            r.update(final)
++            r['v3_decision_status']=final['robust_status']
++            scenario_evs=[float(r['best_odds'])*w+p-1 for w,p,_ in final_scenarios]
++            r['scenario_ev_min']=min(scenario_evs)
++            r['scenario_ev_max']=max(scenario_evs)
++            r['scenario_win_min']=min(w for w,p,_ in final_scenarios)
++            r['scenario_win_max']=max(w for w,p,_ in final_scenarios)
++            r['scenario_count']=len(final_scenarios)
++            if r['selection_status'] in {'SCENARIO_PASS','SENSITIVE','PASS'}:
++                r['selection_status']='PASS' if r['point_ev_roi']<=0 else 'SCENARIO_PASS' if r['scenario_ev_min']>0 else 'SENSITIVE'
++            r['model_validation_status']=summary['status']
++            revised.append(finalize_national(r))
++        _frame=pd.DataFrame(revised,index=_frame.index)
+     return _frame,{
+         "status":"ok","home":home,"away":away,
+         "home_form":hf,"away_form":af,
+diff --git a/sports_ev_engine/daily_combo.py b/sports_ev_engine/daily_combo.py
+index bd8c4e1..c618f33 100644
+--- a/sports_ev_engine/daily_combo.py
++++ b/sports_ev_engine/daily_combo.py
+@@ -205,6 +205,10 @@ def prepare_daily_candidates(frame: pd.DataFrame) -> pd.DataFrame:
+         _drift_map={}
+     rows=[]
+     for _,r in frame.iterrows():
++        national = str(r.get('sport_family') or '') == 'soccer_national' or str(r.get('national_status')) in {'FINAL_BET','PROVISIONAL','COMBO_EXCLUDE','NO_BET'}
++        if national:
++            from .national_policy import finalize_national
++            r=pd.Series(finalize_national(r))
+         status=str(r.get("v3_decision_status") or "").upper()
+         odds=_num(r.get("best_odds")); model=_num(r.get("model_win_prob"))
+         market=_num(r.get("consensus_prob"),_num(r.get("break_even")))
+@@ -268,6 +272,10 @@ def prepare_daily_candidates(frame: pd.DataFrame) -> pd.DataFrame:
+             combo_eligible=False
+             reasons.append("반증/데이터 위험 HIGH")
+ 
++        if national and r.get("national_status") != "FINAL_BET":
++            single_eligible=False; combo_eligible=False
++            reasons.append(str(r.get("national_status_label")) + " · " + str(r.get("match_data_missing") or ""))
++
+         maturity=stage_factor*risk_factor
+         adj_prob=market+maturity*(model-market)
+         adj_prob=max(0.001,min(max(0.001,1-push-0.001),adj_prob))
+@@ -300,7 +308,7 @@ def prepare_daily_candidates(frame: pd.DataFrame) -> pd.DataFrame:
+         kickoff=r.get("kickoff_kst")
+         if pd.isna(kickoff): kickoff=_kickoff_kst(r.get("commence_time"))
+         event_id=str(r.get("event_id") or f"{r.get('home_team','')}__{r.get('away_team','')}__{r.get('commence_time','')}")
+-        candidate_state="조합 가능" if combo_eligible else "단일 후보" if single_eligible else "검토 후보"
++        candidate_state=("최종 후보" if combo_eligible else "조합 제외") if national and r.get("national_status")=="FINAL_BET" else str(r.get("national_status_label")) if national else ("조합 가능" if combo_eligible else "단일 후보" if single_eligible else "검토 후보")
+         reason=" · ".join(dict.fromkeys(reasons)) if reasons else "강건성·리스크 게이트 통과"
+         rows.append({
+             **r.to_dict(),
+@@ -416,6 +424,6 @@ def combo_display_rows(combo: dict | None) -> pd.DataFrame:
+             "조합용 보수확률": f"{float(x.get('daily_adjusted_prob') or 0)*100:.1f}%",
+             "EV": f"{float(x.get('daily_original_ev') or 0)*100:+.1f}%",
+             "라인업": x.get("lineup_state", ""),
+-            "판정": x.get("v3_decision_status", ""),
++            "판정": x.get("national_status_label", x.get("v3_decision_status", "")),
+         })
+     return pd.DataFrame(rows)
+diff --git a/sports_ev_engine/deep_soccer_context.py b/sports_ev_engine/deep_soccer_context.py
+index aeeb86c..09834e3 100644
+--- a/sports_ev_engine/deep_soccer_context.py
++++ b/sports_ev_engine/deep_soccer_context.py
+@@ -12,7 +12,7 @@ import pandas as pd
+ from .models.soccer_auto import norm_name
+ 
+ PROVIDER_BUILD="3.0.0"
+-PATCH_BUILD = '3.4.16-robust-form-xg'
++PATCH_BUILD = '3.4.24-national-validation'
+ 
+ 
+ def _fixture_match(pool,home,away,kickoff_iso,tolerance_minutes=180):
+@@ -264,7 +264,7 @@ def collect_deep_context(api,pool,home,away,kickoff_iso,season=None,horizon_hour
+     now=pd.Timestamp.now(tz="UTC")
+     target_utc=target.tz_convert("UTC") if target.tzinfo else target.tz_localize("UTC")
+     hours=(target_utc-now).total_seconds()/3600
+-    ctx={"deep_context_attempted":True,"horizon_hours":horizon_hours,
++    ctx={"data_checked_at":now.isoformat(),"deep_context_attempted":True,"horizon_hours":horizon_hours,
+          "home_rest_days":_rest_days(pool,home,kickoff_iso),"away_rest_days":_rest_days(pool,away,kickoff_iso),
+          "schedule_source":"competition fixture history"}
+     if hours<0 or hours>horizon_hours:
+diff --git a/sports_ev_engine/final_view.py b/sports_ev_engine/final_view.py
+index e3ac2e0..34e6e8f 100644
+--- a/sports_ev_engine/final_view.py
++++ b/sports_ev_engine/final_view.py
+@@ -89,6 +89,8 @@ def _uncertainty_label(row: pd.Series) -> str:
+ 
+ 
+ def _status(row: pd.Series) -> str:
++    if isinstance(row.get("national_status_label"), str) and row.get("national_status_label"):
++        return str(row.get("national_status_label"))
+     status=str(row.get("v3_decision_status") or row.get("robust_status") or row.get("selection_status") or row.get("grade") or "").strip().upper()
+     return status or "미판정"
+ 
+@@ -258,6 +260,9 @@ def event_summary(frame: pd.DataFrame) -> dict:
+         "data_risk":_data_risk_text(focus),
+         "data_status":data_status(frame),
+         "confidence":confidence_score(frame,focus),
++        "match_data_status":focus.get("match_data_status",""),
++        "match_data_missing":focus.get("match_data_missing",""),
++        "model_validation_status":focus.get("model_validation_status",""),
+         "focus_status":_status(focus),
+         "focus_pick":_option_label(focus),
+         "robust_positive_ratio":_num(focus.get("robust_positive_ratio"), float("nan")),
+diff --git a/sports_ev_engine/free_national.py b/sports_ev_engine/free_national.py
+index 8045398..61f3d43 100644
+--- a/sports_ev_engine/free_national.py
++++ b/sports_ev_engine/free_national.py
+@@ -6,7 +6,7 @@ import requests
+ from sports_ev_engine.models.soccer_auto import norm_name
+ 
+ PROVIDER_BUILD = '3.0.0'
+-PATCH_BUILD = '3.4.16-robust-form-xg'
++PATCH_BUILD = '3.4.24-national-validation'
+ FREE_URL = 'https://raw.githubusercontent.com/martj42/international_results/master/results.csv'
+ HISTORY_COLUMNS = 'date,home_team,away_team,home_score,away_score,tournament,neutral,score_basis,home_xg,away_xg,source'.split(',')
+ CONTEXT_COLUMNS = 'kickoff,home_team,away_team,team,lineup_confirmed,lineup_players,missing_players,attack_change_pct,defense_change_pct,neutral,source,checked_at'.split(',')
+diff --git a/sports_ev_engine/models/elo.py b/sports_ev_engine/models/elo.py
+index 0481ef5..16cad7c 100644
+--- a/sports_ev_engine/models/elo.py
++++ b/sports_ev_engine/models/elo.py
+@@ -2,7 +2,7 @@ from __future__ import annotations
+ import math
+ from sports_ev_engine.models.soccer_auto import norm_name
+ 
+-PATCH_BUILD = "3.4.16-robust-form-xg"
++PATCH_BUILD = "3.4.24-national-validation"
+ 
+ 
+ def expected_score(rating_a, rating_b):
+diff --git a/sports_ev_engine/national_context_pipeline.py b/sports_ev_engine/national_context_pipeline.py
+index 40eb334..6c80bb5 100644
+--- a/sports_ev_engine/national_context_pipeline.py
++++ b/sports_ev_engine/national_context_pipeline.py
+@@ -5,7 +5,7 @@ independent: an API-Football error must never prevent ESPN/FotMob/SofaScore xG c
+ """
+ from __future__ import annotations
+ 
+-PATCH_BUILD = '3.4.16-robust-form-xg'
++PATCH_BUILD = '3.4.24-national-validation'
+ 
+ import pandas as pd
+ 
+diff --git a/sports_ev_engine/national_policy.py b/sports_ev_engine/national_policy.py
+index d23bdd3..f5e3c6c 100644
+--- a/sports_ev_engine/national_policy.py
++++ b/sports_ev_engine/national_policy.py
+@@ -3,7 +3,7 @@ import math
+ from itertools import product, combinations
+ from sports_ev_engine.models.soccer_auto import score_matrix, price_from_matrix
+ 
+-POLICY_ID = 'national-scenarios-v293'
++POLICY_ID = 'national-scenarios-v3.4.24'
+ 
+ def scenario_matrices(hl, al):
+     # Illustrative modelling assumptions, not estimated parameter errors.
+@@ -28,7 +28,7 @@ def assess(row, matrices, side, line):
+         status='REVIEW';reason='원모델-시장 괴리 15%p 초과: 기존 검토 기준 유지'
+     elif row['point_ev_roi']>0:
+         if low>0:
+-            status='SCENARIO_PASS';reason='설정한 27개 가정에서 모두 기대값 양수; 수익성 미검증'
++            status='SCENARIO_PASS';reason='설정한 27개 가정에서 모두 기대값 양수'
+         else:
+             status='SENSITIVE';reason='기준 기대값은 양수지만 가정 변화 시 0 이하; 조합 제외'
+     lineup=bool(row.get('lineup_confirmed',False))
+@@ -41,7 +41,9 @@ def assess(row, matrices, side, line):
+ 
+ def reference_pairs(frame):
+     """Experimental pairs of distinct events; independence is an assumption."""
+-    rows=frame[frame.scenario_parlay_eligible].sort_values('scenario_ev_min',ascending=False).head(20).to_dict('records')
++    eligible=frame.scenario_parlay_eligible.fillna(False).map(truth)
++    if 'national_status' in frame: eligible &= frame.national_status.eq('FINAL_BET')
++    rows=frame[eligible].sort_values('scenario_ev_min',ascending=False).head(20).to_dict('records')
+     out=[]
+     for a,b in combinations(rows,2):
+         if a['event_id']==b['event_id']:continue
+@@ -51,3 +53,63 @@ def reference_pairs(frame):
+             '가정 최저 EV(%)':round(100*((1+a['scenario_ev_min'])*(1+b['scenario_ev_min'])-1),2),
+             '조건':'독립 가정 · 적특/반적특 시 수령액 변동 · 실전 미검증'})
+     return sorted(out,key=lambda x:x['가정 최저 EV(%)'],reverse=True)[:5]
++
++
++STATUS_LABELS = {'FINAL_BET':'최종 후보', 'PROVISIONAL':'잠정 후보',
++                 'COMBO_EXCLUDE':'조합 제외', 'NO_BET':'베팅 제외'}
++
++def truth(value):
++    return str(value).strip().lower() in {'true','1','yes','confirmed','final'}
++
++def finite(value):
++    try: return math.isfinite(float(value))
++    except (TypeError, ValueError): return False
++
++def match_data_validation(row, now=None):
++    import pandas as pd
++    now = pd.Timestamp(now) if now is not None else pd.Timestamp.now(tz='UTC')
++    if now.tzinfo is None: now = now.tz_localize('UTC')
++    stamp = pd.to_datetime(row.get('data_checked_at'), utc=True, errors='coerce')
++    xg_stamp = pd.to_datetime(row.get('xg_checked_at'), utc=True, errors='coerce')
++    checks = {
++        '라인업': truth(row.get('lineup_confirmed')),
++        'xG': all(finite(row.get(k)) and float(row.get(k)) >= 0 for k in
++                   ('home_xg_for','home_xg_against','away_xg_for','away_xg_against'))
++              and all(finite(row.get(k)) and float(row.get(k)) >= 3 for k in ('xg_samples_home','xg_samples_away'))
++              and str(row.get('xg_collection_status','')).upper() == 'OK',
++        '결장': truth(row.get('injury_available')),
++        '휴식일': all(finite(row.get(k)) and float(row.get(k)) >= 0 for k in ('home_rest_days','away_rest_days')),
++        '신선도': all(not pd.isna(t) and 0 <= (now-t).total_seconds() <= 10800 for t in (stamp,xg_stamp)),
++    }
++    missing = [key for key,ok in checks.items() if not ok]
++    return {'match_data_verified':not missing, 'match_data_status':'검증 완료' if not missing else '확인 필요',
++            'match_data_missing':' · '.join(missing)}
++
++def finalize_national(row, now=None):
++    """One downstream policy after calibration; profitability never gates picks."""
++    out = dict(row)
++    out.update(match_data_validation(row, now))
++    ev = row.get('point_ev_roi', row.get('ev_roi'))
++    scenario = row.get('selection_status')
++    if scenario is None:
++        scenario='SCENARIO_PASS' if row.get('national_status') in {'FINAL_BET','PROVISIONAL'} else 'DATA_HOLD'
++    robust = row.get('v3_decision_status')
++    if not finite(ev) or float(ev) <= 0 or scenario in {'PASS','DATA_HOLD'}:
++        status = 'NO_BET'
++    elif (scenario in {'REVIEW','SENSITIVE'} or robust in {'FRAGILE','PASS','DATA_HOLD'}
++          or str(row.get('adaptive_gate','OK')) not in {'','OK'}):
++        status = 'COMBO_EXCLUDE'
++    elif not out['match_data_verified']:
++        status = 'PROVISIONAL'
++    elif robust != 'ROBUST' or row.get('counter_case_risk') == 'HIGH':
++        status = 'COMBO_EXCLUDE'
++    else:
++        status = 'FINAL_BET'
++    if status in {'FINAL_BET','PROVISIONAL'}:
++        out['selection_reason']='가정 변화 통과 · ' + ('경기 데이터 검증 완료' if out['match_data_verified'] else '확인 필요: ' + out['match_data_missing'])
++    out['national_status'] = status
++    out['national_status_label'] = STATUS_LABELS[status]
++    out['scenario_candidate'] = out['v3_candidate'] = status in {'FINAL_BET','PROVISIONAL'}
++    out['scenario_parlay_eligible'] = out['v3_parlay_eligible'] = out['parlay_eligible'] = status == 'FINAL_BET'
++    out['model_validation_status'] = row.get('model_validation_status','장기 수익성 미검증')
++    return out
+diff --git a/sports_ev_engine/prediction_store.py b/sports_ev_engine/prediction_store.py
+index 518efa7..a958e0a 100644
+--- a/sports_ev_engine/prediction_store.py
++++ b/sports_ev_engine/prediction_store.py
+@@ -20,7 +20,7 @@ import pandas as pd
+ from .core.asian import settle_total_under, settle_total_over, settle_home_handicap
+ from . import persistent_store
+ 
+-MODEL_VERSION = "3.4.22-mlb-totals-calibration"
++MODEL_VERSION = "3.4.24-national-validation"
+ DEFAULT_PREDICTIONS = "data/prediction_snapshots.jsonl"
+ DEFAULT_SETTLED = "data/settled_predictions.jsonl"
+ DEFAULT_MARKET_OBSERVATIONS = "data/market_observations.jsonl"
+@@ -295,6 +295,8 @@ def record_frame(frame: pd.DataFrame, sport_key: str | None = None, sport_family
+         "home_starter_vs_opponent_team", "away_starter_vs_opponent_team",
+         "home_bullpen_pitches_last3", "away_bullpen_pitches_last3", "home_bullpen_relief_ip_last3", "away_bullpen_relief_ip_last3",
+         "home_bullpen_exact", "away_bullpen_exact", "home_recent_runs_for", "home_recent_runs_against", "away_recent_runs_for", "away_recent_runs_against",
++        "selection_status", "selection_reason", "selection_policy", "scenario_ev_min", "scenario_ev_max", "scenario_count", "scenario_candidate", "scenario_parlay_eligible",
++        "national_status", "national_status_label", "match_data_verified", "match_data_status", "match_data_missing", "model_validation_status", "data_checked_at", "injury_available",
+         "lineup_confirmed", "probable_lineup", "lineup_source", "lineup_status", "lineup_fallback_used", "home_probable_players", "away_probable_players", "fixture_id", "starter_confirmed", "reasoning_engine_id", "signal_coverage", "signal_summary", "missing_signals", "counter_case_risk",
+         "counter_case_summary", "v3_decision_status", "robust_positive_ratio", "robust_ev_min", "robust_ev_p10", "robust_ev_max",
+         "robust_prob_min", "robust_prob_max", "robust_scenario_count", "v3_candidate", "v3_parlay_eligible", "odds_region", "model_weight",
+diff --git a/sports_ev_engine/reasoning_engine.py b/sports_ev_engine/reasoning_engine.py
+index 01f48f8..a65e4ac 100644
+--- a/sports_ev_engine/reasoning_engine.py
++++ b/sports_ev_engine/reasoning_engine.py
+@@ -9,14 +9,14 @@ Scenario ranges are stress tests, not statistical confidence intervals.
+ """
+ from __future__ import annotations
+ 
+-PATCH_BUILD = '3.4.16-robust-form-xg'
++PATCH_BUILD = '3.4.24-national-validation'
+ 
+ from dataclasses import dataclass, asdict
+ from itertools import product
+ import math
+ from typing import Callable, Iterable
+ 
+-ENGINE_ID = "chatgpt-style-v3.4.16-robust-form-xg"
++ENGINE_ID = "chatgpt-style-v3.4.24-national-validation"
+ 
+ 
+ def clamp(v, lo, hi):
+diff --git a/sports_ev_engine/sports_ev_engine/__init__.py b/sports_ev_engine/sports_ev_engine/__init__.py
+index 4cb9c26..9b9e51f 100644
+--- a/sports_ev_engine/sports_ev_engine/__init__.py
++++ b/sports_ev_engine/sports_ev_engine/__init__.py
+@@ -1 +1 @@
+-__version__ = "3.4.12"
++__version__ = "3.4.24-national-validation"
+diff --git a/sports_ev_engine/sports_ev_engine/analysis_view.py b/sports_ev_engine/sports_ev_engine/analysis_view.py
+index a619d64..faa88b6 100644
+--- a/sports_ev_engine/sports_ev_engine/analysis_view.py
++++ b/sports_ev_engine/sports_ev_engine/analysis_view.py
+@@ -30,12 +30,15 @@ def match_summary(frame):
+                 'EV(%)':round(value.point_ev_roi*100,2),
+                 '가정 최저 EV(%)':round(value.scenario_ev_min*100,2),
+                 '가정 최고 EV(%)':round(value.scenario_ev_max*100,2),
+-                '판정':'모델상 양의 EV' if value.point_ev_roi>0 else '현재 배당에서 양의 EV 없음',
++                '판정':value.get('national_status_label', '모델상 양의 EV' if value.point_ev_roi>0 else '현재 배당에서 양의 EV 없음'),
++                '경기 데이터 검증':value.get('match_data_status',''),
++                '미확인 데이터':value.get('match_data_missing',''),
++                '모델 성능 검증':value.get('model_validation_status',''),
+                 '라인업':'확인' if value.lineup_confirmed else '미확인',
+                 '조합':'참고 조합 가능' if value.scenario_parlay_eligible else '제외',
+                 '이유':humanize_policy_reason(value.selection_reason,value)}
+             if 'v3_decision_status' in rows.columns:
+-                item.update({'v3 판정':value.v3_decision_status,
++                item.update({'v3 판정':value.get('national_status_label',value.v3_decision_status),
+                              'Stress 양수 비율(%)':round(float(value.robust_positive_ratio)*100,1),
+                              'v3 최저 EV(%)':round(float(value.robust_ev_min)*100,2),
+                              '반증 위험':value.counter_case_risk,
+diff --git a/sports_ev_engine/sports_ev_engine/auto_soccer.py b/sports_ev_engine/sports_ev_engine/auto_soccer.py
+index 4f79818..0e2ff38 100644
+--- a/sports_ev_engine/sports_ev_engine/auto_soccer.py
++++ b/sports_ev_engine/sports_ev_engine/auto_soccer.py
+@@ -1,5 +1,5 @@
+ from __future__ import annotations
+-PATCH_BUILD = '3.4.15-xg-single-pass'
++PATCH_BUILD = '3.4.24-national-validation'
+ from .adaptive_model import apply_adaptive_layer
+ import math
+ from datetime import datetime, timezone
+@@ -8,12 +8,12 @@ import pandas as pd
+ from sports_ev_engine.models.soccer_auto import score_matrix, price_from_matrix, norm_name
+ from sports_ev_engine.models.elo import build_elo, opponent_adjusted_form
+ from sports_ev_engine.core.ev import analyze_bet
+-from sports_ev_engine.national_policy import scenario_matrices, assess, POLICY_ID
++from sports_ev_engine.national_policy import scenario_matrices, assess, POLICY_ID, finalize_national
+ from sports_ev_engine.free_national import adjust_lambdas
+ from sports_ev_engine.review_policy import review_reason, REVIEW_STATES
+ from sports_ev_engine.reasoning_engine import (
+     apply_soccer_context, build_counter_cases, scenario_assessment,
+-    soccer_scenarios, decision_fields,
++    soccer_scenarios, decision_fields, final_probability_assessment,
+ )
+ 
+ def _side_for_row(r):
+@@ -141,8 +141,8 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
+     fixtures=[f for f in competition_pool.get("fixtures",[]) if f.get("fixture",{}).get("status",{}).get("short")=="FT" and 0<int(f.get("fixture",{}).get("timestamp") or 0)<cutoff_ts]
+     ratings=build_elo(fixtures, home_adv=20.0 if international else 55.0)
+ 
+-    hf=opponent_adjusted_form(fixtures,home_lookup,ratings,cutoff_ts,recent_n=recent_n)
+-    af=opponent_adjusted_form(fixtures,away_lookup,ratings,cutoff_ts,recent_n=recent_n)
++    hf=opponent_adjusted_form(fixtures,home_lookup,ratings,cutoff_ts,recent_n=recent_n,international=international)
++    af=opponent_adjusted_form(fixtures,away_lookup,ratings,cutoff_ts,recent_n=recent_n,international=international)
+ 
+     if not hf or not af:
+         missing=[]
+@@ -159,7 +159,7 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
+     neutral=bool(ctx and all(c.get("neutral") for c in ctx.values()))
+     hl,al=_build_lambdas(hf,af,he,ae,home_adv=(0.0 if neutral or competition_pool.get("venue_unknown") else 20.0) if international else 55.0)
+ 
+-    # v3.4.15 canonical xG pipeline.  Establish the one authoritative xG quartet
++    # v3.4.16 canonical xG pipeline.  Establish the one authoritative xG quartet
+     # *before* any lambda adjustment, then disable the legacy xg_form adjustment.
+     deep_ctx=_canonical_xg_context(
+         competition_pool,
+@@ -276,6 +276,16 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
+             "home_recent_ga":hf["ga"],
+             "away_recent_gf":af["gf"],
+             "away_recent_ga":af["ga"],
++            "home_raw_recent_gf":hf.get("raw_gf"),
++            "home_raw_recent_ga":hf.get("raw_ga"),
++            "away_raw_recent_gf":af.get("raw_gf"),
++            "away_raw_recent_ga":af.get("raw_ga"),
++            "home_robust_recent_gf":hf.get("robust_gf"),
++            "away_robust_recent_gf":af.get("robust_gf"),
++            "home_blowout_matches_shrunk":hf.get("blowout_matches_shrunk",0),
++            "away_blowout_matches_shrunk":af.get("blowout_matches_shrunk",0),
++            "home_form_mode":hf.get("form_mode"),
++            "away_form_mode":af.get("form_mode"),
+             "home_form_matches":hf["matches"],
+             "away_form_matches":af["matches"],
+             "uncertainty_pp":base_unc,
+@@ -317,10 +327,18 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
+             "xg_canonical_source":deep_ctx.get("xg_canonical_source"),
+             "xg_application_mode":deep_ctx.get("xg_application_mode"),
+             "xg_blend_weight":deep_ctx.get("xg_blend_weight"),
++            "xg_base_total":deep_ctx.get("xg_base_total"),
++            "xg_raw_goal_form_total":deep_ctx.get("xg_raw_goal_form_total"),
++            "xg_target_total":deep_ctx.get("xg_target_total"),
++            "xg_divergence_reference_total":deep_ctx.get("xg_divergence_reference_total"),
++            "xg_goal_model_divergence_pct":deep_ctx.get("xg_goal_model_divergence_pct"),
++            "xg_weight_boost":deep_ctx.get("xg_weight_boost"),
+             "xg_target_home":deep_ctx.get("xg_target_home"),
+             "xg_target_away":deep_ctx.get("xg_target_away"),
+             "home_big_chances":deep_ctx.get("home_big_chances"),
+             "away_big_chances":deep_ctx.get("away_big_chances"),
++            "data_checked_at":deep_ctx.get("data_checked_at"),
++            "injury_available":deep_ctx.get("injury_available"),
+             "home_rest_days":deep_ctx.get("home_rest_days"),
+             "away_rest_days":deep_ctx.get("away_rest_days"),
+             "home_missing_players":deep_ctx.get("home_missing_players"),
+@@ -382,9 +400,8 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
+             d['v3_candidate']=False
+             d['v3_parlay_eligible']=False
+             d['parlay_eligible']=False
+-            d['scenario_candidate']=False
+             d['scenario_parlay_eligible']=False
+-            d['selection_status']='REVIEW'
++            # Preserve scenario evidence; downstream data validation prevents promotion.
+             d['selection_reason']='실측 xG 미수집/수집 오류: 자동후보 제외 · 원확률 검토 필요'
+             d['robust_reason']=d['selection_reason']
+         d['deep_context_attempted']=bool(deep_ctx.get('deep_context_attempted'))
+@@ -397,6 +414,39 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
+ 
+     _family="soccer_national" if international else "soccer_club"
+     _frame=apply_adaptive_layer(pd.DataFrame(rows),_family)
++    if international and not _frame.empty:
++        from .validation import load_validation_report, validation_summary
++        summary=validation_summary(load_validation_report())
++        revised=[]
++        for r in _frame.to_dict("records"):
++            # Adaptive calibration/coherence can move the displayed probability.
++            # Reprice every stress outcome on the same final probability scale.
++            delta=float(r['model_win_prob'])-float(r['pre_adaptive_model_win_prob'])
++            final_scenarios=[]
++            for w,p,label in soccer_scenarios(hl,al,lambda mm: price_from_matrix(mm,r["market"],_side_for_row(r),None if r["market"]=="h2h" else float(r["point"])),score_matrix):
++                for stress_weight in (.15,.25,.35):
++                    fw=stress_weight*w+(1-stress_weight)*float(r['consensus_prob'])*(1-p)
++                    final_scenarios.append((max(0.,min(1-p,fw+delta)),p,label))
++            forced=r.get('adaptive_gate') if r.get('adaptive_gate') not in {'','OK',None} else None
++            if r.get('sanity') in REVIEW_STATES: forced='원모델/시장 괴리 검토'
++            final=final_probability_assessment(
++                odds=float(r['best_odds']),final_win_prob=float(r['model_win_prob']),
++                final_push_prob=float(r['push_prob']),uncertainty_pp=0.,
++                scenario_probabilities=final_scenarios,data_ready=sample>=5,
++                lineup_required=True,lineup_confirmed=lineup_ok,forced_review_reason=forced)
++            r.update(final)
++            r['v3_decision_status']=final['robust_status']
++            scenario_evs=[float(r['best_odds'])*w+p-1 for w,p,_ in final_scenarios]
++            r['scenario_ev_min']=min(scenario_evs)
++            r['scenario_ev_max']=max(scenario_evs)
++            r['scenario_win_min']=min(w for w,p,_ in final_scenarios)
++            r['scenario_win_max']=max(w for w,p,_ in final_scenarios)
++            r['scenario_count']=len(final_scenarios)
++            if r['selection_status'] in {'SCENARIO_PASS','SENSITIVE','PASS'}:
++                r['selection_status']='PASS' if r['point_ev_roi']<=0 else 'SCENARIO_PASS' if r['scenario_ev_min']>0 else 'SENSITIVE'
++            r['model_validation_status']=summary['status']
++            revised.append(finalize_national(r))
++        _frame=pd.DataFrame(revised,index=_frame.index)
+     return _frame,{
+         "status":"ok","home":home,"away":away,
+         "home_form":hf,"away_form":af,
+diff --git a/sports_ev_engine/sports_ev_engine/daily_combo.py b/sports_ev_engine/sports_ev_engine/daily_combo.py
+index bd8c4e1..c618f33 100644
+--- a/sports_ev_engine/sports_ev_engine/daily_combo.py
++++ b/sports_ev_engine/sports_ev_engine/daily_combo.py
+@@ -205,6 +205,10 @@ def prepare_daily_candidates(frame: pd.DataFrame) -> pd.DataFrame:
+         _drift_map={}
+     rows=[]
+     for _,r in frame.iterrows():
++        national = str(r.get('sport_family') or '') == 'soccer_national' or str(r.get('national_status')) in {'FINAL_BET','PROVISIONAL','COMBO_EXCLUDE','NO_BET'}
++        if national:
++            from .national_policy import finalize_national
++            r=pd.Series(finalize_national(r))
+         status=str(r.get("v3_decision_status") or "").upper()
+         odds=_num(r.get("best_odds")); model=_num(r.get("model_win_prob"))
+         market=_num(r.get("consensus_prob"),_num(r.get("break_even")))
+@@ -268,6 +272,10 @@ def prepare_daily_candidates(frame: pd.DataFrame) -> pd.DataFrame:
+             combo_eligible=False
+             reasons.append("반증/데이터 위험 HIGH")
+ 
++        if national and r.get("national_status") != "FINAL_BET":
++            single_eligible=False; combo_eligible=False
++            reasons.append(str(r.get("national_status_label")) + " · " + str(r.get("match_data_missing") or ""))
++
+         maturity=stage_factor*risk_factor
+         adj_prob=market+maturity*(model-market)
+         adj_prob=max(0.001,min(max(0.001,1-push-0.001),adj_prob))
+@@ -300,7 +308,7 @@ def prepare_daily_candidates(frame: pd.DataFrame) -> pd.DataFrame:
+         kickoff=r.get("kickoff_kst")
+         if pd.isna(kickoff): kickoff=_kickoff_kst(r.get("commence_time"))
+         event_id=str(r.get("event_id") or f"{r.get('home_team','')}__{r.get('away_team','')}__{r.get('commence_time','')}")
+-        candidate_state="조합 가능" if combo_eligible else "단일 후보" if single_eligible else "검토 후보"
++        candidate_state=("최종 후보" if combo_eligible else "조합 제외") if national and r.get("national_status")=="FINAL_BET" else str(r.get("national_status_label")) if national else ("조합 가능" if combo_eligible else "단일 후보" if single_eligible else "검토 후보")
+         reason=" · ".join(dict.fromkeys(reasons)) if reasons else "강건성·리스크 게이트 통과"
+         rows.append({
+             **r.to_dict(),
+@@ -416,6 +424,6 @@ def combo_display_rows(combo: dict | None) -> pd.DataFrame:
+             "조합용 보수확률": f"{float(x.get('daily_adjusted_prob') or 0)*100:.1f}%",
+             "EV": f"{float(x.get('daily_original_ev') or 0)*100:+.1f}%",
+             "라인업": x.get("lineup_state", ""),
+-            "판정": x.get("v3_decision_status", ""),
++            "판정": x.get("national_status_label", x.get("v3_decision_status", "")),
+         })
+     return pd.DataFrame(rows)
+diff --git a/sports_ev_engine/sports_ev_engine/deep_soccer_context.py b/sports_ev_engine/sports_ev_engine/deep_soccer_context.py
+index 7916a29..09834e3 100644
+--- a/sports_ev_engine/sports_ev_engine/deep_soccer_context.py
++++ b/sports_ev_engine/sports_ev_engine/deep_soccer_context.py
+@@ -12,7 +12,7 @@ import pandas as pd
+ from .models.soccer_auto import norm_name
+ 
+ PROVIDER_BUILD="3.0.0"
+-PATCH_BUILD = '3.4.15-xg-single-pass'
++PATCH_BUILD = '3.4.24-national-validation'
+ 
+ 
+ def _fixture_match(pool,home,away,kickoff_iso,tolerance_minutes=180):
+@@ -264,7 +264,7 @@ def collect_deep_context(api,pool,home,away,kickoff_iso,season=None,horizon_hour
+     now=pd.Timestamp.now(tz="UTC")
+     target_utc=target.tz_convert("UTC") if target.tzinfo else target.tz_localize("UTC")
+     hours=(target_utc-now).total_seconds()/3600
+-    ctx={"deep_context_attempted":True,"horizon_hours":horizon_hours,
++    ctx={"data_checked_at":now.isoformat(),"deep_context_attempted":True,"horizon_hours":horizon_hours,
+          "home_rest_days":_rest_days(pool,home,kickoff_iso),"away_rest_days":_rest_days(pool,away,kickoff_iso),
+          "schedule_source":"competition fixture history"}
+     if hours<0 or hours>horizon_hours:
+diff --git a/sports_ev_engine/sports_ev_engine/final_view.py b/sports_ev_engine/sports_ev_engine/final_view.py
+index e3ac2e0..34e6e8f 100644
+--- a/sports_ev_engine/sports_ev_engine/final_view.py
++++ b/sports_ev_engine/sports_ev_engine/final_view.py
+@@ -89,6 +89,8 @@ def _uncertainty_label(row: pd.Series) -> str:
+ 
+ 
+ def _status(row: pd.Series) -> str:
++    if isinstance(row.get("national_status_label"), str) and row.get("national_status_label"):
++        return str(row.get("national_status_label"))
+     status=str(row.get("v3_decision_status") or row.get("robust_status") or row.get("selection_status") or row.get("grade") or "").strip().upper()
+     return status or "미판정"
+ 
+@@ -258,6 +260,9 @@ def event_summary(frame: pd.DataFrame) -> dict:
+         "data_risk":_data_risk_text(focus),
+         "data_status":data_status(frame),
+         "confidence":confidence_score(frame,focus),
++        "match_data_status":focus.get("match_data_status",""),
++        "match_data_missing":focus.get("match_data_missing",""),
++        "model_validation_status":focus.get("model_validation_status",""),
+         "focus_status":_status(focus),
+         "focus_pick":_option_label(focus),
+         "robust_positive_ratio":_num(focus.get("robust_positive_ratio"), float("nan")),
+diff --git a/sports_ev_engine/sports_ev_engine/national_policy.py b/sports_ev_engine/sports_ev_engine/national_policy.py
+index d23bdd3..f5e3c6c 100644
+--- a/sports_ev_engine/sports_ev_engine/national_policy.py
++++ b/sports_ev_engine/sports_ev_engine/national_policy.py
+@@ -3,7 +3,7 @@ import math
+ from itertools import product, combinations
+ from sports_ev_engine.models.soccer_auto import score_matrix, price_from_matrix
+ 
+-POLICY_ID = 'national-scenarios-v293'
++POLICY_ID = 'national-scenarios-v3.4.24'
+ 
+ def scenario_matrices(hl, al):
+     # Illustrative modelling assumptions, not estimated parameter errors.
+@@ -28,7 +28,7 @@ def assess(row, matrices, side, line):
+         status='REVIEW';reason='원모델-시장 괴리 15%p 초과: 기존 검토 기준 유지'
+     elif row['point_ev_roi']>0:
+         if low>0:
+-            status='SCENARIO_PASS';reason='설정한 27개 가정에서 모두 기대값 양수; 수익성 미검증'
++            status='SCENARIO_PASS';reason='설정한 27개 가정에서 모두 기대값 양수'
+         else:
+             status='SENSITIVE';reason='기준 기대값은 양수지만 가정 변화 시 0 이하; 조합 제외'
+     lineup=bool(row.get('lineup_confirmed',False))
+@@ -41,7 +41,9 @@ def assess(row, matrices, side, line):
+ 
+ def reference_pairs(frame):
+     """Experimental pairs of distinct events; independence is an assumption."""
+-    rows=frame[frame.scenario_parlay_eligible].sort_values('scenario_ev_min',ascending=False).head(20).to_dict('records')
++    eligible=frame.scenario_parlay_eligible.fillna(False).map(truth)
++    if 'national_status' in frame: eligible &= frame.national_status.eq('FINAL_BET')
++    rows=frame[eligible].sort_values('scenario_ev_min',ascending=False).head(20).to_dict('records')
+     out=[]
+     for a,b in combinations(rows,2):
+         if a['event_id']==b['event_id']:continue
+@@ -51,3 +53,63 @@ def reference_pairs(frame):
+             '가정 최저 EV(%)':round(100*((1+a['scenario_ev_min'])*(1+b['scenario_ev_min'])-1),2),
+             '조건':'독립 가정 · 적특/반적특 시 수령액 변동 · 실전 미검증'})
+     return sorted(out,key=lambda x:x['가정 최저 EV(%)'],reverse=True)[:5]
++
++
++STATUS_LABELS = {'FINAL_BET':'최종 후보', 'PROVISIONAL':'잠정 후보',
++                 'COMBO_EXCLUDE':'조합 제외', 'NO_BET':'베팅 제외'}
++
++def truth(value):
++    return str(value).strip().lower() in {'true','1','yes','confirmed','final'}
++
++def finite(value):
++    try: return math.isfinite(float(value))
++    except (TypeError, ValueError): return False
++
++def match_data_validation(row, now=None):
++    import pandas as pd
++    now = pd.Timestamp(now) if now is not None else pd.Timestamp.now(tz='UTC')
++    if now.tzinfo is None: now = now.tz_localize('UTC')
++    stamp = pd.to_datetime(row.get('data_checked_at'), utc=True, errors='coerce')
++    xg_stamp = pd.to_datetime(row.get('xg_checked_at'), utc=True, errors='coerce')
++    checks = {
++        '라인업': truth(row.get('lineup_confirmed')),
++        'xG': all(finite(row.get(k)) and float(row.get(k)) >= 0 for k in
++                   ('home_xg_for','home_xg_against','away_xg_for','away_xg_against'))
++              and all(finite(row.get(k)) and float(row.get(k)) >= 3 for k in ('xg_samples_home','xg_samples_away'))
++              and str(row.get('xg_collection_status','')).upper() == 'OK',
++        '결장': truth(row.get('injury_available')),
++        '휴식일': all(finite(row.get(k)) and float(row.get(k)) >= 0 for k in ('home_rest_days','away_rest_days')),
++        '신선도': all(not pd.isna(t) and 0 <= (now-t).total_seconds() <= 10800 for t in (stamp,xg_stamp)),
++    }
++    missing = [key for key,ok in checks.items() if not ok]
++    return {'match_data_verified':not missing, 'match_data_status':'검증 완료' if not missing else '확인 필요',
++            'match_data_missing':' · '.join(missing)}
++
++def finalize_national(row, now=None):
++    """One downstream policy after calibration; profitability never gates picks."""
++    out = dict(row)
++    out.update(match_data_validation(row, now))
++    ev = row.get('point_ev_roi', row.get('ev_roi'))
++    scenario = row.get('selection_status')
++    if scenario is None:
++        scenario='SCENARIO_PASS' if row.get('national_status') in {'FINAL_BET','PROVISIONAL'} else 'DATA_HOLD'
++    robust = row.get('v3_decision_status')
++    if not finite(ev) or float(ev) <= 0 or scenario in {'PASS','DATA_HOLD'}:
++        status = 'NO_BET'
++    elif (scenario in {'REVIEW','SENSITIVE'} or robust in {'FRAGILE','PASS','DATA_HOLD'}
++          or str(row.get('adaptive_gate','OK')) not in {'','OK'}):
++        status = 'COMBO_EXCLUDE'
++    elif not out['match_data_verified']:
++        status = 'PROVISIONAL'
++    elif robust != 'ROBUST' or row.get('counter_case_risk') == 'HIGH':
++        status = 'COMBO_EXCLUDE'
++    else:
++        status = 'FINAL_BET'
++    if status in {'FINAL_BET','PROVISIONAL'}:
++        out['selection_reason']='가정 변화 통과 · ' + ('경기 데이터 검증 완료' if out['match_data_verified'] else '확인 필요: ' + out['match_data_missing'])
++    out['national_status'] = status
++    out['national_status_label'] = STATUS_LABELS[status]
++    out['scenario_candidate'] = out['v3_candidate'] = status in {'FINAL_BET','PROVISIONAL'}
++    out['scenario_parlay_eligible'] = out['v3_parlay_eligible'] = out['parlay_eligible'] = status == 'FINAL_BET'
++    out['model_validation_status'] = row.get('model_validation_status','장기 수익성 미검증')
++    return out
+diff --git a/sports_ev_engine/sports_ev_engine/prediction_store.py b/sports_ev_engine/sports_ev_engine/prediction_store.py
+index 3aeeb2e..a958e0a 100644
+--- a/sports_ev_engine/sports_ev_engine/prediction_store.py
++++ b/sports_ev_engine/sports_ev_engine/prediction_store.py
+@@ -20,7 +20,7 @@ import pandas as pd
+ from .core.asian import settle_total_under, settle_total_over, settle_home_handicap
+ from . import persistent_store
+ 
+-MODEL_VERSION = "3.4.15"
++MODEL_VERSION = "3.4.24-national-validation"
+ DEFAULT_PREDICTIONS = "data/prediction_snapshots.jsonl"
+ DEFAULT_SETTLED = "data/settled_predictions.jsonl"
+ DEFAULT_MARKET_OBSERVATIONS = "data/market_observations.jsonl"
+@@ -285,19 +285,30 @@ def record_frame(frame: pd.DataFrame, sport_key: str | None = None, sport_family
+     rows = []
+     keep = [
+         "event_id", "commence_time", "home_team", "away_team", "market", "selection", "point", "best_book", "best_odds", "books",
+-        "consensus_prob", "raw_independent_prob", "model_win_prob", "push_prob", "break_even", "edge_pp", "ev_roi", "point_ev_roi",
++        "consensus_prob", "raw_independent_prob", "raw_push_prob", "model_win_prob", "push_prob", "break_even", "edge_pp", "ev_roi", "point_ev_roi",
+         "conservative_ev_roi", "uncertainty_pp", "grade", "sanity", "stage", "data_quality", "sport_key", "home_lambda", "away_lambda",
+         "home_expected_runs", "away_expected_runs", "home_starter", "away_starter", "home_starter_expected_ip", "away_starter_expected_ip",
+         "home_starter_recent_bb_pct", "away_starter_recent_bb_pct", "home_starter_recent_k_pct", "away_starter_recent_k_pct",
+-        "home_starter_recent_kbb_pct", "away_starter_recent_kbb_pct", "home_bullpen_pitches_last3", "away_bullpen_pitches_last3",
++        "home_starter_recent_kbb_pct", "away_starter_recent_kbb_pct",
++        "home_starter_vs_opponent_games", "away_starter_vs_opponent_games", "home_starter_vs_opponent_ip", "away_starter_vs_opponent_ip",
++        "home_starter_vs_opponent_era", "away_starter_vs_opponent_era", "home_starter_vs_opponent_kbb_pct", "away_starter_vs_opponent_kbb_pct",
++        "home_starter_vs_opponent_team", "away_starter_vs_opponent_team",
++        "home_bullpen_pitches_last3", "away_bullpen_pitches_last3", "home_bullpen_relief_ip_last3", "away_bullpen_relief_ip_last3",
++        "home_bullpen_exact", "away_bullpen_exact", "home_recent_runs_for", "home_recent_runs_against", "away_recent_runs_for", "away_recent_runs_against",
++        "selection_status", "selection_reason", "selection_policy", "scenario_ev_min", "scenario_ev_max", "scenario_count", "scenario_candidate", "scenario_parlay_eligible",
++        "national_status", "national_status_label", "match_data_verified", "match_data_status", "match_data_missing", "model_validation_status", "data_checked_at", "injury_available",
+         "lineup_confirmed", "probable_lineup", "lineup_source", "lineup_status", "lineup_fallback_used", "home_probable_players", "away_probable_players", "fixture_id", "starter_confirmed", "reasoning_engine_id", "signal_coverage", "signal_summary", "missing_signals", "counter_case_risk",
+         "counter_case_summary", "v3_decision_status", "robust_positive_ratio", "robust_ev_min", "robust_ev_p10", "robust_ev_max",
+         "robust_prob_min", "robust_prob_max", "robust_scenario_count", "v3_candidate", "v3_parlay_eligible", "odds_region", "model_weight",
+-        "pre_adaptive_model_win_prob", "ensemble_prob_cond", "calibrated_prob_cond", "adaptive_delta_pp", "calibration_delta_pp",
+-        "calibration_n", "calibration_active", "calibration_reliability", "ensemble_disagreement_pp", "ensemble_gate", "ensemble_summary", "adaptive_gate",
++        "pre_adaptive_model_win_prob", "pre_calibration_prob_cond", "pre_calibration_win_prob", "ensemble_prob_cond", "calibrated_prob_cond", "adaptive_delta_pp", "calibration_delta_pp",
++        "calibration_n", "calibration_active", "calibration_reliability", "calibration_reason", "ensemble_disagreement_pp", "ensemble_gate", "ensemble_summary", "adaptive_gate",
++        "raw_market_gap_pp", "raw_market_gap_final_audit_pp", "final_market_gap_pp", "mlb_totals_divergence_threshold_pp",
++        "mlb_totals_calibration_evidence_sufficient", "mlb_totals_market_disagreement_gate", "recent_form_ensemble_suppressed",
++        "final_decision_recomputed", "final_downgrade_reason", "expected_runs_adjustments", "score_distribution_family",
++        "score_distribution_dispersion", "score_distribution_dispersion_source",
+         "ensemble_independent_prob", "ensemble_independent_weight", "ensemble_market_prob", "ensemble_market_weight",
+         "ensemble_recent_form_prob", "ensemble_recent_form_weight", "ensemble_context_model_prob", "ensemble_context_model_weight",
+-        "recent_form_used", "starter_recent_used", "velocity_used", "bullpen_used", "split_used", "weather_used",
++        "recent_form_used", "starter_recent_used", "starter_vs_opponent_used", "velocity_used", "bullpen_used", "split_used", "weather_used",
+         "plate_discipline_used", "statcast_quality_used", "statcast_fallback_used", "batted_ball_regression_used", "pitch_mix_used", "starter_workload_used",
+         "bullpen_exact_used", "lineup_platoon_exact_used", "pitch_matchup_used", "availability_news_used", "lineup_change_used",
+         "market_movement_used", "roof_used", "umpire_used", "travel_rest_used", "bvp_used", "bullpen_manager_used",
+diff --git a/sports_ev_engine/sports_ev_engine/validation.py b/sports_ev_engine/sports_ev_engine/validation.py
+index b2b3eb5..079340c 100644
+--- a/sports_ev_engine/sports_ev_engine/validation.py
++++ b/sports_ev_engine/sports_ev_engine/validation.py
+@@ -6,7 +6,7 @@ import pandas as pd
+ from .models.elo import build_elo,opponent_adjusted_form
+ from .models.soccer_auto import norm_name,score_matrix,price_from_matrix
+ 
+-MODEL_ID='national-raw-v291'
++MODEL_ID='national-raw-v3.4.24'
+ 
+ def temperature(prob,t):
+     values=[max(1e-12,float(p))**(1/float(t)) for p in prob]
+@@ -57,3 +57,31 @@ def validate(records,as_of,recent_n=6,max_events=1200):
+         pairs=[(p,i==r['y']) for r in test for i,p in enumerate(temperature(r['p'],chosen if adopted else 1)) if lo<=p<hi]
+         if pairs:bins.append({'bin':f'{lo:.1f}-{min(hi,1):.1f}','n':len(pairs),'mean_predicted':sum(p for p,y in pairs)/len(pairs),'observed_frequency':sum(y for p,y in pairs)/len(pairs)})
+     return {'model_id':MODEL_ID,'status':'보정 채택' if adopted else '보정 미채택','n':len(predictions),'skipped':skipped,'train_n':len(train),'test_n':len(test),'split_date':split,'start_date':predictions[0]['date'],'end_date':predictions[-1]['date'],'chosen_temperature':chosen,'live_temperature':chosen if adopted else 1.0,'holdout_before':before,'holdout_after':after,'bins':bins,'market_blend_validated':False,'scope':'90분 승무패 원모델만. 현재 수정된 기록의 소급 검증; 당시 수집 상태·배당·라인업·EV/ROI 미검증'},predictions
++
++
++def load_validation_report(path='data/validation_report.json'):
++    import json
++    from pathlib import Path
++    try:
++        report=json.loads(Path(path).read_text(encoding='utf-8'))
++        return report if isinstance(report,dict) else {}
++    except (OSError,ValueError): return {}
++
++def validation_summary(report):
++    """Report observed evidence without conflating raw-model testing with ROI."""
++    report=report or {}
++    holdout=report.get('holdout_before') or {}
++    def number(x):
++        try: return math.isfinite(float(x))
++        except (TypeError,ValueError): return False
++    oos=bool(report.get('split_date')) and int(report.get('test_n') or 0)>=100
++    probability=oos and all(number(holdout.get(k)) for k in ('brier','log_loss')) and bool(report.get('bins'))
++    profitability=(probability and report.get('market_blend_validated') is True
++                   and report.get('roi_validated') is True and number(report.get('roi'))
++                   and int(report.get('roi_n') or 0)>=100)
++    return {'probability_validated':probability,'profitability_validated':profitability,
++            'completed_count':int(probability)+int(profitability),
++            'status':'수익성 검증 완료' if profitability else '확률 성능 검증 · 장기 수익성 미검증' if probability else '장기 수익성 미검증',
++            'brier':holdout.get('brier'),'log_loss':holdout.get('log_loss'),
++            'roi':report.get('roi'),'calibration':report.get('bins',[]),'out_of_sample_n':report.get('test_n',0),
++            'scope':report.get('scope','검증 보고서 없음')}
+diff --git a/sports_ev_engine/validation.py b/sports_ev_engine/validation.py
+index b2b3eb5..079340c 100644
+--- a/sports_ev_engine/validation.py
++++ b/sports_ev_engine/validation.py
+@@ -6,7 +6,7 @@ import pandas as pd
+ from .models.elo import build_elo,opponent_adjusted_form
+ from .models.soccer_auto import norm_name,score_matrix,price_from_matrix
+ 
+-MODEL_ID='national-raw-v291'
++MODEL_ID='national-raw-v3.4.24'
+ 
+ def temperature(prob,t):
+     values=[max(1e-12,float(p))**(1/float(t)) for p in prob]
+@@ -57,3 +57,31 @@ def validate(records,as_of,recent_n=6,max_events=1200):
+         pairs=[(p,i==r['y']) for r in test for i,p in enumerate(temperature(r['p'],chosen if adopted else 1)) if lo<=p<hi]
+         if pairs:bins.append({'bin':f'{lo:.1f}-{min(hi,1):.1f}','n':len(pairs),'mean_predicted':sum(p for p,y in pairs)/len(pairs),'observed_frequency':sum(y for p,y in pairs)/len(pairs)})
+     return {'model_id':MODEL_ID,'status':'보정 채택' if adopted else '보정 미채택','n':len(predictions),'skipped':skipped,'train_n':len(train),'test_n':len(test),'split_date':split,'start_date':predictions[0]['date'],'end_date':predictions[-1]['date'],'chosen_temperature':chosen,'live_temperature':chosen if adopted else 1.0,'holdout_before':before,'holdout_after':after,'bins':bins,'market_blend_validated':False,'scope':'90분 승무패 원모델만. 현재 수정된 기록의 소급 검증; 당시 수집 상태·배당·라인업·EV/ROI 미검증'},predictions
++
++
++def load_validation_report(path='data/validation_report.json'):
++    import json
++    from pathlib import Path
++    try:
++        report=json.loads(Path(path).read_text(encoding='utf-8'))
++        return report if isinstance(report,dict) else {}
++    except (OSError,ValueError): return {}
++
++def validation_summary(report):
++    """Report observed evidence without conflating raw-model testing with ROI."""
++    report=report or {}
++    holdout=report.get('holdout_before') or {}
++    def number(x):
++        try: return math.isfinite(float(x))
++        except (TypeError,ValueError): return False
++    oos=bool(report.get('split_date')) and int(report.get('test_n') or 0)>=100
++    probability=oos and all(number(holdout.get(k)) for k in ('brier','log_loss')) and bool(report.get('bins'))
++    profitability=(probability and report.get('market_blend_validated') is True
++                   and report.get('roi_validated') is True and number(report.get('roi'))
++                   and int(report.get('roi_n') or 0)>=100)
++    return {'probability_validated':probability,'profitability_validated':profitability,
++            'completed_count':int(probability)+int(profitability),
++            'status':'수익성 검증 완료' if profitability else '확률 성능 검증 · 장기 수익성 미검증' if probability else '장기 수익성 미검증',
++            'brier':holdout.get('brier'),'log_loss':holdout.get('log_loss'),
++            'roi':report.get('roi'),'calibration':report.get('bins',[]),'out_of_sample_n':report.get('test_n',0),
++            'scope':report.get('scope','검증 보고서 없음')}
+diff --git a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/VERSION b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/VERSION
+index 0183856..57ebffd 100644
+--- a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/VERSION
++++ b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/VERSION
+@@ -1 +1 @@
+-3.4.23
++3.4.24
+diff --git a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/VERSION.txt b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/VERSION.txt
+index f5db5d9..f592d19 100644
+--- a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/VERSION.txt
++++ b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/VERSION.txt
+@@ -1 +1 @@
+-3.4.23-kbo-npb-data-repair
++3.4.24-national-validation
+diff --git a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/app.py b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/app.py
+index 15767b3..f1edd18 100644
+--- a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/app.py
++++ b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/app.py
+@@ -43,10 +43,10 @@ from sports_ev_engine.national_soccer import is_senior_international, build_nati
+ from sports_ev_engine.international_discovery import (discover_api_football_fixtures, flatten_api_football_odds, append_only_missing_events, competition_rows, kst_target_dates)
+ from sports_ev_engine.core.parlay import optimize_parlays
+ from sports_ev_engine.review_policy import candidate_mask, review_mask
+-from sports_ev_engine.national_policy import reference_pairs
++from sports_ev_engine.national_policy import reference_pairs, finalize_national
+ from sports_ev_engine.analysis_view import match_summary
+ from sports_ev_engine.explanations import humanize_policy_reason
+-from sports_ev_engine.validation import validate
++from sports_ev_engine.validation import validate, validation_summary
+ from sports_ev_engine.providers.official_baseball import OfficialBaseballStats
+ from sports_ev_engine.official_baseball_model import analyze_official_event
+ from sports_ev_engine.providers.live_baseball import LiveBaseballContext
+@@ -78,9 +78,9 @@ from sports_ev_engine.feature_attribution import attribution
+ from sports_ev_engine.model_drift import drift_rows
+ from sports_ev_engine.bankroll import simulate as simulate_bankroll
+ 
+-st.set_page_config(page_title="Sports EV Engine v3.4.23",layout="wide")
+-st.title("Sports EV Engine v3.4.23")
+-st.caption("BUILD v3.4.23-kbo-npb-data-repair · 2026-10-01")
++st.set_page_config(page_title="Sports EV Engine v3.4.24",layout="wide")
++st.title("Sports EV Engine v3.4.24")
++st.caption("BUILD v3.4.24-national-validation · 2026-10-02")
+ if any(getattr(module,"PROVIDER_BUILD",None)!="3.0.0" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider,deep_soccer_provider)):
+     st.error("앱과 수집 파일 버전이 다릅니다. ZIP의 sports_ev_engine 폴더까지 전부 반영한 뒤 Streamlit 앱을 Reboot하세요.")
+     st.stop()
+@@ -90,14 +90,14 @@ if getattr(advanced_provider,"BASEBALL_ADVANCED_BUILD",None)!="3.4.23":
+ if getattr(live_provider,"LIVE_BASEBALL_BUILD",None)!="3.4.20":
+     st.error("v3.4.22 KBO/NPB 라이브 수집 모듈이 구버전입니다. sports_ev_engine/providers/live_baseball.py까지 함께 덮어쓴 뒤 Reboot하세요.")
+     st.stop()
+-_PATCH_BUILD = "3.4.16-robust-form-xg"
++_PATCH_BUILD = "3.4.24-national-validation"
+ _patch_modules=(auto_national_provider,deep_soccer_provider,free_provider,auto_soccer_provider,reasoning_provider,national_context_provider,elo_provider)
+ _patch_mismatch=[getattr(m,"__name__",str(m)) for m in _patch_modules if getattr(m,"PATCH_BUILD",None)!=_PATCH_BUILD]
+ if _patch_mismatch:
+-    st.error("v3.4.16 핵심 축구 모델 모듈이 섞여 있습니다: " + ", ".join(_patch_mismatch) + ". DEPLOY_ONLY ZIP의 app.py와 sports_ev_engine 폴더를 함께 덮어쓴 뒤 Reboot하세요.")
++    st.error("v3.4.24 핵심 축구 모델 모듈이 섞여 있습니다: " + ", ".join(_patch_mismatch) + ". DEPLOY_ONLY ZIP의 app.py와 sports_ev_engine 폴더를 함께 덮어쓴 뒤 Reboot하세요.")
+     st.stop()
+ FootballAccessError=football_provider.FootballAccessError
+-st.caption("분석 백엔드 v3.4.16 · opponent-strength robust form + adaptive measured-xG single-pass + API-Football/ESPN/FotMob/SofaScore fallback")
++st.caption("분석 백엔드 v3.4.24 · opponent-strength robust form + adaptive measured-xG single-pass + API-Football/ESPN/FotMob/SofaScore fallback")
+ st.caption("독립 모델 → 정밀 컨텍스트 → 반증 검사 → 시장 캘리브레이션 → 27개 스트레스 시나리오 → EV/ROBUST 판정 → 기록·사후검증")
+ 
+ def secret(name):
+@@ -114,7 +114,7 @@ SUPABASE_KEY=secret("SUPABASE_SERVICE_ROLE_KEY") or secret("SUPABASE_KEY")
+ configure_persistence(SUPABASE_URL,SUPABASE_KEY)
+ BASEBALL_KEY=None
+ 
+-_BUILD_ID = "3.4.22-mlb-totals-calibration"
++_BUILD_ID = "3.4.24-national-validation"
+ if st.session_state.get("_build_id") != _BUILD_ID:
+     for _k in [
+         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
+@@ -210,6 +210,8 @@ def render_final_decision_layer(frame, key_prefix, title="🧠 v3 FINAL Decision
+         f"**데이터 상태:** {summary['data_status']}",
+         f"**Model confidence:** {summary['confidence']}/100",
+     ]
++    if summary.get("match_data_status"):
++        summary_lines += [f"**경기 데이터 검증:** {summary['match_data_status']} · {summary['match_data_missing']}", f"**모델 성능 검증:** {summary['model_validation_status']}"]
+     st.markdown("  \n".join(summary_lines))
+     ratio=summary.get('robust_positive_ratio')
+     n=summary.get('robust_scenario_count',0)
+@@ -559,7 +561,7 @@ with tabs[1]:
+                         st.session_state["national_discovery_status"]=[]
+                 elif auto_all:
+                     st.session_state["national_discovery_status"]=[]
+-                    competition_errors.append({"경기":"다중소스 A매치 자동발견","이유":"API_FOOTBALL_KEY 없음 — The Odds API 활성 국제대회만 조회"})
++                    st.session_state["national_sources"].append({"소스":"다중소스 A매치 자동발견","상태":"API_FOOTBALL_KEY 없음 — The Odds API 활성 국제대회만 조회"})
+ 
+                 raw=append_only_missing_events(raw_primary,raw_fallback)
+                 st.session_state["national_filter_label"]=(f"{national_match_date:%Y-%m-%d} KST" if national_date_only else str(national_scope))
+@@ -723,6 +725,8 @@ with tabs[1]:
+             with st.spinner("각 경기 이전 기록만으로 검증 중..."):
+                 report,_=validate(st.session_state["validation_records"],datetime.now(ZoneInfo("Asia/Seoul")).date(),national_recent,max_events=900)
+                 st.session_state["validation_report"]=report
++                (Path(__file__).parent/"data").mkdir(exist_ok=True)
++                (Path(__file__).parent/"data/validation_report.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
+         report=st.session_state.get("validation_report")
+         if report is None:
+             try:report=json.loads((Path(__file__).parent/'data/validation_report.json').read_text())
+@@ -735,6 +739,9 @@ with tabs[1]:
+             st.download_button("검증 보고서 다운로드",json.dumps(report,ensure_ascii=False,indent=2),file_name="validation_report.json")
+     nr=st.session_state.get("national_ranked")
+     if isinstance(nr,pd.DataFrame) and not nr.empty:
++        nr=nr.copy()
++        nr["model_validation_status"]=validation_summary(report)["status"]
++        nr=pd.DataFrame([finalize_national(r) for r in nr.to_dict("records")],index=nr.index)
+         if st.session_state.get("national_filter_label"):st.caption(f"분석 경기일: {st.session_state['national_filter_label']}")
+         render_final_decision_layer(nr,"national",title="🧠 v3 FINAL Decision Layer · A매치")
+         st.markdown("### 상세 진단 · 전체 경기 자동분석")
+@@ -742,11 +749,12 @@ with tabs[1]:
+         st.dataframe(match_summary(nr),hide_index=True)
+         st.info("분석 확률과 EV는 모델 추정입니다. v3 정밀 모드에서는 제공사가 실제 반환한 xG·확정 라인업·결장·선수 중요도·휴식일을 추가 반영하며, 확보하지 못한 신호는 MISSING으로 남깁니다.")
+         st.markdown("### A매치 후보 · 조합 상태")
++        st.write({"모델 성능 검증":validation_summary(report)})
+         passed_count=int(nr.scenario_candidate.sum())
+         ready_count=int(nr.scenario_parlay_eligible.sum())
+         pairs=reference_pairs(nr)
+         metrics=st.columns(4)
+-        for cell,label,value in zip(metrics,['가정 변화 통과 선택지','그중 라인업 확인','참고용 2폴 표시','성능 검증 완료'],[passed_count,ready_count,len(pairs),0]):
++        for cell,label,value in zip(metrics,['개별 후보','최종 후보','참고용 2폴 표시','성능 검증 완료 항목'],[passed_count,ready_count,len(pairs),validation_summary(report)['completed_count']]):
+             cell.metric(label,value)
+         st.caption("앞의 두 숫자는 경기 수가 아닌 선택지 수입니다. 개별 분석 → 가정 변화 통과 → 라인업 확인 → 서로 다른 경기의 참고용 2폴 순서입니다. 모델 성능 검증은 별도입니다.")
+         with st.expander("미검증은 어떻게 검증하나요?"):
+@@ -755,18 +763,17 @@ with tabs[1]:
+         st.markdown("#### 가정 변화에도 기대값이 양수인 개별 후보")
+         st.caption("양 팀 예상 득점을 각각 −10%·기준·+10%, 원모델 비중을 15%·25%·35%로 바꾼 27개 조합입니다. 이 범위는 실측 오차나 신뢰구간이 아닙니다. 기존 약 8.5%p 일괄 차감은 후보 선정에서 사용하지 않습니다.")
+         st.info("여기서 '가정 변화 통과'는 개별 픽의 강건성 시험 통과를 뜻합니다. 🏆 오늘의 베스트 조합에서는 여기에 데이터 신선도·반증위험·드리프트·라인업 단계 등 별도 안전 게이트를 한 번 더 적용하므로, 통과 픽이 '검토 후보'로는 보이더라도 실제 조합에서는 제외될 수 있습니다.")
+-        counts=nr.selection_status.value_counts()
+-        st.write({"분석 옵션":len(nr),"가정 변화 통과":int(counts.get('SCENARIO_PASS',0)),"가정에 민감":int(counts.get('SENSITIVE',0)),"괴리 검토":int(counts.get('REVIEW',0)),"기대값 미달":int(counts.get('PASS',0)),"자료 보류":int(counts.get('DATA_HOLD',0))})
+-        labels={'SCENARIO_PASS':'가정 변화 통과 · 미검증','SENSITIVE':'가정에 민감 · 조합 제외','REVIEW':'괴리 검토 · 조합 제외','PASS':'기대값 미달','DATA_HOLD':'자료 보류'}
++        counts=nr.national_status_label.value_counts()
++        st.write({"분석 옵션":len(nr),**{label:int(counts.get(label,0)) for label in ('최종 후보','잠정 후보','조합 제외','베팅 제외')}})
+         def policy_table(frame):
+-            cols=['selection_status','display_pick','best_book','best_odds','model_win_prob','break_even','edge_pp','point_ev_roi','scenario_win_min','scenario_win_max','scenario_ev_min','scenario_ev_max','lineup_confirmed','selection_reason']
++            cols=['selection_status','match_data_status','match_data_missing','model_validation_status','display_pick','best_book','best_odds','model_win_prob','break_even','edge_pp','point_ev_roi','scenario_win_min','scenario_win_max','scenario_ev_min','scenario_ev_max','lineup_confirmed','selection_reason']
+             shown=frame[[c for c in cols if c in frame]].copy()
+             for col in ['model_win_prob','break_even','point_ev_roi','scenario_win_min','scenario_win_max','scenario_ev_min','scenario_ev_max']:
+                 shown[col]=(shown[col]*100).round(2)
+-            shown['selection_status']=shown['selection_status'].map(labels)
++            shown['selection_status']=frame['national_status_label']
+             if 'selection_reason' in shown:
+                 shown['selection_reason']=[humanize_policy_reason(v, frame.iloc[i] if i < len(frame) else None) for i,v in enumerate(shown['selection_reason'].tolist())]
+-            return shown.rename(columns={'selection_status':'판정','display_pick':'경기/선택','model_win_prob':'기준 확률(%)','break_even':'BE(%)','edge_pp':'Edge(%p)','point_ev_roi':'기준 EV(%)','scenario_win_min':'가정 최저 확률(%)','scenario_win_max':'가정 최고 확률(%)','scenario_ev_min':'가정 최저 EV(%)','scenario_ev_max':'가정 최고 EV(%)','lineup_confirmed':'라인업 확인','selection_reason':'사람이 읽는 판정 이유'})
++            return shown.rename(columns={'match_data_status':'경기 데이터 검증','match_data_missing':'미확인 데이터','model_validation_status':'모델 성능 검증','selection_status':'판정','display_pick':'경기/선택','model_win_prob':'기준 확률(%)','break_even':'BE(%)','edge_pp':'Edge(%p)','point_ev_roi':'기준 EV(%)','scenario_win_min':'가정 최저 확률(%)','scenario_win_max':'가정 최고 확률(%)','scenario_ev_min':'가정 최저 EV(%)','scenario_ev_max':'가정 최고 EV(%)','lineup_confirmed':'라인업 확인','selection_reason':'사람이 읽는 판정 이유'})
+         passed=nr[nr.scenario_candidate].sort_values('scenario_ev_min',ascending=False)
+         if passed.empty:st.info("설정한 모든 가정에서 기대값이 양수인 후보는 없습니다. 아래 민감 후보와 제외 이유를 확인하세요.")
+         else:st.dataframe(policy_table(passed),hide_index=True)
+@@ -778,7 +785,7 @@ with tabs[1]:
+             st.dataframe(policy_table(nr),hide_index=True)
+         with st.expander("이전 버전 일괄 차감 결과 비교 · 현재 선정에는 미사용"):
+             st.dataframe(nr[['display_pick','legacy_grade','uncertainty_pp','legacy_conservative_ev_roi']],hide_index=True)
+-        st.caption("통과는 설정한 가정 안에서만 의미가 있습니다. xG·결장은 미수집이며 최종 시장 혼합 확률과 수익성은 검증되지 않았습니다. A/B/C 등급과 베팅금액 추천은 제공하지 않습니다.")
++        st.caption("통과는 설정한 가정 안에서만 의미가 있습니다. 경기 데이터 검증과 모델 성능 검증은 별도입니다. 모델 장기 수익성은 아래 검증 보고서의 범위에서 판단합니다. A/B/C 등급과 베팅금액 추천은 제공하지 않습니다.")
+         st.download_button("전체 분석 CSV 다운로드",nr.to_csv(index=False).encode("utf-8-sig"),file_name="national_analysis.csv")
+         st.markdown("#### 라인업 확인 + 가정 변화 통과: 참고용 2폴")
+         combos=pairs
+diff --git a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/__init__.py b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/__init__.py
+index c991a3c..9b9e51f 100644
+--- a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/__init__.py
++++ b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/__init__.py
+@@ -1 +1 @@
+-__version__ = "3.4.23-kbo-npb-data-repair"
++__version__ = "3.4.24-national-validation"
+diff --git a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/analysis_view.py b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/analysis_view.py
+index a619d64..faa88b6 100644
+--- a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/analysis_view.py
++++ b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/analysis_view.py
+@@ -30,12 +30,15 @@ def match_summary(frame):
+                 'EV(%)':round(value.point_ev_roi*100,2),
+                 '가정 최저 EV(%)':round(value.scenario_ev_min*100,2),
+                 '가정 최고 EV(%)':round(value.scenario_ev_max*100,2),
+-                '판정':'모델상 양의 EV' if value.point_ev_roi>0 else '현재 배당에서 양의 EV 없음',
++                '판정':value.get('national_status_label', '모델상 양의 EV' if value.point_ev_roi>0 else '현재 배당에서 양의 EV 없음'),
++                '경기 데이터 검증':value.get('match_data_status',''),
++                '미확인 데이터':value.get('match_data_missing',''),
++                '모델 성능 검증':value.get('model_validation_status',''),
+                 '라인업':'확인' if value.lineup_confirmed else '미확인',
+                 '조합':'참고 조합 가능' if value.scenario_parlay_eligible else '제외',
+                 '이유':humanize_policy_reason(value.selection_reason,value)}
+             if 'v3_decision_status' in rows.columns:
+-                item.update({'v3 판정':value.v3_decision_status,
++                item.update({'v3 판정':value.get('national_status_label',value.v3_decision_status),
+                              'Stress 양수 비율(%)':round(float(value.robust_positive_ratio)*100,1),
+                              'v3 최저 EV(%)':round(float(value.robust_ev_min)*100,2),
+                              '반증 위험':value.counter_case_risk,
+diff --git a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/auto_national.py b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/auto_national.py
+index ef8ca0d..7161ec6 100644
+--- a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/auto_national.py
++++ b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/auto_national.py
+@@ -7,7 +7,7 @@ from functools import lru_cache
+ from .free_national import free_pool
+ from .models.soccer_auto import norm_name
+ PROVIDER_BUILD='3.0.0'
+-PATCH_BUILD = '3.4.16-robust-form-xg'
++PATCH_BUILD = '3.4.24-national-validation'
+ BASE='https://site.api.espn.com/apis/site/v2/sports/soccer'
+ LEAGUES=('uefa.nations','fifa.worldq.uefa','uefa.euro','uefa.euroq','fifa.friendly','fifa.world','concacaf.nations.league','fifa.worldq.concacaf','concacaf.gold','fifa.worldq.conmebol','conmebol.america','fifa.worldq.afc','afc.cup','fifa.worldq.caf','caf.nations','fifa.worldq.ofc')
+ 
+diff --git a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/auto_soccer.py b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/auto_soccer.py
+index 9d78ee6..0e2ff38 100644
+--- a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/auto_soccer.py
++++ b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/auto_soccer.py
+@@ -1,5 +1,5 @@
+ from __future__ import annotations
+-PATCH_BUILD = '3.4.16-robust-form-xg'
++PATCH_BUILD = '3.4.24-national-validation'
+ from .adaptive_model import apply_adaptive_layer
+ import math
+ from datetime import datetime, timezone
+@@ -8,12 +8,12 @@ import pandas as pd
+ from sports_ev_engine.models.soccer_auto import score_matrix, price_from_matrix, norm_name
+ from sports_ev_engine.models.elo import build_elo, opponent_adjusted_form
+ from sports_ev_engine.core.ev import analyze_bet
+-from sports_ev_engine.national_policy import scenario_matrices, assess, POLICY_ID
++from sports_ev_engine.national_policy import scenario_matrices, assess, POLICY_ID, finalize_national
+ from sports_ev_engine.free_national import adjust_lambdas
+ from sports_ev_engine.review_policy import review_reason, REVIEW_STATES
+ from sports_ev_engine.reasoning_engine import (
+     apply_soccer_context, build_counter_cases, scenario_assessment,
+-    soccer_scenarios, decision_fields,
++    soccer_scenarios, decision_fields, final_probability_assessment,
+ )
+ 
+ def _side_for_row(r):
+@@ -337,6 +337,8 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
+             "xg_target_away":deep_ctx.get("xg_target_away"),
+             "home_big_chances":deep_ctx.get("home_big_chances"),
+             "away_big_chances":deep_ctx.get("away_big_chances"),
++            "data_checked_at":deep_ctx.get("data_checked_at"),
++            "injury_available":deep_ctx.get("injury_available"),
+             "home_rest_days":deep_ctx.get("home_rest_days"),
+             "away_rest_days":deep_ctx.get("away_rest_days"),
+             "home_missing_players":deep_ctx.get("home_missing_players"),
+@@ -398,9 +400,8 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
+             d['v3_candidate']=False
+             d['v3_parlay_eligible']=False
+             d['parlay_eligible']=False
+-            d['scenario_candidate']=False
+             d['scenario_parlay_eligible']=False
+-            d['selection_status']='REVIEW'
++            # Preserve scenario evidence; downstream data validation prevents promotion.
+             d['selection_reason']='실측 xG 미수집/수집 오류: 자동후보 제외 · 원확률 검토 필요'
+             d['robust_reason']=d['selection_reason']
+         d['deep_context_attempted']=bool(deep_ctx.get('deep_context_attempted'))
+@@ -413,6 +414,39 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
+ 
+     _family="soccer_national" if international else "soccer_club"
+     _frame=apply_adaptive_layer(pd.DataFrame(rows),_family)
++    if international and not _frame.empty:
++        from .validation import load_validation_report, validation_summary
++        summary=validation_summary(load_validation_report())
++        revised=[]
++        for r in _frame.to_dict("records"):
++            # Adaptive calibration/coherence can move the displayed probability.
++            # Reprice every stress outcome on the same final probability scale.
++            delta=float(r['model_win_prob'])-float(r['pre_adaptive_model_win_prob'])
++            final_scenarios=[]
++            for w,p,label in soccer_scenarios(hl,al,lambda mm: price_from_matrix(mm,r["market"],_side_for_row(r),None if r["market"]=="h2h" else float(r["point"])),score_matrix):
++                for stress_weight in (.15,.25,.35):
++                    fw=stress_weight*w+(1-stress_weight)*float(r['consensus_prob'])*(1-p)
++                    final_scenarios.append((max(0.,min(1-p,fw+delta)),p,label))
++            forced=r.get('adaptive_gate') if r.get('adaptive_gate') not in {'','OK',None} else None
++            if r.get('sanity') in REVIEW_STATES: forced='원모델/시장 괴리 검토'
++            final=final_probability_assessment(
++                odds=float(r['best_odds']),final_win_prob=float(r['model_win_prob']),
++                final_push_prob=float(r['push_prob']),uncertainty_pp=0.,
++                scenario_probabilities=final_scenarios,data_ready=sample>=5,
++                lineup_required=True,lineup_confirmed=lineup_ok,forced_review_reason=forced)
++            r.update(final)
++            r['v3_decision_status']=final['robust_status']
++            scenario_evs=[float(r['best_odds'])*w+p-1 for w,p,_ in final_scenarios]
++            r['scenario_ev_min']=min(scenario_evs)
++            r['scenario_ev_max']=max(scenario_evs)
++            r['scenario_win_min']=min(w for w,p,_ in final_scenarios)
++            r['scenario_win_max']=max(w for w,p,_ in final_scenarios)
++            r['scenario_count']=len(final_scenarios)
++            if r['selection_status'] in {'SCENARIO_PASS','SENSITIVE','PASS'}:
++                r['selection_status']='PASS' if r['point_ev_roi']<=0 else 'SCENARIO_PASS' if r['scenario_ev_min']>0 else 'SENSITIVE'
++            r['model_validation_status']=summary['status']
++            revised.append(finalize_national(r))
++        _frame=pd.DataFrame(revised,index=_frame.index)
+     return _frame,{
+         "status":"ok","home":home,"away":away,
+         "home_form":hf,"away_form":af,
+diff --git a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/daily_combo.py b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/daily_combo.py
+index bd8c4e1..c618f33 100644
+--- a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/daily_combo.py
++++ b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/daily_combo.py
+@@ -205,6 +205,10 @@ def prepare_daily_candidates(frame: pd.DataFrame) -> pd.DataFrame:
+         _drift_map={}
+     rows=[]
+     for _,r in frame.iterrows():
++        national = str(r.get('sport_family') or '') == 'soccer_national' or str(r.get('national_status')) in {'FINAL_BET','PROVISIONAL','COMBO_EXCLUDE','NO_BET'}
++        if national:
++            from .national_policy import finalize_national
++            r=pd.Series(finalize_national(r))
+         status=str(r.get("v3_decision_status") or "").upper()
+         odds=_num(r.get("best_odds")); model=_num(r.get("model_win_prob"))
+         market=_num(r.get("consensus_prob"),_num(r.get("break_even")))
+@@ -268,6 +272,10 @@ def prepare_daily_candidates(frame: pd.DataFrame) -> pd.DataFrame:
+             combo_eligible=False
+             reasons.append("반증/데이터 위험 HIGH")
+ 
++        if national and r.get("national_status") != "FINAL_BET":
++            single_eligible=False; combo_eligible=False
++            reasons.append(str(r.get("national_status_label")) + " · " + str(r.get("match_data_missing") or ""))
++
+         maturity=stage_factor*risk_factor
+         adj_prob=market+maturity*(model-market)
+         adj_prob=max(0.001,min(max(0.001,1-push-0.001),adj_prob))
+@@ -300,7 +308,7 @@ def prepare_daily_candidates(frame: pd.DataFrame) -> pd.DataFrame:
+         kickoff=r.get("kickoff_kst")
+         if pd.isna(kickoff): kickoff=_kickoff_kst(r.get("commence_time"))
+         event_id=str(r.get("event_id") or f"{r.get('home_team','')}__{r.get('away_team','')}__{r.get('commence_time','')}")
+-        candidate_state="조합 가능" if combo_eligible else "단일 후보" if single_eligible else "검토 후보"
++        candidate_state=("최종 후보" if combo_eligible else "조합 제외") if national and r.get("national_status")=="FINAL_BET" else str(r.get("national_status_label")) if national else ("조합 가능" if combo_eligible else "단일 후보" if single_eligible else "검토 후보")
+         reason=" · ".join(dict.fromkeys(reasons)) if reasons else "강건성·리스크 게이트 통과"
+         rows.append({
+             **r.to_dict(),
+@@ -416,6 +424,6 @@ def combo_display_rows(combo: dict | None) -> pd.DataFrame:
+             "조합용 보수확률": f"{float(x.get('daily_adjusted_prob') or 0)*100:.1f}%",
+             "EV": f"{float(x.get('daily_original_ev') or 0)*100:+.1f}%",
+             "라인업": x.get("lineup_state", ""),
+-            "판정": x.get("v3_decision_status", ""),
++            "판정": x.get("national_status_label", x.get("v3_decision_status", "")),
+         })
+     return pd.DataFrame(rows)
+diff --git a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/deep_soccer_context.py b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/deep_soccer_context.py
+index aeeb86c..09834e3 100644
+--- a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/deep_soccer_context.py
++++ b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/deep_soccer_context.py
+@@ -12,7 +12,7 @@ import pandas as pd
+ from .models.soccer_auto import norm_name
+ 
+ PROVIDER_BUILD="3.0.0"
+-PATCH_BUILD = '3.4.16-robust-form-xg'
++PATCH_BUILD = '3.4.24-national-validation'
+ 
+ 
+ def _fixture_match(pool,home,away,kickoff_iso,tolerance_minutes=180):
+@@ -264,7 +264,7 @@ def collect_deep_context(api,pool,home,away,kickoff_iso,season=None,horizon_hour
+     now=pd.Timestamp.now(tz="UTC")
+     target_utc=target.tz_convert("UTC") if target.tzinfo else target.tz_localize("UTC")
+     hours=(target_utc-now).total_seconds()/3600
+-    ctx={"deep_context_attempted":True,"horizon_hours":horizon_hours,
++    ctx={"data_checked_at":now.isoformat(),"deep_context_attempted":True,"horizon_hours":horizon_hours,
+          "home_rest_days":_rest_days(pool,home,kickoff_iso),"away_rest_days":_rest_days(pool,away,kickoff_iso),
+          "schedule_source":"competition fixture history"}
+     if hours<0 or hours>horizon_hours:
+diff --git a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/final_view.py b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/final_view.py
+index e3ac2e0..34e6e8f 100644
+--- a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/final_view.py
++++ b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/final_view.py
+@@ -89,6 +89,8 @@ def _uncertainty_label(row: pd.Series) -> str:
+ 
+ 
+ def _status(row: pd.Series) -> str:
++    if isinstance(row.get("national_status_label"), str) and row.get("national_status_label"):
++        return str(row.get("national_status_label"))
+     status=str(row.get("v3_decision_status") or row.get("robust_status") or row.get("selection_status") or row.get("grade") or "").strip().upper()
+     return status or "미판정"
+ 
+@@ -258,6 +260,9 @@ def event_summary(frame: pd.DataFrame) -> dict:
+         "data_risk":_data_risk_text(focus),
+         "data_status":data_status(frame),
+         "confidence":confidence_score(frame,focus),
++        "match_data_status":focus.get("match_data_status",""),
++        "match_data_missing":focus.get("match_data_missing",""),
++        "model_validation_status":focus.get("model_validation_status",""),
+         "focus_status":_status(focus),
+         "focus_pick":_option_label(focus),
+         "robust_positive_ratio":_num(focus.get("robust_positive_ratio"), float("nan")),
+diff --git a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/free_national.py b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/free_national.py
+index 8045398..61f3d43 100644
+--- a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/free_national.py
++++ b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/free_national.py
+@@ -6,7 +6,7 @@ import requests
+ from sports_ev_engine.models.soccer_auto import norm_name
+ 
+ PROVIDER_BUILD = '3.0.0'
+-PATCH_BUILD = '3.4.16-robust-form-xg'
++PATCH_BUILD = '3.4.24-national-validation'
+ FREE_URL = 'https://raw.githubusercontent.com/martj42/international_results/master/results.csv'
+ HISTORY_COLUMNS = 'date,home_team,away_team,home_score,away_score,tournament,neutral,score_basis,home_xg,away_xg,source'.split(',')
+ CONTEXT_COLUMNS = 'kickoff,home_team,away_team,team,lineup_confirmed,lineup_players,missing_players,attack_change_pct,defense_change_pct,neutral,source,checked_at'.split(',')
+diff --git a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/models/elo.py b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/models/elo.py
+index 0481ef5..16cad7c 100644
+--- a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/models/elo.py
++++ b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/models/elo.py
+@@ -2,7 +2,7 @@ from __future__ import annotations
+ import math
+ from sports_ev_engine.models.soccer_auto import norm_name
+ 
+-PATCH_BUILD = "3.4.16-robust-form-xg"
++PATCH_BUILD = "3.4.24-national-validation"
+ 
+ 
+ def expected_score(rating_a, rating_b):
+diff --git a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/national_context_pipeline.py b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/national_context_pipeline.py
+index 40eb334..6c80bb5 100644
+--- a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/national_context_pipeline.py
++++ b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/national_context_pipeline.py
+@@ -5,7 +5,7 @@ independent: an API-Football error must never prevent ESPN/FotMob/SofaScore xG c
+ """
+ from __future__ import annotations
+ 
+-PATCH_BUILD = '3.4.16-robust-form-xg'
++PATCH_BUILD = '3.4.24-national-validation'
+ 
+ import pandas as pd
+ 
+diff --git a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/national_policy.py b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/national_policy.py
+index d23bdd3..f5e3c6c 100644
+--- a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/national_policy.py
++++ b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/national_policy.py
+@@ -3,7 +3,7 @@ import math
+ from itertools import product, combinations
+ from sports_ev_engine.models.soccer_auto import score_matrix, price_from_matrix
+ 
+-POLICY_ID = 'national-scenarios-v293'
++POLICY_ID = 'national-scenarios-v3.4.24'
+ 
+ def scenario_matrices(hl, al):
+     # Illustrative modelling assumptions, not estimated parameter errors.
+@@ -28,7 +28,7 @@ def assess(row, matrices, side, line):
+         status='REVIEW';reason='원모델-시장 괴리 15%p 초과: 기존 검토 기준 유지'
+     elif row['point_ev_roi']>0:
+         if low>0:
+-            status='SCENARIO_PASS';reason='설정한 27개 가정에서 모두 기대값 양수; 수익성 미검증'
++            status='SCENARIO_PASS';reason='설정한 27개 가정에서 모두 기대값 양수'
+         else:
+             status='SENSITIVE';reason='기준 기대값은 양수지만 가정 변화 시 0 이하; 조합 제외'
+     lineup=bool(row.get('lineup_confirmed',False))
+@@ -41,7 +41,9 @@ def assess(row, matrices, side, line):
+ 
+ def reference_pairs(frame):
+     """Experimental pairs of distinct events; independence is an assumption."""
+-    rows=frame[frame.scenario_parlay_eligible].sort_values('scenario_ev_min',ascending=False).head(20).to_dict('records')
++    eligible=frame.scenario_parlay_eligible.fillna(False).map(truth)
++    if 'national_status' in frame: eligible &= frame.national_status.eq('FINAL_BET')
++    rows=frame[eligible].sort_values('scenario_ev_min',ascending=False).head(20).to_dict('records')
+     out=[]
+     for a,b in combinations(rows,2):
+         if a['event_id']==b['event_id']:continue
+@@ -51,3 +53,63 @@ def reference_pairs(frame):
+             '가정 최저 EV(%)':round(100*((1+a['scenario_ev_min'])*(1+b['scenario_ev_min'])-1),2),
+             '조건':'독립 가정 · 적특/반적특 시 수령액 변동 · 실전 미검증'})
+     return sorted(out,key=lambda x:x['가정 최저 EV(%)'],reverse=True)[:5]
++
++
++STATUS_LABELS = {'FINAL_BET':'최종 후보', 'PROVISIONAL':'잠정 후보',
++                 'COMBO_EXCLUDE':'조합 제외', 'NO_BET':'베팅 제외'}
++
++def truth(value):
++    return str(value).strip().lower() in {'true','1','yes','confirmed','final'}
++
++def finite(value):
++    try: return math.isfinite(float(value))
++    except (TypeError, ValueError): return False
++
++def match_data_validation(row, now=None):
++    import pandas as pd
++    now = pd.Timestamp(now) if now is not None else pd.Timestamp.now(tz='UTC')
++    if now.tzinfo is None: now = now.tz_localize('UTC')
++    stamp = pd.to_datetime(row.get('data_checked_at'), utc=True, errors='coerce')
++    xg_stamp = pd.to_datetime(row.get('xg_checked_at'), utc=True, errors='coerce')
++    checks = {
++        '라인업': truth(row.get('lineup_confirmed')),
++        'xG': all(finite(row.get(k)) and float(row.get(k)) >= 0 for k in
++                   ('home_xg_for','home_xg_against','away_xg_for','away_xg_against'))
++              and all(finite(row.get(k)) and float(row.get(k)) >= 3 for k in ('xg_samples_home','xg_samples_away'))
++              and str(row.get('xg_collection_status','')).upper() == 'OK',
++        '결장': truth(row.get('injury_available')),
++        '휴식일': all(finite(row.get(k)) and float(row.get(k)) >= 0 for k in ('home_rest_days','away_rest_days')),
++        '신선도': all(not pd.isna(t) and 0 <= (now-t).total_seconds() <= 10800 for t in (stamp,xg_stamp)),
++    }
++    missing = [key for key,ok in checks.items() if not ok]
++    return {'match_data_verified':not missing, 'match_data_status':'검증 완료' if not missing else '확인 필요',
++            'match_data_missing':' · '.join(missing)}
++
++def finalize_national(row, now=None):
++    """One downstream policy after calibration; profitability never gates picks."""
++    out = dict(row)
++    out.update(match_data_validation(row, now))
++    ev = row.get('point_ev_roi', row.get('ev_roi'))
++    scenario = row.get('selection_status')
++    if scenario is None:
++        scenario='SCENARIO_PASS' if row.get('national_status') in {'FINAL_BET','PROVISIONAL'} else 'DATA_HOLD'
++    robust = row.get('v3_decision_status')
++    if not finite(ev) or float(ev) <= 0 or scenario in {'PASS','DATA_HOLD'}:
++        status = 'NO_BET'
++    elif (scenario in {'REVIEW','SENSITIVE'} or robust in {'FRAGILE','PASS','DATA_HOLD'}
++          or str(row.get('adaptive_gate','OK')) not in {'','OK'}):
++        status = 'COMBO_EXCLUDE'
++    elif not out['match_data_verified']:
++        status = 'PROVISIONAL'
++    elif robust != 'ROBUST' or row.get('counter_case_risk') == 'HIGH':
++        status = 'COMBO_EXCLUDE'
++    else:
++        status = 'FINAL_BET'
++    if status in {'FINAL_BET','PROVISIONAL'}:
++        out['selection_reason']='가정 변화 통과 · ' + ('경기 데이터 검증 완료' if out['match_data_verified'] else '확인 필요: ' + out['match_data_missing'])
++    out['national_status'] = status
++    out['national_status_label'] = STATUS_LABELS[status]
++    out['scenario_candidate'] = out['v3_candidate'] = status in {'FINAL_BET','PROVISIONAL'}
++    out['scenario_parlay_eligible'] = out['v3_parlay_eligible'] = out['parlay_eligible'] = status == 'FINAL_BET'
++    out['model_validation_status'] = row.get('model_validation_status','장기 수익성 미검증')
++    return out
+diff --git a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/prediction_store.py b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/prediction_store.py
+index 518efa7..a958e0a 100644
+--- a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/prediction_store.py
++++ b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/prediction_store.py
+@@ -20,7 +20,7 @@ import pandas as pd
+ from .core.asian import settle_total_under, settle_total_over, settle_home_handicap
+ from . import persistent_store
+ 
+-MODEL_VERSION = "3.4.22-mlb-totals-calibration"
++MODEL_VERSION = "3.4.24-national-validation"
+ DEFAULT_PREDICTIONS = "data/prediction_snapshots.jsonl"
+ DEFAULT_SETTLED = "data/settled_predictions.jsonl"
+ DEFAULT_MARKET_OBSERVATIONS = "data/market_observations.jsonl"
+@@ -295,6 +295,8 @@ def record_frame(frame: pd.DataFrame, sport_key: str | None = None, sport_family
+         "home_starter_vs_opponent_team", "away_starter_vs_opponent_team",
+         "home_bullpen_pitches_last3", "away_bullpen_pitches_last3", "home_bullpen_relief_ip_last3", "away_bullpen_relief_ip_last3",
+         "home_bullpen_exact", "away_bullpen_exact", "home_recent_runs_for", "home_recent_runs_against", "away_recent_runs_for", "away_recent_runs_against",
++        "selection_status", "selection_reason", "selection_policy", "scenario_ev_min", "scenario_ev_max", "scenario_count", "scenario_candidate", "scenario_parlay_eligible",
++        "national_status", "national_status_label", "match_data_verified", "match_data_status", "match_data_missing", "model_validation_status", "data_checked_at", "injury_available",
+         "lineup_confirmed", "probable_lineup", "lineup_source", "lineup_status", "lineup_fallback_used", "home_probable_players", "away_probable_players", "fixture_id", "starter_confirmed", "reasoning_engine_id", "signal_coverage", "signal_summary", "missing_signals", "counter_case_risk",
+         "counter_case_summary", "v3_decision_status", "robust_positive_ratio", "robust_ev_min", "robust_ev_p10", "robust_ev_max",
+         "robust_prob_min", "robust_prob_max", "robust_scenario_count", "v3_candidate", "v3_parlay_eligible", "odds_region", "model_weight",
+diff --git a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/reasoning_engine.py b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/reasoning_engine.py
+index 01f48f8..a65e4ac 100644
+--- a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/reasoning_engine.py
++++ b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/reasoning_engine.py
+@@ -9,14 +9,14 @@ Scenario ranges are stress tests, not statistical confidence intervals.
+ """
+ from __future__ import annotations
+ 
+-PATCH_BUILD = '3.4.16-robust-form-xg'
++PATCH_BUILD = '3.4.24-national-validation'
+ 
+ from dataclasses import dataclass, asdict
+ from itertools import product
+ import math
+ from typing import Callable, Iterable
+ 
+-ENGINE_ID = "chatgpt-style-v3.4.16-robust-form-xg"
++ENGINE_ID = "chatgpt-style-v3.4.24-national-validation"
+ 
+ 
+ def clamp(v, lo, hi):
+diff --git a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/validation.py b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/validation.py
+index b2b3eb5..079340c 100644
+--- a/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/validation.py
++++ b/sports_ev_engine_v3_4_23_DEPLOY_ONLY/sports_ev_engine/validation.py
+@@ -6,7 +6,7 @@ import pandas as pd
+ from .models.elo import build_elo,opponent_adjusted_form
+ from .models.soccer_auto import norm_name,score_matrix,price_from_matrix
+ 
+-MODEL_ID='national-raw-v291'
++MODEL_ID='national-raw-v3.4.24'
+ 
+ def temperature(prob,t):
+     values=[max(1e-12,float(p))**(1/float(t)) for p in prob]
+@@ -57,3 +57,31 @@ def validate(records,as_of,recent_n=6,max_events=1200):
+         pairs=[(p,i==r['y']) for r in test for i,p in enumerate(temperature(r['p'],chosen if adopted else 1)) if lo<=p<hi]
+         if pairs:bins.append({'bin':f'{lo:.1f}-{min(hi,1):.1f}','n':len(pairs),'mean_predicted':sum(p for p,y in pairs)/len(pairs),'observed_frequency':sum(y for p,y in pairs)/len(pairs)})
+     return {'model_id':MODEL_ID,'status':'보정 채택' if adopted else '보정 미채택','n':len(predictions),'skipped':skipped,'train_n':len(train),'test_n':len(test),'split_date':split,'start_date':predictions[0]['date'],'end_date':predictions[-1]['date'],'chosen_temperature':chosen,'live_temperature':chosen if adopted else 1.0,'holdout_before':before,'holdout_after':after,'bins':bins,'market_blend_validated':False,'scope':'90분 승무패 원모델만. 현재 수정된 기록의 소급 검증; 당시 수집 상태·배당·라인업·EV/ROI 미검증'},predictions
++
++
++def load_validation_report(path='data/validation_report.json'):
++    import json
++    from pathlib import Path
++    try:
++        report=json.loads(Path(path).read_text(encoding='utf-8'))
++        return report if isinstance(report,dict) else {}
++    except (OSError,ValueError): return {}
++
++def validation_summary(report):
++    """Report observed evidence without conflating raw-model testing with ROI."""
++    report=report or {}
++    holdout=report.get('holdout_before') or {}
++    def number(x):
++        try: return math.isfinite(float(x))
++        except (TypeError,ValueError): return False
++    oos=bool(report.get('split_date')) and int(report.get('test_n') or 0)>=100
++    probability=oos and all(number(holdout.get(k)) for k in ('brier','log_loss')) and bool(report.get('bins'))
++    profitability=(probability and report.get('market_blend_validated') is True
++                   and report.get('roi_validated') is True and number(report.get('roi'))
++                   and int(report.get('roi_n') or 0)>=100)
++    return {'probability_validated':probability,'profitability_validated':profitability,
++            'completed_count':int(probability)+int(profitability),
++            'status':'수익성 검증 완료' if profitability else '확률 성능 검증 · 장기 수익성 미검증' if probability else '장기 수익성 미검증',
++            'brier':holdout.get('brier'),'log_loss':holdout.get('log_loss'),
++            'roi':report.get('roi'),'calibration':report.get('bins',[]),'out_of_sample_n':report.get('test_n',0),
++            'scope':report.get('scope','검증 보고서 없음')}
+diff --git a/tests/test_daily_combo.py b/tests/test_daily_combo.py
+index 3352004..edd6b82 100644
+--- a/tests/test_daily_combo.py
++++ b/tests/test_daily_combo.py
+@@ -8,7 +8,7 @@ from sports_ev_engine.daily_combo import latest_snapshots_for_kst_date, prepare_
+ def base(**kw):
+     x={
+         "event_id":"e1","commence_time":"2026-09-28T16:30:00Z","home_team":"A","away_team":"B",
+-        "sport_family":"soccer_national","sport_key":"soccer_test","market":"h2h","selection":"A","point":None,
++        "sport_family":"soccer_club","sport_key":"soccer_test","market":"h2h","selection":"A","point":None,
+         "best_odds":1.80,"consensus_prob":0.54,"model_win_prob":0.61,"break_even":1/1.80,
+         "ev_roi":0.098,"conservative_ev_roi":0.06,"uncertainty_pp":4.0,"v3_decision_status":"ROBUST",
+         "v3_candidate":True,"robust_positive_ratio":0.92,"robust_ev_p10":0.025,"counter_case_risk":"LOW",
+@@ -63,7 +63,11 @@ def test_combo_never_uses_two_picks_same_event():
+ 
+ def test_cross_sport_two_leg_combo_supported():
+     rows=[
+-        base(event_id="s1",sport_family="soccer_national",selection="A",stage="FINAL",data_quality="HIGH",lineup_confirmed=True),
++        base(event_id="s1",sport_family="soccer_national",selection="A",stage="FINAL",data_quality="HIGH",lineup_confirmed=True,
++             selection_status='SCENARIO_PASS',home_xg_for=1.2,home_xg_against=1,away_xg_for=1,away_xg_against=1,
++             xg_samples_home=3,xg_samples_away=3,xg_collection_status='OK',injury_available=True,
++             home_rest_days=4,away_rest_days=4,data_checked_at=pd.Timestamp.now(tz='UTC').isoformat(),
++             xg_checked_at=pd.Timestamp.now(tz='UTC').isoformat()),
+         base(event_id="m1",sport_family="baseball_mlb",sport_key="baseball_mlb",home_team="Yankees",away_team="Red Sox",selection="Yankees",stage="FINAL",data_quality="HIGH",lineup_confirmed=True,best_odds=1.75,model_win_prob=0.64,consensus_prob=0.56,break_even=1/1.75),
+     ]
+     c=prepare_daily_candidates(pd.DataFrame(rows))
+diff --git a/tests/test_free_national.py b/tests/test_free_national.py
+index 348e722..3d4a109 100644
+--- a/tests/test_free_national.py
++++ b/tests/test_free_national.py
+@@ -58,6 +58,7 @@ class FreeTests(unittest.TestCase):
+             at=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app.py'),default_timeout=30).run()
+             self.assertFalse(at.exception)
+             self.assertEqual(at.selectbox(key="club_competition_v291").options,[])
++            at.date_input(key='national_match_date').set_value(kick.astimezone(__import__('zoneinfo').ZoneInfo('Asia/Seoul')).date()).run()
+             button=next(b for b in at.button if b.label=='🌍 선택 대회 A매치 자동분석')
+             button.click().run()
+             self.assertFalse(at.exception)
+diff --git a/tests/test_national_validation_status.py b/tests/test_national_validation_status.py
+new file mode 100644
+index 0000000..db00a79
+--- /dev/null
++++ b/tests/test_national_validation_status.py
+@@ -0,0 +1,89 @@
++import unittest
++from datetime import datetime, timezone
++import pandas as pd
++from sports_ev_engine.national_policy import finalize_national
++from sports_ev_engine.validation import validation_summary, load_validation_report
++from sports_ev_engine.final_view import compact_table
++from sports_ev_engine.daily_combo import prepare_daily_candidates
++
++class NationalValidationStatusTests(unittest.TestCase):
++    def row(self):
++        return dict(selection_status='SCENARIO_PASS',v3_decision_status='ROBUST',point_ev_roi=.2,
++                    scenario_ev_min=.1,lineup_confirmed=True,injury_available=True,
++                    home_xg_for=1.2,home_xg_against=.8,away_xg_for=1,away_xg_against=1,
++                    xg_samples_home=3,xg_samples_away=4,xg_collection_status='OK',
++                    home_rest_days=4,away_rest_days=3,data_checked_at='2026-10-02T14:00:00Z',
++                    xg_checked_at='2026-10-02T14:00:00Z',counter_case_risk='LOW')
++    def final(self,row): return finalize_national(row,now='2026-10-02T14:10:00Z')
++    def test_auto_promotion_without_model_profitability(self):
++        row=self.row();row['lineup_confirmed']=False
++        self.assertEqual(self.final(row)['national_status_label'],'잠정 후보')
++        row['lineup_confirmed']=True
++        out=self.final(row)
++        self.assertEqual(out['national_status_label'],'최종 후보')
++        self.assertTrue(out['v3_parlay_eligible'])
++        self.assertEqual(out['model_validation_status'],'장기 수익성 미검증')
++    def test_every_missing_signal_blocks_promotion(self):
++        for key,value in [('lineup_confirmed','False'),('injury_available',False),('home_xg_for',float('nan')),
++                          ('xg_samples_home',2),('home_rest_days',None),('data_checked_at','bad'),
++                          ('xg_checked_at','2026-10-01T14:00:00Z')]:
++            row=self.row();row[key]=value
++            out=self.final(row)
++            self.assertFalse(out['match_data_verified'],key)
++            self.assertFalse(out['v3_parlay_eligible'],key)
++    def test_four_states_and_adaptive_gate(self):
++        for changes,status in [({'point_ev_roi':-.1},'NO_BET'),({'selection_status':'SENSITIVE'},'COMBO_EXCLUDE'),
++                               ({'adaptive_gate':'MODEL_CONFLICT_REVIEW'},'COMBO_EXCLUDE'),
++                               ({'counter_case_risk':'HIGH'},'COMBO_EXCLUDE')]:
++            row=self.row();row.update(changes)
++            self.assertEqual(self.final(row)['national_status'],status)
++    def test_actual_validation_evidence(self):
++        report=dict(split_date='2026-01-01',test_n=100,holdout_before={'brier':.3,'log_loss':.8},bins=[{'n':100}])
++        self.assertEqual(validation_summary(report)['completed_count'],1)
++        self.assertFalse(validation_summary(report)['profitability_validated'])
++        report.update(market_blend_validated=True,roi_validated=True,roi=.03,roi_n=100)
++        self.assertEqual(validation_summary(report)['completed_count'],2)
++        self.assertEqual(validation_summary(load_validation_report('/missing'))['completed_count'],0)
++        report['test_n']=95
++        self.assertEqual(validation_summary(report)['completed_count'],0)
++
++    def test_daily_national_provisional_cannot_enter_combo(self):
++        row=self.row()
++        row.update(sport_family='soccer_national',event_id='x',home_team='A',away_team='B',
++                   market='h2h',selection='A',best_odds=2,model_win_prob=.6,consensus_prob=.5,
++                   break_even=.5,robust_positive_ratio=1,robust_ev_p10=.1,v3_candidate=True,
++                   commence_time='2026-10-02T18:00:00Z',stage='FINAL')
++        now=pd.Timestamp.now(tz='UTC').isoformat()
++        row.update(data_checked_at=now,xg_checked_at=now)
++        complete=prepare_daily_candidates(pd.DataFrame([row]))
++        self.assertTrue(complete.iloc[0].daily_combo_eligible)
++        row['injury_available']=False
++        incomplete=prepare_daily_candidates(pd.DataFrame([row]))
++        self.assertEqual(incomplete.iloc[0].daily_candidate_state,'잠정 후보')
++        self.assertFalse(incomplete.iloc[0].daily_combo_eligible)
++        # Old snapshots with only ROBUST cannot bypass the new data gate.
++        row.pop('selection_status')
++        legacy=prepare_daily_candidates(pd.DataFrame([row]))
++        self.assertFalse(legacy.iloc[0].daily_combo_eligible)
++
++    def test_compact_table_uses_korean_status(self):
++        row=self.final(self.row())
++        row.update(market='h2h',selection='A',home_team='A',away_team='B',best_odds=2,
++                   model_win_prob=.6,break_even=.5,edge_pp=10,ev_roi=.2,uncertainty_pp=4)
++        table=compact_table(pd.DataFrame([row]))
++        self.assertEqual(table.iloc[0]['상태'],'최종 후보')
++
++    def test_mixed_baseball_row_is_not_nationalized(self):
++        now=pd.Timestamp.now(tz='UTC').isoformat()
++        row=self.row();row.update(data_checked_at=now,xg_checked_at=now,sport_family='soccer_national',
++            event_id='n',market='h2h',selection='A',home_team='A',away_team='B',best_odds=2,
++            model_win_prob=.6,consensus_prob=.5,break_even=.5,robust_positive_ratio=1,robust_ev_p10=.1)
++        national=self.final(row)
++        baseball=dict(sport_family='baseball_mlb',event_id='b',market='h2h',selection='C',
++            home_team='C',away_team='D',best_odds=2,model_win_prob=.6,consensus_prob=.5,
++            break_even=.5,ev_roi=.2,v3_decision_status='ROBUST',v3_candidate=True,
++            stage='FINAL',lineup_confirmed=True,counter_case_risk='LOW')
++        daily=prepare_daily_candidates(pd.DataFrame([national,baseball]))
++        b=daily[daily.event_id.eq('b')].iloc[0]
++        self.assertTrue(b.daily_combo_eligible)
++        self.assertEqual(b.daily_candidate_state,'조합 가능')
+diff --git a/tests/test_v331_amatch_lineup_fix.py b/tests/test_v331_amatch_lineup_fix.py
+index 61ec2f3..968ba7a 100644
+--- a/tests/test_v331_amatch_lineup_fix.py
++++ b/tests/test_v331_amatch_lineup_fix.py
+@@ -1,5 +1,5 @@
+ import pandas as pd
+-from unittest.mock import Mock
++from unittest.mock import Mock, patch
+ 
+ from sports_ev_engine.auto_soccer import analyze_event
+ from sports_ev_engine.deep_soccer_context import collect_deep_context
+@@ -54,7 +54,8 @@ def test_deep_context_extracts_names_and_status_from_full_startxi():
+     ]
+     api.team_players.return_value=[]
+     api.injuries.return_value=[]
+-    ctx=collect_deep_context(api,pool,'Turkey','Italy',kickoff,season=2026,horizon_hours=24)
++    with patch('sports_ev_engine.deep_soccer_context.pd.Timestamp.now',return_value=pd.Timestamp(kickoff).tz_convert('UTC')-pd.Timedelta(hours=1)):
++        ctx=collect_deep_context(api,pool,'Turkey','Italy',kickoff,season=2026,horizon_hours=24)
+     assert ctx['lineup_confirmed'] is True
+     assert ctx['lineup_status']=='CONFIRMED'
+     assert len(ctx['home_lineup_players'])==11
+diff --git a/validation.py b/validation.py
+index b2b3eb5..079340c 100644
+--- a/validation.py
++++ b/validation.py
+@@ -6,7 +6,7 @@ import pandas as pd
+ from .models.elo import build_elo,opponent_adjusted_form
+ from .models.soccer_auto import norm_name,score_matrix,price_from_matrix
+ 
+-MODEL_ID='national-raw-v291'
++MODEL_ID='national-raw-v3.4.24'
+ 
+ def temperature(prob,t):
+     values=[max(1e-12,float(p))**(1/float(t)) for p in prob]
+@@ -57,3 +57,31 @@ def validate(records,as_of,recent_n=6,max_events=1200):
+         pairs=[(p,i==r['y']) for r in test for i,p in enumerate(temperature(r['p'],chosen if adopted else 1)) if lo<=p<hi]
+         if pairs:bins.append({'bin':f'{lo:.1f}-{min(hi,1):.1f}','n':len(pairs),'mean_predicted':sum(p for p,y in pairs)/len(pairs),'observed_frequency':sum(y for p,y in pairs)/len(pairs)})
+     return {'model_id':MODEL_ID,'status':'보정 채택' if adopted else '보정 미채택','n':len(predictions),'skipped':skipped,'train_n':len(train),'test_n':len(test),'split_date':split,'start_date':predictions[0]['date'],'end_date':predictions[-1]['date'],'chosen_temperature':chosen,'live_temperature':chosen if adopted else 1.0,'holdout_before':before,'holdout_after':after,'bins':bins,'market_blend_validated':False,'scope':'90분 승무패 원모델만. 현재 수정된 기록의 소급 검증; 당시 수집 상태·배당·라인업·EV/ROI 미검증'},predictions
++
++
++def load_validation_report(path='data/validation_report.json'):
++    import json
++    from pathlib import Path
++    try:
++        report=json.loads(Path(path).read_text(encoding='utf-8'))
++        return report if isinstance(report,dict) else {}
++    except (OSError,ValueError): return {}
++
++def validation_summary(report):
++    """Report observed evidence without conflating raw-model testing with ROI."""
++    report=report or {}
++    holdout=report.get('holdout_before') or {}
++    def number(x):
++        try: return math.isfinite(float(x))
++        except (TypeError,ValueError): return False
++    oos=bool(report.get('split_date')) and int(report.get('test_n') or 0)>=100
++    probability=oos and all(number(holdout.get(k)) for k in ('brier','log_loss')) and bool(report.get('bins'))
++    profitability=(probability and report.get('market_blend_validated') is True
++                   and report.get('roi_validated') is True and number(report.get('roi'))
++                   and int(report.get('roi_n') or 0)>=100)
++    return {'probability_validated':probability,'profitability_validated':profitability,
++            'completed_count':int(probability)+int(profitability),
++            'status':'수익성 검증 완료' if profitability else '확률 성능 검증 · 장기 수익성 미검증' if probability else '장기 수익성 미검증',
++            'brier':holdout.get('brier'),'log_loss':holdout.get('log_loss'),
++            'roi':report.get('roi'),'calibration':report.get('bins',[]),'out_of_sample_n':report.get('test_n',0),
++            'scope':report.get('scope','검증 보고서 없음')}
+-- 
+2.51.1
+

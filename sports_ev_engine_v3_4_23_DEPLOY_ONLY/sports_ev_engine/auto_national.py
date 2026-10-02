@@ -7,7 +7,7 @@ from functools import lru_cache
 from .free_national import free_pool
 from .models.soccer_auto import norm_name
 PROVIDER_BUILD='3.0.0'
-PATCH_BUILD = '3.4.16-robust-form-xg'
+PATCH_BUILD = '3.4.24-national-validation'
 BASE='https://site.api.espn.com/apis/site/v2/sports/soccer'
 LEAGUES=('uefa.nations','fifa.worldq.uefa','uefa.euro','uefa.euroq','fifa.friendly','fifa.world','concacaf.nations.league','fifa.worldq.concacaf','concacaf.gold','fifa.worldq.conmebol','conmebol.america','fifa.worldq.afc','afc.cup','fifa.worldq.caf','caf.nations','fifa.worldq.ofc')
 

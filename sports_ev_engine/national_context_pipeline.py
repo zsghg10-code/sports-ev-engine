@@ -5,7 +5,7 @@ independent: an API-Football error must never prevent ESPN/FotMob/SofaScore xG c
 """
 from __future__ import annotations
 
-PATCH_BUILD = '3.4.16-robust-form-xg'
+PATCH_BUILD = '3.4.24-national-validation'
 
 import pandas as pd
 

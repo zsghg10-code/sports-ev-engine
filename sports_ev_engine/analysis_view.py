@@ -30,12 +30,15 @@ def match_summary(frame):
                 'EV(%)':round(value.point_ev_roi*100,2),
                 '가정 최저 EV(%)':round(value.scenario_ev_min*100,2),
                 '가정 최고 EV(%)':round(value.scenario_ev_max*100,2),
-                '판정':'모델상 양의 EV' if value.point_ev_roi>0 else '현재 배당에서 양의 EV 없음',
+                '판정':value.get('national_status_label', '모델상 양의 EV' if value.point_ev_roi>0 else '현재 배당에서 양의 EV 없음'),
+                '경기 데이터 검증':value.get('match_data_status',''),
+                '미확인 데이터':value.get('match_data_missing',''),
+                '모델 성능 검증':value.get('model_validation_status',''),
                 '라인업':'확인' if value.lineup_confirmed else '미확인',
                 '조합':'참고 조합 가능' if value.scenario_parlay_eligible else '제외',
                 '이유':humanize_policy_reason(value.selection_reason,value)}
             if 'v3_decision_status' in rows.columns:
-                item.update({'v3 판정':value.v3_decision_status,
+                item.update({'v3 판정':value.get('national_status_label',value.v3_decision_status),
                              'Stress 양수 비율(%)':round(float(value.robust_positive_ratio)*100,1),
                              'v3 최저 EV(%)':round(float(value.robust_ev_min)*100,2),
                              '반증 위험':value.counter_case_risk,

@@ -9,14 +9,14 @@ Scenario ranges are stress tests, not statistical confidence intervals.
 """
 from __future__ import annotations
 
-PATCH_BUILD = '3.4.16-robust-form-xg'
+PATCH_BUILD = '3.4.24-national-validation'
 
 from dataclasses import dataclass, asdict
 from itertools import product
 import math
 from typing import Callable, Iterable
 
-ENGINE_ID = "chatgpt-style-v3.4.16-robust-form-xg"
+ENGINE_ID = "chatgpt-style-v3.4.24-national-validation"
 
 
 def clamp(v, lo, hi):

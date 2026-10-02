@@ -3,7 +3,7 @@ import math
 from itertools import product, combinations
 from sports_ev_engine.models.soccer_auto import score_matrix, price_from_matrix
 
-POLICY_ID = 'national-scenarios-v293'
+POLICY_ID = 'national-scenarios-v3.4.24'
 
 def scenario_matrices(hl, al):
     # Illustrative modelling assumptions, not estimated parameter errors.
@@ -28,7 +28,7 @@ def assess(row, matrices, side, line):
         status='REVIEW';reason='원모델-시장 괴리 15%p 초과: 기존 검토 기준 유지'
     elif row['point_ev_roi']>0:
         if low>0:
-            status='SCENARIO_PASS';reason='설정한 27개 가정에서 모두 기대값 양수; 수익성 미검증'
+            status='SCENARIO_PASS';reason='설정한 27개 가정에서 모두 기대값 양수'
         else:
             status='SENSITIVE';reason='기준 기대값은 양수지만 가정 변화 시 0 이하; 조합 제외'
     lineup=bool(row.get('lineup_confirmed',False))
@@ -41,7 +41,9 @@ def assess(row, matrices, side, line):
 
 def reference_pairs(frame):
     """Experimental pairs of distinct events; independence is an assumption."""
-    rows=frame[frame.scenario_parlay_eligible].sort_values('scenario_ev_min',ascending=False).head(20).to_dict('records')
+    eligible=frame.scenario_parlay_eligible.fillna(False).map(truth)
+    if 'national_status' in frame: eligible &= frame.national_status.eq('FINAL_BET')
+    rows=frame[eligible].sort_values('scenario_ev_min',ascending=False).head(20).to_dict('records')
     out=[]
     for a,b in combinations(rows,2):
         if a['event_id']==b['event_id']:continue
@@ -51,3 +53,63 @@ def reference_pairs(frame):
             '가정 최저 EV(%)':round(100*((1+a['scenario_ev_min'])*(1+b['scenario_ev_min'])-1),2),
             '조건':'독립 가정 · 적특/반적특 시 수령액 변동 · 실전 미검증'})
     return sorted(out,key=lambda x:x['가정 최저 EV(%)'],reverse=True)[:5]
+
+
+STATUS_LABELS = {'FINAL_BET':'최종 후보', 'PROVISIONAL':'잠정 후보',
+                 'COMBO_EXCLUDE':'조합 제외', 'NO_BET':'베팅 제외'}
+
+def truth(value):
+    return str(value).strip().lower() in {'true','1','yes','confirmed','final'}
+
+def finite(value):
+    try: return math.isfinite(float(value))
+    except (TypeError, ValueError): return False
+
+def match_data_validation(row, now=None):
+    import pandas as pd
+    now = pd.Timestamp(now) if now is not None else pd.Timestamp.now(tz='UTC')
+    if now.tzinfo is None: now = now.tz_localize('UTC')
+    stamp = pd.to_datetime(row.get('data_checked_at'), utc=True, errors='coerce')
+    xg_stamp = pd.to_datetime(row.get('xg_checked_at'), utc=True, errors='coerce')
+    checks = {
+        '라인업': truth(row.get('lineup_confirmed')),
+        'xG': all(finite(row.get(k)) and float(row.get(k)) >= 0 for k in
+                   ('home_xg_for','home_xg_against','away_xg_for','away_xg_against'))
+              and all(finite(row.get(k)) and float(row.get(k)) >= 3 for k in ('xg_samples_home','xg_samples_away'))
+              and str(row.get('xg_collection_status','')).upper() == 'OK',
+        '결장': truth(row.get('injury_available')),
+        '휴식일': all(finite(row.get(k)) and float(row.get(k)) >= 0 for k in ('home_rest_days','away_rest_days')),
+        '신선도': all(not pd.isna(t) and 0 <= (now-t).total_seconds() <= 10800 for t in (stamp,xg_stamp)),
+    }
+    missing = [key for key,ok in checks.items() if not ok]
+    return {'match_data_verified':not missing, 'match_data_status':'검증 완료' if not missing else '확인 필요',
+            'match_data_missing':' · '.join(missing)}
+
+def finalize_national(row, now=None):
+    """One downstream policy after calibration; profitability never gates picks."""
+    out = dict(row)
+    out.update(match_data_validation(row, now))
+    ev = row.get('point_ev_roi', row.get('ev_roi'))
+    scenario = row.get('selection_status')
+    if scenario is None:
+        scenario='SCENARIO_PASS' if row.get('national_status') in {'FINAL_BET','PROVISIONAL'} else 'DATA_HOLD'
+    robust = row.get('v3_decision_status')
+    if not finite(ev) or float(ev) <= 0 or scenario in {'PASS','DATA_HOLD'}:
+        status = 'NO_BET'
+    elif (scenario in {'REVIEW','SENSITIVE'} or robust in {'FRAGILE','PASS','DATA_HOLD'}
+          or str(row.get('adaptive_gate','OK')) not in {'','OK'}):
+        status = 'COMBO_EXCLUDE'
+    elif not out['match_data_verified']:
+        status = 'PROVISIONAL'
+    elif robust != 'ROBUST' or row.get('counter_case_risk') == 'HIGH':
+        status = 'COMBO_EXCLUDE'
+    else:
+        status = 'FINAL_BET'
+    if status in {'FINAL_BET','PROVISIONAL'}:
+        out['selection_reason']='가정 변화 통과 · ' + ('경기 데이터 검증 완료' if out['match_data_verified'] else '확인 필요: ' + out['match_data_missing'])
+    out['national_status'] = status
+    out['national_status_label'] = STATUS_LABELS[status]
+    out['scenario_candidate'] = out['v3_candidate'] = status in {'FINAL_BET','PROVISIONAL'}
+    out['scenario_parlay_eligible'] = out['v3_parlay_eligible'] = out['parlay_eligible'] = status == 'FINAL_BET'
+    out['model_validation_status'] = row.get('model_validation_status','장기 수익성 미검증')
+    return out

@@ -89,6 +89,8 @@ def _uncertainty_label(row: pd.Series) -> str:
 
 
 def _status(row: pd.Series) -> str:
+    if isinstance(row.get("national_status_label"), str) and row.get("national_status_label"):
+        return str(row.get("national_status_label"))
     status=str(row.get("v3_decision_status") or row.get("robust_status") or row.get("selection_status") or row.get("grade") or "").strip().upper()
     return status or "미판정"
 
@@ -258,6 +260,9 @@ def event_summary(frame: pd.DataFrame) -> dict:
         "data_risk":_data_risk_text(focus),
         "data_status":data_status(frame),
         "confidence":confidence_score(frame,focus),
+        "match_data_status":focus.get("match_data_status",""),
+        "match_data_missing":focus.get("match_data_missing",""),
+        "model_validation_status":focus.get("model_validation_status",""),
         "focus_status":_status(focus),
         "focus_pick":_option_label(focus),
         "robust_positive_ratio":_num(focus.get("robust_positive_ratio"), float("nan")),

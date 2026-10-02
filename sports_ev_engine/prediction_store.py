@@ -20,7 +20,7 @@ import pandas as pd
 from .core.asian import settle_total_under, settle_total_over, settle_home_handicap
 from . import persistent_store
 
-MODEL_VERSION = "3.4.22-mlb-totals-calibration"
+MODEL_VERSION = "3.4.24-national-validation"
 DEFAULT_PREDICTIONS = "data/prediction_snapshots.jsonl"
 DEFAULT_SETTLED = "data/settled_predictions.jsonl"
 DEFAULT_MARKET_OBSERVATIONS = "data/market_observations.jsonl"
@@ -295,6 +295,8 @@ def record_frame(frame: pd.DataFrame, sport_key: str | None = None, sport_family
         "home_starter_vs_opponent_team", "away_starter_vs_opponent_team",
         "home_bullpen_pitches_last3", "away_bullpen_pitches_last3", "home_bullpen_relief_ip_last3", "away_bullpen_relief_ip_last3",
         "home_bullpen_exact", "away_bullpen_exact", "home_recent_runs_for", "home_recent_runs_against", "away_recent_runs_for", "away_recent_runs_against",
+        "selection_status", "selection_reason", "selection_policy", "scenario_ev_min", "scenario_ev_max", "scenario_count", "scenario_candidate", "scenario_parlay_eligible",
+        "national_status", "national_status_label", "match_data_verified", "match_data_status", "match_data_missing", "model_validation_status", "data_checked_at", "injury_available",
         "lineup_confirmed", "probable_lineup", "lineup_source", "lineup_status", "lineup_fallback_used", "home_probable_players", "away_probable_players", "fixture_id", "starter_confirmed", "reasoning_engine_id", "signal_coverage", "signal_summary", "missing_signals", "counter_case_risk",
         "counter_case_summary", "v3_decision_status", "robust_positive_ratio", "robust_ev_min", "robust_ev_p10", "robust_ev_max",
         "robust_prob_min", "robust_prob_max", "robust_scenario_count", "v3_candidate", "v3_parlay_eligible", "odds_region", "model_weight",

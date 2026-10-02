@@ -12,7 +12,7 @@ import pandas as pd
 from .models.soccer_auto import norm_name
 
 PROVIDER_BUILD="3.0.0"
-PATCH_BUILD = '3.4.16-robust-form-xg'
+PATCH_BUILD = '3.4.24-national-validation'
 
 
 def _fixture_match(pool,home,away,kickoff_iso,tolerance_minutes=180):
@@ -264,7 +264,7 @@ def collect_deep_context(api,pool,home,away,kickoff_iso,season=None,horizon_hour
     now=pd.Timestamp.now(tz="UTC")
     target_utc=target.tz_convert("UTC") if target.tzinfo else target.tz_localize("UTC")
     hours=(target_utc-now).total_seconds()/3600
-    ctx={"deep_context_attempted":True,"horizon_hours":horizon_hours,
+    ctx={"data_checked_at":now.isoformat(),"deep_context_attempted":True,"horizon_hours":horizon_hours,
          "home_rest_days":_rest_days(pool,home,kickoff_iso),"away_rest_days":_rest_days(pool,away,kickoff_iso),
          "schedule_source":"competition fixture history"}
     if hours<0 or hours>horizon_hours:

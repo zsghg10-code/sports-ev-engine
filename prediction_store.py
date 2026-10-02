@@ -20,7 +20,7 @@ import pandas as pd
 from .core.asian import settle_total_under, settle_total_over, settle_home_handicap
 from . import persistent_store
 
-MODEL_VERSION = "3.4.14"
+MODEL_VERSION = "3.4.24-national-validation"
 DEFAULT_PREDICTIONS = "data/prediction_snapshots.jsonl"
 DEFAULT_SETTLED = "data/settled_predictions.jsonl"
 DEFAULT_MARKET_OBSERVATIONS = "data/market_observations.jsonl"
@@ -285,23 +285,34 @@ def record_frame(frame: pd.DataFrame, sport_key: str | None = None, sport_family
     rows = []
     keep = [
         "event_id", "commence_time", "home_team", "away_team", "market", "selection", "point", "best_book", "best_odds", "books",
-        "consensus_prob", "raw_independent_prob", "model_win_prob", "push_prob", "break_even", "edge_pp", "ev_roi", "point_ev_roi",
+        "consensus_prob", "raw_independent_prob", "raw_push_prob", "model_win_prob", "push_prob", "break_even", "edge_pp", "ev_roi", "point_ev_roi",
         "conservative_ev_roi", "uncertainty_pp", "grade", "sanity", "stage", "data_quality", "sport_key", "home_lambda", "away_lambda",
         "home_expected_runs", "away_expected_runs", "home_starter", "away_starter", "home_starter_expected_ip", "away_starter_expected_ip",
         "home_starter_recent_bb_pct", "away_starter_recent_bb_pct", "home_starter_recent_k_pct", "away_starter_recent_k_pct",
-        "home_starter_recent_kbb_pct", "away_starter_recent_kbb_pct", "home_bullpen_pitches_last3", "away_bullpen_pitches_last3",
+        "home_starter_recent_kbb_pct", "away_starter_recent_kbb_pct",
+        "home_starter_vs_opponent_games", "away_starter_vs_opponent_games", "home_starter_vs_opponent_ip", "away_starter_vs_opponent_ip",
+        "home_starter_vs_opponent_era", "away_starter_vs_opponent_era", "home_starter_vs_opponent_kbb_pct", "away_starter_vs_opponent_kbb_pct",
+        "home_starter_vs_opponent_team", "away_starter_vs_opponent_team",
+        "home_bullpen_pitches_last3", "away_bullpen_pitches_last3", "home_bullpen_relief_ip_last3", "away_bullpen_relief_ip_last3",
+        "home_bullpen_exact", "away_bullpen_exact", "home_recent_runs_for", "home_recent_runs_against", "away_recent_runs_for", "away_recent_runs_against",
+        "selection_status", "selection_reason", "selection_policy", "scenario_ev_min", "scenario_ev_max", "scenario_count", "scenario_candidate", "scenario_parlay_eligible",
+        "national_status", "national_status_label", "match_data_verified", "match_data_status", "match_data_missing", "model_validation_status", "data_checked_at", "injury_available",
         "lineup_confirmed", "probable_lineup", "lineup_source", "lineup_status", "lineup_fallback_used", "home_probable_players", "away_probable_players", "fixture_id", "starter_confirmed", "reasoning_engine_id", "signal_coverage", "signal_summary", "missing_signals", "counter_case_risk",
         "counter_case_summary", "v3_decision_status", "robust_positive_ratio", "robust_ev_min", "robust_ev_p10", "robust_ev_max",
         "robust_prob_min", "robust_prob_max", "robust_scenario_count", "v3_candidate", "v3_parlay_eligible", "odds_region", "model_weight",
-        "pre_adaptive_model_win_prob", "ensemble_prob_cond", "calibrated_prob_cond", "adaptive_delta_pp", "calibration_delta_pp",
-        "calibration_n", "calibration_active", "calibration_reliability", "ensemble_disagreement_pp", "ensemble_gate", "ensemble_summary", "adaptive_gate",
+        "pre_adaptive_model_win_prob", "pre_calibration_prob_cond", "pre_calibration_win_prob", "ensemble_prob_cond", "calibrated_prob_cond", "adaptive_delta_pp", "calibration_delta_pp",
+        "calibration_n", "calibration_active", "calibration_reliability", "calibration_reason", "ensemble_disagreement_pp", "ensemble_gate", "ensemble_summary", "adaptive_gate",
+        "raw_market_gap_pp", "raw_market_gap_final_audit_pp", "final_market_gap_pp", "mlb_totals_divergence_threshold_pp",
+        "mlb_totals_calibration_evidence_sufficient", "mlb_totals_market_disagreement_gate", "recent_form_ensemble_suppressed",
+        "final_decision_recomputed", "final_downgrade_reason", "expected_runs_adjustments", "score_distribution_family",
+        "score_distribution_dispersion", "score_distribution_dispersion_source",
         "ensemble_independent_prob", "ensemble_independent_weight", "ensemble_market_prob", "ensemble_market_weight",
         "ensemble_recent_form_prob", "ensemble_recent_form_weight", "ensemble_context_model_prob", "ensemble_context_model_weight",
-        "recent_form_used", "starter_recent_used", "velocity_used", "bullpen_used", "split_used", "weather_used",
+        "recent_form_used", "starter_recent_used", "starter_vs_opponent_used", "velocity_used", "bullpen_used", "split_used", "weather_used",
         "plate_discipline_used", "statcast_quality_used", "statcast_fallback_used", "batted_ball_regression_used", "pitch_mix_used", "starter_workload_used",
         "bullpen_exact_used", "lineup_platoon_exact_used", "pitch_matchup_used", "availability_news_used", "lineup_change_used",
         "market_movement_used", "roof_used", "umpire_used", "travel_rest_used", "bvp_used", "bullpen_manager_used",
-        "home_xg_for", "home_xg_against", "away_xg_for", "away_xg_against", "xg_source", "xg_fallback_used", "xg_fallback_attempted", "xg_fallback_source", "xg_sources_tried", "xg_partial", "xg_samples_home", "xg_samples_away", "xg_checked_at", "xg_collection_status", "xg_fallback_error",
+        "home_xg_for", "home_xg_against", "away_xg_for", "away_xg_against", "xg_source", "xg_fallback_used", "xg_fallback_attempted", "xg_fallback_source", "xg_sources_tried", "xg_partial", "xg_samples_home", "xg_samples_away", "xg_checked_at", "xg_collection_status", "xg_fallback_error", "xg_canonical_source", "xg_application_mode", "xg_blend_weight", "xg_target_home", "xg_target_away",
         "home_big_chances", "away_big_chances", "home_rest_days", "away_rest_days",
         "home_missing_players", "away_missing_players", "home_formation", "away_formation",
         "home_recent_gf", "home_recent_ga", "away_recent_gf", "away_recent_ga", "home_elo", "away_elo",

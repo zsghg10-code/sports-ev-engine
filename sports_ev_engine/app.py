@@ -35,6 +35,7 @@ from sports_ev_engine.providers.mlb_statsapi import schedule as mlb_schedule, sc
 from sports_ev_engine.providers.mlb_context import MLBContextProvider
 from sports_ev_engine.market import consensus, clean_odds
 from sports_ev_engine import auto_soccer as auto_soccer_provider
+from sports_ev_engine.models import elo as elo_provider
 from sports_ev_engine.auto_soccer import analyze_event
 from sports_ev_engine.competition_form import build_competition_pool
 from sports_ev_engine import reasoning_engine as reasoning_provider
@@ -42,10 +43,10 @@ from sports_ev_engine.national_soccer import is_senior_international, build_nati
 from sports_ev_engine.international_discovery import (discover_api_football_fixtures, flatten_api_football_odds, append_only_missing_events, competition_rows, kst_target_dates)
 from sports_ev_engine.core.parlay import optimize_parlays
 from sports_ev_engine.review_policy import candidate_mask, review_mask
-from sports_ev_engine.national_policy import reference_pairs
+from sports_ev_engine.national_policy import reference_pairs, finalize_national
 from sports_ev_engine.analysis_view import match_summary
 from sports_ev_engine.explanations import humanize_policy_reason
-from sports_ev_engine.validation import validate
+from sports_ev_engine.validation import validate, validation_summary
 from sports_ev_engine.providers.official_baseball import OfficialBaseballStats
 from sports_ev_engine.official_baseball_model import analyze_official_event
 from sports_ev_engine.providers.live_baseball import LiveBaseballContext
@@ -77,20 +78,26 @@ from sports_ev_engine.feature_attribution import attribution
 from sports_ev_engine.model_drift import drift_rows
 from sports_ev_engine.bankroll import simulate as simulate_bankroll
 
-st.set_page_config(page_title="Sports EV Engine v3.4.15",layout="wide")
-st.title("Sports EV Engine v3.4.15")
-st.caption("BUILD v3.4.15-xg-single-pass · 2026-09-29")
+st.set_page_config(page_title="Sports EV Engine v3.4.24",layout="wide")
+st.title("Sports EV Engine v3.4.24")
+st.caption("BUILD v3.4.24-national-validation · 2026-10-02")
 if any(getattr(module,"PROVIDER_BUILD",None)!="3.0.0" for module in (live_provider,national_provider,advanced_provider,odds_provider,football_provider,free_provider,auto_national_provider,deep_soccer_provider)):
     st.error("앱과 수집 파일 버전이 다릅니다. ZIP의 sports_ev_engine 폴더까지 전부 반영한 뒤 Streamlit 앱을 Reboot하세요.")
     st.stop()
-_PATCH_BUILD = "3.4.15-xg-single-pass"
-_patch_modules=(auto_national_provider,deep_soccer_provider,free_provider,auto_soccer_provider,reasoning_provider,national_context_provider)
+if getattr(advanced_provider,"BASEBALL_ADVANCED_BUILD",None)!="3.4.23":
+    st.error("v3.4.23 야구 정밀수집 모듈이 구버전입니다. app.py와 sports_ev_engine/providers/baseball_advanced.py를 함께 덮어쓴 뒤 Reboot하세요.")
+    st.stop()
+if getattr(live_provider,"LIVE_BASEBALL_BUILD",None)!="3.4.20":
+    st.error("v3.4.22 KBO/NPB 라이브 수집 모듈이 구버전입니다. sports_ev_engine/providers/live_baseball.py까지 함께 덮어쓴 뒤 Reboot하세요.")
+    st.stop()
+_PATCH_BUILD = "3.4.24-national-validation"
+_patch_modules=(auto_national_provider,deep_soccer_provider,free_provider,auto_soccer_provider,reasoning_provider,national_context_provider,elo_provider)
 _patch_mismatch=[getattr(m,"__name__",str(m)) for m in _patch_modules if getattr(m,"PATCH_BUILD",None)!=_PATCH_BUILD]
 if _patch_mismatch:
-    st.error("v3.4.15 핵심 xG 모듈이 섞여 있습니다: " + ", ".join(_patch_mismatch) + ". DEPLOY_ONLY ZIP의 app.py와 sports_ev_engine 폴더를 함께 덮어쓴 뒤 Reboot하세요.")
+    st.error("v3.4.24 핵심 축구 모델 모듈이 섞여 있습니다: " + ", ".join(_patch_mismatch) + ". DEPLOY_ONLY ZIP의 app.py와 sports_ev_engine 폴더를 함께 덮어쓴 뒤 Reboot하세요.")
     st.stop()
 FootballAccessError=football_provider.FootballAccessError
-st.caption("분석 백엔드 v3.4.15 · measured xG single-pass + API-Football/ESPN/FotMob/SofaScore fallback")
+st.caption("분석 백엔드 v3.4.24 · opponent-strength robust form + adaptive measured-xG single-pass + API-Football/ESPN/FotMob/SofaScore fallback")
 st.caption("독립 모델 → 정밀 컨텍스트 → 반증 검사 → 시장 캘리브레이션 → 27개 스트레스 시나리오 → EV/ROBUST 판정 → 기록·사후검증")
 
 def secret(name):
@@ -107,7 +114,7 @@ SUPABASE_KEY=secret("SUPABASE_SERVICE_ROLE_KEY") or secret("SUPABASE_KEY")
 configure_persistence(SUPABASE_URL,SUPABASE_KEY)
 BASEBALL_KEY=None
 
-_BUILD_ID = "3.4.15-xg-single-pass"
+_BUILD_ID = "3.4.24-national-validation"
 if st.session_state.get("_build_id") != _BUILD_ID:
     for _k in [
         "baseball_ranked","baseball_failures","baseball_meta","baseball_live_rows",
@@ -203,6 +210,8 @@ def render_final_decision_layer(frame, key_prefix, title="🧠 v3 FINAL Decision
         f"**데이터 상태:** {summary['data_status']}",
         f"**Model confidence:** {summary['confidence']}/100",
     ]
+    if summary.get("match_data_status"):
+        summary_lines += [f"**경기 데이터 검증:** {summary['match_data_status']} · {summary['match_data_missing']}", f"**모델 성능 검증:** {summary['model_validation_status']}"]
     st.markdown("  \n".join(summary_lines))
     ratio=summary.get('robust_positive_ratio')
     n=summary.get('robust_scenario_count',0)
@@ -219,9 +228,10 @@ def render_final_decision_layer(frame, key_prefix, title="🧠 v3 FINAL Decision
         if summary.get('missing_signals'):
             st.write("MISSING:",summary['missing_signals'])
         detail_cols=[c for c in [
-            "kickoff_kst","display_pick","best_book","best_odds","raw_independent_prob","market_prob","model_win_prob",
-            "robust_positive_ratio","robust_ev_min","robust_ev_p10","robust_ev_max",
-            "counter_case_risk","counter_case_summary","sanity","uncertainty_pp","signal_coverage",
+            "kickoff_kst","display_pick","best_book","best_odds","raw_independent_prob","market_prob","consensus_prob",
+            "pre_calibration_prob_cond","calibrated_prob_cond","model_win_prob","raw_market_gap_final_audit_pp",
+            "calibration_n","calibration_active","calibration_reliability","robust_positive_ratio","robust_ev_min","robust_ev_p10","robust_ev_max",
+            "counter_case_risk","counter_case_summary","sanity","uncertainty_pp","signal_coverage","final_downgrade_reason",
             "lineup_confirmed","stage","data_quality","home_lambda","away_lambda","home_expected_runs","away_expected_runs"
         ] if c in g.columns]
         detail=g[detail_cols].copy()
@@ -551,7 +561,7 @@ with tabs[1]:
                         st.session_state["national_discovery_status"]=[]
                 elif auto_all:
                     st.session_state["national_discovery_status"]=[]
-                    competition_errors.append({"경기":"다중소스 A매치 자동발견","이유":"API_FOOTBALL_KEY 없음 — The Odds API 활성 국제대회만 조회"})
+                    st.session_state["national_sources"].append({"소스":"다중소스 A매치 자동발견","상태":"API_FOOTBALL_KEY 없음 — The Odds API 활성 국제대회만 조회"})
 
                 raw=append_only_missing_events(raw_primary,raw_fallback)
                 st.session_state["national_filter_label"]=(f"{national_match_date:%Y-%m-%d} KST" if national_date_only else str(national_scope))
@@ -715,6 +725,8 @@ with tabs[1]:
             with st.spinner("각 경기 이전 기록만으로 검증 중..."):
                 report,_=validate(st.session_state["validation_records"],datetime.now(ZoneInfo("Asia/Seoul")).date(),national_recent,max_events=900)
                 st.session_state["validation_report"]=report
+                (Path(__file__).parent/"data").mkdir(exist_ok=True)
+                (Path(__file__).parent/"data/validation_report.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
         report=st.session_state.get("validation_report")
         if report is None:
             try:report=json.loads((Path(__file__).parent/'data/validation_report.json').read_text())
@@ -727,6 +739,9 @@ with tabs[1]:
             st.download_button("검증 보고서 다운로드",json.dumps(report,ensure_ascii=False,indent=2),file_name="validation_report.json")
     nr=st.session_state.get("national_ranked")
     if isinstance(nr,pd.DataFrame) and not nr.empty:
+        nr=nr.copy()
+        nr["model_validation_status"]=validation_summary(report)["status"]
+        nr=pd.DataFrame([finalize_national(r) for r in nr.to_dict("records")],index=nr.index)
         if st.session_state.get("national_filter_label"):st.caption(f"분석 경기일: {st.session_state['national_filter_label']}")
         render_final_decision_layer(nr,"national",title="🧠 v3 FINAL Decision Layer · A매치")
         st.markdown("### 상세 진단 · 전체 경기 자동분석")
@@ -734,11 +749,12 @@ with tabs[1]:
         st.dataframe(match_summary(nr),hide_index=True)
         st.info("분석 확률과 EV는 모델 추정입니다. v3 정밀 모드에서는 제공사가 실제 반환한 xG·확정 라인업·결장·선수 중요도·휴식일을 추가 반영하며, 확보하지 못한 신호는 MISSING으로 남깁니다.")
         st.markdown("### A매치 후보 · 조합 상태")
+        st.write({"모델 성능 검증":validation_summary(report)})
         passed_count=int(nr.scenario_candidate.sum())
         ready_count=int(nr.scenario_parlay_eligible.sum())
         pairs=reference_pairs(nr)
         metrics=st.columns(4)
-        for cell,label,value in zip(metrics,['가정 변화 통과 선택지','그중 라인업 확인','참고용 2폴 표시','성능 검증 완료'],[passed_count,ready_count,len(pairs),0]):
+        for cell,label,value in zip(metrics,['개별 후보','최종 후보','참고용 2폴 표시','성능 검증 완료 항목'],[passed_count,ready_count,len(pairs),validation_summary(report)['completed_count']]):
             cell.metric(label,value)
         st.caption("앞의 두 숫자는 경기 수가 아닌 선택지 수입니다. 개별 분석 → 가정 변화 통과 → 라인업 확인 → 서로 다른 경기의 참고용 2폴 순서입니다. 모델 성능 검증은 별도입니다.")
         with st.expander("미검증은 어떻게 검증하나요?"):
@@ -747,18 +763,17 @@ with tabs[1]:
         st.markdown("#### 가정 변화에도 기대값이 양수인 개별 후보")
         st.caption("양 팀 예상 득점을 각각 −10%·기준·+10%, 원모델 비중을 15%·25%·35%로 바꾼 27개 조합입니다. 이 범위는 실측 오차나 신뢰구간이 아닙니다. 기존 약 8.5%p 일괄 차감은 후보 선정에서 사용하지 않습니다.")
         st.info("여기서 '가정 변화 통과'는 개별 픽의 강건성 시험 통과를 뜻합니다. 🏆 오늘의 베스트 조합에서는 여기에 데이터 신선도·반증위험·드리프트·라인업 단계 등 별도 안전 게이트를 한 번 더 적용하므로, 통과 픽이 '검토 후보'로는 보이더라도 실제 조합에서는 제외될 수 있습니다.")
-        counts=nr.selection_status.value_counts()
-        st.write({"분석 옵션":len(nr),"가정 변화 통과":int(counts.get('SCENARIO_PASS',0)),"가정에 민감":int(counts.get('SENSITIVE',0)),"괴리 검토":int(counts.get('REVIEW',0)),"기대값 미달":int(counts.get('PASS',0)),"자료 보류":int(counts.get('DATA_HOLD',0))})
-        labels={'SCENARIO_PASS':'가정 변화 통과 · 미검증','SENSITIVE':'가정에 민감 · 조합 제외','REVIEW':'괴리 검토 · 조합 제외','PASS':'기대값 미달','DATA_HOLD':'자료 보류'}
+        counts=nr.national_status_label.value_counts()
+        st.write({"분석 옵션":len(nr),**{label:int(counts.get(label,0)) for label in ('최종 후보','잠정 후보','조합 제외','베팅 제외')}})
         def policy_table(frame):
-            cols=['selection_status','display_pick','best_book','best_odds','model_win_prob','break_even','edge_pp','point_ev_roi','scenario_win_min','scenario_win_max','scenario_ev_min','scenario_ev_max','lineup_confirmed','selection_reason']
+            cols=['selection_status','match_data_status','match_data_missing','model_validation_status','display_pick','best_book','best_odds','model_win_prob','break_even','edge_pp','point_ev_roi','scenario_win_min','scenario_win_max','scenario_ev_min','scenario_ev_max','lineup_confirmed','selection_reason']
             shown=frame[[c for c in cols if c in frame]].copy()
             for col in ['model_win_prob','break_even','point_ev_roi','scenario_win_min','scenario_win_max','scenario_ev_min','scenario_ev_max']:
                 shown[col]=(shown[col]*100).round(2)
-            shown['selection_status']=shown['selection_status'].map(labels)
+            shown['selection_status']=frame['national_status_label']
             if 'selection_reason' in shown:
                 shown['selection_reason']=[humanize_policy_reason(v, frame.iloc[i] if i < len(frame) else None) for i,v in enumerate(shown['selection_reason'].tolist())]
-            return shown.rename(columns={'selection_status':'판정','display_pick':'경기/선택','model_win_prob':'기준 확률(%)','break_even':'BE(%)','edge_pp':'Edge(%p)','point_ev_roi':'기준 EV(%)','scenario_win_min':'가정 최저 확률(%)','scenario_win_max':'가정 최고 확률(%)','scenario_ev_min':'가정 최저 EV(%)','scenario_ev_max':'가정 최고 EV(%)','lineup_confirmed':'라인업 확인','selection_reason':'사람이 읽는 판정 이유'})
+            return shown.rename(columns={'match_data_status':'경기 데이터 검증','match_data_missing':'미확인 데이터','model_validation_status':'모델 성능 검증','selection_status':'판정','display_pick':'경기/선택','model_win_prob':'기준 확률(%)','break_even':'BE(%)','edge_pp':'Edge(%p)','point_ev_roi':'기준 EV(%)','scenario_win_min':'가정 최저 확률(%)','scenario_win_max':'가정 최고 확률(%)','scenario_ev_min':'가정 최저 EV(%)','scenario_ev_max':'가정 최고 EV(%)','lineup_confirmed':'라인업 확인','selection_reason':'사람이 읽는 판정 이유'})
         passed=nr[nr.scenario_candidate].sort_values('scenario_ev_min',ascending=False)
         if passed.empty:st.info("설정한 모든 가정에서 기대값이 양수인 후보는 없습니다. 아래 민감 후보와 제외 이유를 확인하세요.")
         else:st.dataframe(policy_table(passed),hide_index=True)
@@ -770,7 +785,7 @@ with tabs[1]:
             st.dataframe(policy_table(nr),hide_index=True)
         with st.expander("이전 버전 일괄 차감 결과 비교 · 현재 선정에는 미사용"):
             st.dataframe(nr[['display_pick','legacy_grade','uncertainty_pp','legacy_conservative_ev_roi']],hide_index=True)
-        st.caption("통과는 설정한 가정 안에서만 의미가 있습니다. xG·결장은 미수집이며 최종 시장 혼합 확률과 수익성은 검증되지 않았습니다. A/B/C 등급과 베팅금액 추천은 제공하지 않습니다.")
+        st.caption("통과는 설정한 가정 안에서만 의미가 있습니다. 경기 데이터 검증과 모델 성능 검증은 별도입니다. 모델 장기 수익성은 아래 검증 보고서의 범위에서 판단합니다. A/B/C 등급과 베팅금액 추천은 제공하지 않습니다.")
         st.download_button("전체 분석 CSV 다운로드",nr.to_csv(index=False).encode("utf-8-sig"),file_name="national_analysis.csv")
         st.markdown("#### 라인업 확인 + 가정 변화 통과: 참고용 2폴")
         combos=pairs
@@ -852,21 +867,21 @@ with tabs[2]:
                             continue
                         try:
                             ctx["advanced"]=advanced.collect(
-                                league,home,away,g.iloc[0]["commence_time"],ctx,recent_n=brecent
+                                league,home,away,g.iloc[0]["commence_time"],ctx,recent_n=brecent,team_stats=stats
                             )
                         except Exception as advanced_error:
                             ctx["advanced"]={
-                                "advanced_used":0,"advanced_total":7,"advanced_completeness":0.0,
+                                "advanced_used":0,"advanced_total":9,"advanced_completeness":0.0,
                                 "extra_uncertainty_pp":2.1,
                                 "statuses":{},"notes":[f"advanced collection failed: {type(advanced_error).__name__}: {advanced_error}"],
                             }
                         adv=ctx["advanced"]
-                        if league=="NPB" and ctx.get("stage")=="FINAL":
-                            both_starters=all((adv.get(side+"_starter_recent") or {}).get("kbb_pct") is not None for side in ("home","away"))
-                            both_ops=all((adv.get(side+"_lineup_form") or {}).get("recent10_ops") is not None for side in ("home","away"))
-                            if not (both_starters and both_ops):
-                                ctx["stage"]="DATA PARTIAL"
-                                adv.setdefault("notes",[]).append("선발 최근 K-BB% 또는 양 팀 최근 OPS 결측: FINAL 보류")
+                        # FINAL means the two announced starters and both 1-9 batting
+                        # orders are confirmed. Missing advanced signals no longer
+                        # demote a confirmed game; they are expressed through
+                        # advanced_completeness / uncertainty / candidate gates.
+                        if ctx.get("starter_confirmed") and ctx.get("lineup_confirmed"):
+                            ctx["stage"]="FINAL"
                         live_rows.append({
                             "경기":match_label_kst(home,away,g.iloc[0]["commence_time"]),
                             "경기시간(KST)":format_kst(g.iloc[0]["commence_time"]),
@@ -876,10 +891,12 @@ with tabs[2]:
                             "선발투수 확정":bool(ctx.get("starter_confirmed")),
                             "라인업":(ctx.get("lineup_label") or ("확정" if ctx.get("lineup_confirmed") else "원본 미수집")),
                             "라인업 소스":ctx.get("lineup_source") or ctx.get("source") or "-",
-                            "Advanced":f'{adv.get("advanced_used",0)}/{adv.get("advanced_total",7)}',
+                            "Advanced":f'{adv.get("advanced_used",0)}/{adv.get("advanced_total",9)}',
                             "최근 타선":bool((adv.get("statuses") or {}).get("recent_form")),
                             "선발 최근":bool((adv.get("statuses") or {}).get("starter_recent")),
+                            "선발 vs 상대팀":bool((adv.get("statuses") or {}).get("starter_vs_opponent")),
                             "불펜":bool((adv.get("statuses") or {}).get("bullpen")),
+                            "불펜 실제 투구수":bool((adv.get("statuses") or {}).get("bullpen_exact")),
                             "좌우":bool((adv.get("statuses") or {}).get("split")),
                             "구속":bool((adv.get("statuses") or {}).get("velocity")),
                             "날씨":bool((adv.get("statuses") or {}).get("weather")),
@@ -889,6 +906,16 @@ with tabs[2]:
                             "홈 선발 최근 K-BB%":(adv.get("home_starter_recent") or {}).get("kbb_pct"),
                             "원정 선발 최근 경기":(adv.get("away_starter_recent") or {}).get("games"),
                             "원정 선발 최근 K-BB%":(adv.get("away_starter_recent") or {}).get("kbb_pct"),
+                            "홈 선발 vs 원정 경기수":(adv.get("home_starter_vs_opponent") or {}).get("games"),
+                            "홈 선발 vs 원정 ERA":(adv.get("home_starter_vs_opponent") or {}).get("era"),
+                            "홈 선발 vs 원정 K-BB%":(adv.get("home_starter_vs_opponent") or {}).get("kbb_pct"),
+                            "원정 선발 vs 홈 경기수":(adv.get("away_starter_vs_opponent") or {}).get("games"),
+                            "원정 선발 vs 홈 ERA":(adv.get("away_starter_vs_opponent") or {}).get("era"),
+                            "원정 선발 vs 홈 K-BB%":(adv.get("away_starter_vs_opponent") or {}).get("kbb_pct"),
+                            "홈 최근 경기 득점":(adv.get("home_recent") or {}).get("runs_for_per_game"),
+                            "홈 최근 경기 실점":(adv.get("home_recent") or {}).get("runs_against_per_game"),
+                            "원정 최근 경기 득점":(adv.get("away_recent") or {}).get("runs_for_per_game"),
+                            "원정 최근 경기 실점":(adv.get("away_recent") or {}).get("runs_against_per_game"),
                             "홈 팀 최근 OPS":(adv.get("home_lineup_form") or {}).get("recent10_ops"),
                             "원정 팀 최근 OPS":(adv.get("away_lineup_form") or {}).get("recent10_ops"),
                             "홈 OPS 근거 경기":(adv.get("home_lineup_form") or {}).get("ops_games"),
@@ -899,6 +926,10 @@ with tabs[2]:
                             "원정 최근 OBP 대리값":(adv.get("away_recent") or {}).get("obp_proxy"),
                             "홈 불펜 최근 구원 이닝":(adv.get("home_bullpen") or {}).get("relief_ip_last3"),
                             "원정 불펜 최근 구원 이닝":(adv.get("away_bullpen") or {}).get("relief_ip_last3"),
+                            "홈 불펜 최근 3일 투구수":(adv.get("home_bullpen") or {}).get("total_relief_pitches"),
+                            "원정 불펜 최근 3일 투구수":(adv.get("away_bullpen") or {}).get("total_relief_pitches"),
+                            "홈 불펜 수집":("실제 박스스코어" if (adv.get("home_bullpen") or {}).get("exact") else "일정 대리값"),
+                            "원정 불펜 수집":("실제 박스스코어" if (adv.get("away_bullpen") or {}).get("exact") else "일정 대리값"),
                             "원정 1~9":", ".join(x.get("name","") for x in ctx.get("away_lineup",[])[:9]) or "-",
                             "홈 1~9":", ".join(x.get("name","") for x in ctx.get("home_lineup",[])[:9]) or "-",
                             "소스":ctx.get("source"),
@@ -937,14 +968,14 @@ with tabs[2]:
     if st.session_state.get("baseball_live_rows"):
         st.markdown("### 선발 / 라인업 자동수집 상태")
         st.dataframe(pd.DataFrame(st.session_state["baseball_live_rows"]),use_container_width=True,hide_index=True)
-        st.caption("PRE-LINEUP → STARTER/LINEUP CONFIRMED → DATA PARTIAL 또는 FINAL. NPB는 양 선발 최근 K-BB%와 양 팀 최근 OPS까지 확인되어야 FINAL입니다.")
+        st.caption("PRE-LINEUP → STARTER/LINEUP CONFIRMED → FINAL. FINAL은 양 선발+양 팀 1~9 타순 확정만 뜻하며, 정밀지표 결측은 FINAL을 취소하지 않고 불확실성·완성도·후보 게이트에만 반영합니다.")
 
     if "baseball_ranked" in st.session_state and not st.session_state["baseball_ranked"].empty:
         rb=st.session_state["baseball_ranked"]
         if st.session_state.get("baseball_filter_label"):st.caption(f"분석 경기일: {st.session_state['baseball_filter_label']}")
         render_final_decision_layer(rb,"baseball",title="🧠 v3 FINAL Decision Layer · KBO/NPB")
         st.markdown("### 상세 진단 · KBO/NPB 기준 +EV 전체")
-        st.caption("기준 EV가 양수인 선택지는 REVIEW/라인업 미확정이어도 숨기지 않습니다. 실제 조합 가능 여부는 별도 안전게이트로 구분합니다.")
+        st.caption("기준 EV가 양수인 선택지는 REVIEW/라인업 미확정이어도 숨기지 않습니다. 라인업 대기 예비 후보는 미검증 관찰 목록이며, 실제 조합 가능 여부는 별도로 구분합니다. 시즌 득실점과 최근 득실점을 분리 표시합니다.")
         vb=build_baseball_diagnostics(rb)
         diag_counts=diagnostic_counts(rb)
         if diag_counts["base_positive"]:
@@ -958,10 +989,15 @@ with tabs[2]:
             "grade","stage","data_quality","sanity","kickoff_kst","display_pick","best_book","best_odds","books",
             "consensus_prob","raw_independent_prob","model_win_prob","push_prob","break_even",
             "edge_pp","ev_roi","conservative_ev_roi","uncertainty_pp","starter_confirmed","lineup_confirmed",
-            "advanced_completeness","advanced_used","recent_form_used","starter_recent_used",
+            "advanced_completeness","advanced_used","recent_form_used","starter_recent_used","starter_vs_opponent_used",
             "bullpen_used","split_used","velocity_used","weather_used",
             "away_starter","away_starter_era","away_starter_whip",
             "home_starter","home_starter_era","home_starter_whip",
+            "away_starter_vs_opponent_games","away_starter_vs_opponent_ip","away_starter_vs_opponent_era","away_starter_vs_opponent_kbb_pct",
+            "home_starter_vs_opponent_games","home_starter_vs_opponent_ip","home_starter_vs_opponent_era","home_starter_vs_opponent_kbb_pct",
+            "away_bullpen_pitches_last3","home_bullpen_pitches_last3","away_bullpen_relief_ip_last3","home_bullpen_relief_ip_last3","away_bullpen_exact","home_bullpen_exact",
+            "away_season_rf","away_season_ra","home_season_rf","home_season_ra",
+            "away_recent_runs_for","away_recent_runs_against","home_recent_runs_for","home_recent_runs_against",
             "away_recent_rf","away_recent_ra","home_recent_rf","home_recent_ra",
             "away_expected_runs","home_expected_runs",
         ]
@@ -975,7 +1011,11 @@ with tabs[2]:
             if c in vb:vb[c]=(vb[c]*100).round(1)
         for c in ["robust_ev_p10","robust_ev_min"]:
             if c in vb:vb[c]=(vb[c]*100).round(1)
-        for c in ["edge_pp","uncertainty_pp","away_recent_rf","away_recent_ra","home_recent_rf","home_recent_ra","away_expected_runs","home_expected_runs","away_starter_era","home_starter_era","away_starter_whip","home_starter_whip"]:
+        for c in ["edge_pp","uncertainty_pp","away_season_rf","away_season_ra","home_season_rf","home_season_ra",
+            "away_recent_rf","away_recent_ra","home_recent_rf","home_recent_ra","away_expected_runs","home_expected_runs","away_starter_era","home_starter_era","away_starter_whip","home_starter_whip",
+            "away_starter_vs_opponent_ip","home_starter_vs_opponent_ip","away_starter_vs_opponent_era","home_starter_vs_opponent_era",
+            "away_starter_vs_opponent_kbb_pct","home_starter_vs_opponent_kbb_pct","away_bullpen_pitches_last3","home_bullpen_pitches_last3",
+            "away_bullpen_relief_ip_last3","home_bullpen_relief_ip_last3","away_recent_runs_for","away_recent_runs_against","home_recent_runs_for","home_recent_runs_against"]:
             if c in vb: vb[c]=pd.to_numeric(vb[c],errors="coerce").round(2)
         st.dataframe(vb.head(100),use_container_width=True,hide_index=True)
         if vb.empty:
@@ -986,7 +1026,7 @@ with tabs[2]:
                 st.info(f"{len(rb)}개 배당 선택지를 계산했지만 현재 기준 EV가 양수인 선택지가 없습니다.")
         elif diag_counts["parlay"] == 0:
             st.warning("기준 +EV 선택지는 있지만 현재 실제 조합 안전게이트를 통과한 픽은 없습니다. 위 표의 '후보상태/조합 제외 이유'에서 원인을 확인하세요.")
-        st.caption("NPB FINAL은 공식 선발·라인업과 양 선발 최근 K-BB%, 양 팀 최근 OPS가 확인된 상태입니다. 구속·좌우 스플릿 결측은 불확실성에 반영합니다.")
+        st.caption("양 선발의 상대팀 상대 기록은 소표본 축소 후 최대 ±4.5% 범위로만 득점 기대치에 반영합니다. KBO 불펜은 최근 3일 GameCenter 박스스코어 투구수가 있으면 실제값, 실패 시 일정 대리값을 절반 가중치로 사용합니다.")
 
         st.markdown("### 야구 2~6폴")
         sizesb=st.multiselect("야구 폴더 수",[2,3,4,5,6],default=[2,3],key="baseball_parlay_sizes")
@@ -1011,7 +1051,7 @@ with tabs[2]:
         if any(x.get("단계")=="시작시간 경과·사전분석 제외" for x in st.session_state.get("baseball_live_rows",[])):
             st.info("시작 예정시간이 지난 경기는 위 표에서 오더 수집 상태만 확인합니다. 경기중 배당용 분석은 지원하지 않습니다.")
         elif partial:
-            st.warning(f"{partial}경기는 선발 최근 기록 또는 팀 OPS가 없어 DATA PARTIAL입니다. +EV 후보 판단을 보류하고 자동 다폴에서 제외했습니다.")
+            st.warning(f"{partial}경기는 선발/라인업이 아직 확정되지 않았거나 데이터 품질 게이트를 통과하지 못했습니다. 정밀지표 결측만으로 FINAL을 강등하지는 않습니다.")
         elif st.session_state.get("baseball_failures"):
             st.warning("분석 실패 경기 때문에 후보를 계산하지 못했습니다. 아래 경기별 실패 이유를 확인하세요.")
         elif st.session_state.get("baseball_market") is not None and st.session_state["baseball_market"].empty:
@@ -1220,7 +1260,8 @@ with tabs[5]:
         cols=[c for c in [
             "v3_decision_status","robust_positive_ratio","robust_ev_p10","robust_ev_min","counter_case_risk","signal_coverage",
             "stage","data_quality","kickoff_kst","display_pick","best_book","best_odds","books","consensus_prob",
-            "raw_independent_prob","model_win_prob","push_prob","break_even","edge_pp","ev_roi","conservative_ev_roi","uncertainty_pp",
+            "raw_independent_prob","pre_calibration_prob_cond","calibrated_prob_cond","model_win_prob","push_prob","break_even","edge_pp","ev_roi","conservative_ev_roi","uncertainty_pp",
+            "raw_market_gap_final_audit_pp","calibration_n","calibration_active","calibration_reliability","mlb_totals_market_disagreement_gate","final_downgrade_reason",
             "home_starter","away_starter","home_starter_era","away_starter_era","home_starter_whip","away_starter_whip",
             "home_recent_rf","home_recent_ra","away_recent_rf","away_recent_ra","home_expected_runs","away_expected_runs",
             "recent_form_used","starter_recent_used","bullpen_used","split_used","velocity_used","weather_used",
@@ -1234,6 +1275,44 @@ with tabs[5]:
         for c in ["robust_ev_p10","robust_ev_min","ev_roi","conservative_ev_roi"]:
             if c in shown:shown[c]=(pd.to_numeric(shown[c],errors="coerce")*100).round(1)
         st.dataframe(shown,use_container_width=True,hide_index=True)
+
+        st.markdown("### MLB 확률·예상득점 감사")
+        _audit_labels={i:str(mr.loc[i].get("display_pick") or mr.loc[i].get("selection") or i) for i in mr.index}
+        _audit_i=st.selectbox("감사할 MLB 옵션",list(mr.index),format_func=lambda i:_audit_labels[i],key="mlb_probability_audit_pick")
+        _audit=mr.loc[_audit_i]
+        _psh=float(pd.to_numeric(pd.Series([_audit.get("push_prob")]),errors="coerce").fillna(0).iloc[0])
+        _resolved=max(1e-9,1-_psh)
+        def _pct(v,conditional=False):
+            try:
+                x=float(v); x=x/_resolved if conditional else x
+                return f"{x*100:.2f}%"
+            except Exception:return "—"
+        _audit_table=pd.DataFrame([{
+            "raw independent":_pct(_audit.get("raw_independent_prob"),True),
+            "market consensus":_pct(_audit.get("consensus_prob")),
+            "pre-calibration":_pct(_audit.get("pre_calibration_prob_cond")),
+            "calibrated final":_pct(_audit.get("model_win_prob"),True),
+            "raw-market gap":f"{float(_audit.get('raw_market_gap_final_audit_pp')):+.2f}pp" if pd.notna(_audit.get('raw_market_gap_final_audit_pp')) else "—",
+            "calibration N":int(_audit.get("calibration_n") or 0),
+            "calibration reliability":f"{float(_audit.get('calibration_reliability') or 0)*100:.1f}%",
+            "final EV":f"{float(_audit.get('ev_roi') or 0)*100:+.2f}%",
+            "conservative EV":f"{float(_audit.get('conservative_ev_roi') or 0)*100:+.2f}%",
+            "robust positive":f"{float(_audit.get('robust_positive_ratio') or 0)*100:.1f}%",
+            "robust EV p10":f"{float(_audit.get('robust_ev_p10') or 0)*100:+.2f}%",
+            "robust EV min":f"{float(_audit.get('robust_ev_min') or 0)*100:+.2f}%",
+            "counter-case":str(_audit.get("counter_case_risk") or "—"),
+            "final decision":str(_audit.get("v3_decision_status") or "—"),
+            "downgrade reason":str(_audit.get("final_downgrade_reason") or "—"),
+        }])
+        st.dataframe(_audit_table,use_container_width=True,hide_index=True)
+        _adj=_audit.get("expected_runs_adjustments")
+        if isinstance(_adj,list) and _adj:
+            _adf=pd.DataFrame(_adj)
+            for c in ["home_before","home_after","home_delta","away_before","away_after","away_delta"]:
+                if c in _adf:_adf[c]=pd.to_numeric(_adf[c],errors="coerce").round(3)
+            st.dataframe(_adf.rename(columns={"factor":"expected-runs adjustment"}),use_container_width=True,hide_index=True)
+            st.caption("위 표는 SHAP이 아니라 실제 평균득점 계산 단계의 factor contribution / expected-runs adjustment입니다. 동일 최근 경기 정보가 totals 앙상블에서 다시 투표되지 않도록 MLB totals recent-form proxy는 억제합니다.")
+        st.caption(f"Score distribution: {_audit.get('score_distribution_family','—')} · dispersion {_audit.get('score_distribution_dispersion','—')} · {_audit.get('score_distribution_dispersion_source','—')}")
 
         st.markdown("### MLB 2~6폴")
         mlb_sizes=st.multiselect("MLB 폴더 수",[2,3,4,5,6],default=[2,3],key="mlb_parlay_sizes")
@@ -1704,8 +1783,8 @@ with tabs[11]:
     if _calrows:
         st.dataframe(pd.DataFrame(_calrows),use_container_width=True,hide_index=True)
     else:
-        st.info("정산 표본이 쌓이면 종목×마켓별 calibration이 자동 학습됩니다. 40건 미만에서는 확률을 건드리지 않습니다.")
-    st.caption("v3.3 최종확률 = 독립모델/시장/최근폼/정밀컨텍스트 앙상블 → 과거 정산표본 calibration. 한 번의 보정은 기존 확률 대비 최대 ±5%p로 제한됩니다.")
+        st.info("정산 표본이 쌓이면 종목×마켓별 calibration이 자동 학습됩니다. 일반 시장은 40건, MLB totals는 60건 미만에서 확률을 건드리지 않습니다.")
+    st.caption("v3.4.22 최종확률 = 독립모델/시장 앙상블 → 과거 정산표본 calibration → coherence 정규화 → ROBUST 재판정. MLB totals는 구조모델에 이미 반영된 최근 득점 proxy를 앙상블에서 중복 가중하지 않습니다.")
 
     st.markdown("### 3) ⏱️ 데이터 품질·신선도")
     _fresh=freshness_rows()

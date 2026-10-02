@@ -8,7 +8,7 @@ from sports_ev_engine.daily_combo import latest_snapshots_for_kst_date, prepare_
 def base(**kw):
     x={
         "event_id":"e1","commence_time":"2026-09-28T16:30:00Z","home_team":"A","away_team":"B",
-        "sport_family":"soccer_national","sport_key":"soccer_test","market":"h2h","selection":"A","point":None,
+        "sport_family":"soccer_club","sport_key":"soccer_test","market":"h2h","selection":"A","point":None,
         "best_odds":1.80,"consensus_prob":0.54,"model_win_prob":0.61,"break_even":1/1.80,
         "ev_roi":0.098,"conservative_ev_roi":0.06,"uncertainty_pp":4.0,"v3_decision_status":"ROBUST",
         "v3_candidate":True,"robust_positive_ratio":0.92,"robust_ev_p10":0.025,"counter_case_risk":"LOW",
@@ -63,7 +63,11 @@ def test_combo_never_uses_two_picks_same_event():
 
 def test_cross_sport_two_leg_combo_supported():
     rows=[
-        base(event_id="s1",sport_family="soccer_national",selection="A",stage="FINAL",data_quality="HIGH",lineup_confirmed=True),
+        base(event_id="s1",sport_family="soccer_national",selection="A",stage="FINAL",data_quality="HIGH",lineup_confirmed=True,
+             selection_status='SCENARIO_PASS',home_xg_for=1.2,home_xg_against=1,away_xg_for=1,away_xg_against=1,
+             xg_samples_home=3,xg_samples_away=3,xg_collection_status='OK',injury_available=True,
+             home_rest_days=4,away_rest_days=4,data_checked_at=pd.Timestamp.now(tz='UTC').isoformat(),
+             xg_checked_at=pd.Timestamp.now(tz='UTC').isoformat()),
         base(event_id="m1",sport_family="baseball_mlb",sport_key="baseball_mlb",home_team="Yankees",away_team="Red Sox",selection="Yankees",stage="FINAL",data_quality="HIGH",lineup_confirmed=True,best_odds=1.75,model_win_prob=0.64,consensus_prob=0.56,break_even=1/1.75),
     ]
     c=prepare_daily_candidates(pd.DataFrame(rows))

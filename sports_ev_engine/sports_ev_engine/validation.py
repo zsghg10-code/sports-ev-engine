@@ -6,7 +6,7 @@ import pandas as pd
 from .models.elo import build_elo,opponent_adjusted_form
 from .models.soccer_auto import norm_name,score_matrix,price_from_matrix
 
-MODEL_ID='national-raw-v291'
+MODEL_ID='national-raw-v3.4.24'
 
 def temperature(prob,t):
     values=[max(1e-12,float(p))**(1/float(t)) for p in prob]
@@ -57,3 +57,31 @@ def validate(records,as_of,recent_n=6,max_events=1200):
         pairs=[(p,i==r['y']) for r in test for i,p in enumerate(temperature(r['p'],chosen if adopted else 1)) if lo<=p<hi]
         if pairs:bins.append({'bin':f'{lo:.1f}-{min(hi,1):.1f}','n':len(pairs),'mean_predicted':sum(p for p,y in pairs)/len(pairs),'observed_frequency':sum(y for p,y in pairs)/len(pairs)})
     return {'model_id':MODEL_ID,'status':'보정 채택' if adopted else '보정 미채택','n':len(predictions),'skipped':skipped,'train_n':len(train),'test_n':len(test),'split_date':split,'start_date':predictions[0]['date'],'end_date':predictions[-1]['date'],'chosen_temperature':chosen,'live_temperature':chosen if adopted else 1.0,'holdout_before':before,'holdout_after':after,'bins':bins,'market_blend_validated':False,'scope':'90분 승무패 원모델만. 현재 수정된 기록의 소급 검증; 당시 수집 상태·배당·라인업·EV/ROI 미검증'},predictions
+
+
+def load_validation_report(path='data/validation_report.json'):
+    import json
+    from pathlib import Path
+    try:
+        report=json.loads(Path(path).read_text(encoding='utf-8'))
+        return report if isinstance(report,dict) else {}
+    except (OSError,ValueError): return {}
+
+def validation_summary(report):
+    """Report observed evidence without conflating raw-model testing with ROI."""
+    report=report or {}
+    holdout=report.get('holdout_before') or {}
+    def number(x):
+        try: return math.isfinite(float(x))
+        except (TypeError,ValueError): return False
+    oos=bool(report.get('split_date')) and int(report.get('test_n') or 0)>=100
+    probability=oos and all(number(holdout.get(k)) for k in ('brier','log_loss')) and bool(report.get('bins'))
+    profitability=(probability and report.get('market_blend_validated') is True
+                   and report.get('roi_validated') is True and number(report.get('roi'))
+                   and int(report.get('roi_n') or 0)>=100)
+    return {'probability_validated':probability,'profitability_validated':profitability,
+            'completed_count':int(probability)+int(profitability),
+            'status':'수익성 검증 완료' if profitability else '확률 성능 검증 · 장기 수익성 미검증' if probability else '장기 수익성 미검증',
+            'brier':holdout.get('brier'),'log_loss':holdout.get('log_loss'),
+            'roi':report.get('roi'),'calibration':report.get('bins',[]),'out_of_sample_n':report.get('test_n',0),
+            'scope':report.get('scope','검증 보고서 없음')}

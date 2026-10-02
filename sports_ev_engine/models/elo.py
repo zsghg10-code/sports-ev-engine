@@ -2,7 +2,7 @@ from __future__ import annotations
 import math
 from sports_ev_engine.models.soccer_auto import norm_name
 
-PATCH_BUILD = "3.4.16-robust-form-xg"
+PATCH_BUILD = "3.4.24-national-validation"
 
 
 def expected_score(rating_a, rating_b):

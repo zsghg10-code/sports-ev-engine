@@ -1,5 +1,5 @@
 import pandas as pd
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from sports_ev_engine.auto_soccer import analyze_event
 from sports_ev_engine.deep_soccer_context import collect_deep_context
@@ -54,7 +54,8 @@ def test_deep_context_extracts_names_and_status_from_full_startxi():
     ]
     api.team_players.return_value=[]
     api.injuries.return_value=[]
-    ctx=collect_deep_context(api,pool,'Turkey','Italy',kickoff,season=2026,horizon_hours=24)
+    with patch('sports_ev_engine.deep_soccer_context.pd.Timestamp.now',return_value=pd.Timestamp(kickoff).tz_convert('UTC')-pd.Timedelta(hours=1)):
+        ctx=collect_deep_context(api,pool,'Turkey','Italy',kickoff,season=2026,horizon_hours=24)
     assert ctx['lineup_confirmed'] is True
     assert ctx['lineup_status']=='CONFIRMED'
     assert len(ctx['home_lineup_players'])==11

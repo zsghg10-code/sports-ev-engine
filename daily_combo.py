@@ -205,6 +205,10 @@ def prepare_daily_candidates(frame: pd.DataFrame) -> pd.DataFrame:
         _drift_map={}
     rows=[]
     for _,r in frame.iterrows():
+        national = str(r.get('sport_family') or '') == 'soccer_national' or str(r.get('national_status')) in {'FINAL_BET','PROVISIONAL','COMBO_EXCLUDE','NO_BET'}
+        if national:
+            from .national_policy import finalize_national
+            r=pd.Series(finalize_national(r))
         status=str(r.get("v3_decision_status") or "").upper()
         odds=_num(r.get("best_odds")); model=_num(r.get("model_win_prob"))
         market=_num(r.get("consensus_prob"),_num(r.get("break_even")))
@@ -268,6 +272,10 @@ def prepare_daily_candidates(frame: pd.DataFrame) -> pd.DataFrame:
             combo_eligible=False
             reasons.append("반증/데이터 위험 HIGH")
 
+        if national and r.get("national_status") != "FINAL_BET":
+            single_eligible=False; combo_eligible=False
+            reasons.append(str(r.get("national_status_label")) + " · " + str(r.get("match_data_missing") or ""))
+
         maturity=stage_factor*risk_factor
         adj_prob=market+maturity*(model-market)
         adj_prob=max(0.001,min(max(0.001,1-push-0.001),adj_prob))
@@ -300,7 +308,7 @@ def prepare_daily_candidates(frame: pd.DataFrame) -> pd.DataFrame:
         kickoff=r.get("kickoff_kst")
         if pd.isna(kickoff): kickoff=_kickoff_kst(r.get("commence_time"))
         event_id=str(r.get("event_id") or f"{r.get('home_team','')}__{r.get('away_team','')}__{r.get('commence_time','')}")
-        candidate_state="조합 가능" if combo_eligible else "단일 후보" if single_eligible else "검토 후보"
+        candidate_state=("최종 후보" if combo_eligible else "조합 제외") if national and r.get("national_status")=="FINAL_BET" else str(r.get("national_status_label")) if national else ("조합 가능" if combo_eligible else "단일 후보" if single_eligible else "검토 후보")
         reason=" · ".join(dict.fromkeys(reasons)) if reasons else "강건성·리스크 게이트 통과"
         rows.append({
             **r.to_dict(),
@@ -416,6 +424,6 @@ def combo_display_rows(combo: dict | None) -> pd.DataFrame:
             "조합용 보수확률": f"{float(x.get('daily_adjusted_prob') or 0)*100:.1f}%",
             "EV": f"{float(x.get('daily_original_ev') or 0)*100:+.1f}%",
             "라인업": x.get("lineup_state", ""),
-            "판정": x.get("v3_decision_status", ""),
+            "판정": x.get("national_status_label", x.get("v3_decision_status", "")),
         })
     return pd.DataFrame(rows)

@@ -58,6 +58,7 @@ class FreeTests(unittest.TestCase):
             at=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app.py'),default_timeout=30).run()
             self.assertFalse(at.exception)
             self.assertEqual(at.selectbox(key="club_competition_v291").options,[])
+            at.date_input(key='national_match_date').set_value(kick.astimezone(__import__('zoneinfo').ZoneInfo('Asia/Seoul')).date()).run()
             button=next(b for b in at.button if b.label=='🌍 선택 대회 A매치 자동분석')
             button.click().run()
             self.assertFalse(at.exception)

@@ -1,5 +1,5 @@
 from __future__ import annotations
-PATCH_BUILD = '3.4.16-robust-form-xg'
+PATCH_BUILD = '3.4.24-national-validation'
 from .adaptive_model import apply_adaptive_layer
 import math
 from datetime import datetime, timezone
@@ -8,12 +8,12 @@ import pandas as pd
 from sports_ev_engine.models.soccer_auto import score_matrix, price_from_matrix, norm_name
 from sports_ev_engine.models.elo import build_elo, opponent_adjusted_form
 from sports_ev_engine.core.ev import analyze_bet
-from sports_ev_engine.national_policy import scenario_matrices, assess, POLICY_ID
+from sports_ev_engine.national_policy import scenario_matrices, assess, POLICY_ID, finalize_national
 from sports_ev_engine.free_national import adjust_lambdas
 from sports_ev_engine.review_policy import review_reason, REVIEW_STATES
 from sports_ev_engine.reasoning_engine import (
     apply_soccer_context, build_counter_cases, scenario_assessment,
-    soccer_scenarios, decision_fields,
+    soccer_scenarios, decision_fields, final_probability_assessment,
 )
 
 def _side_for_row(r):
@@ -337,6 +337,8 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
             "xg_target_away":deep_ctx.get("xg_target_away"),
             "home_big_chances":deep_ctx.get("home_big_chances"),
             "away_big_chances":deep_ctx.get("away_big_chances"),
+            "data_checked_at":deep_ctx.get("data_checked_at"),
+            "injury_available":deep_ctx.get("injury_available"),
             "home_rest_days":deep_ctx.get("home_rest_days"),
             "away_rest_days":deep_ctx.get("away_rest_days"),
             "home_missing_players":deep_ctx.get("home_missing_players"),
@@ -398,9 +400,8 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
             d['v3_candidate']=False
             d['v3_parlay_eligible']=False
             d['parlay_eligible']=False
-            d['scenario_candidate']=False
             d['scenario_parlay_eligible']=False
-            d['selection_status']='REVIEW'
+            # Preserve scenario evidence; downstream data validation prevents promotion.
             d['selection_reason']='실측 xG 미수집/수집 오류: 자동후보 제외 · 원확률 검토 필요'
             d['robust_reason']=d['selection_reason']
         d['deep_context_attempted']=bool(deep_ctx.get('deep_context_attempted'))
@@ -413,6 +414,39 @@ def analyze_event(event_rows, competition_pool, recent_n=6):
 
     _family="soccer_national" if international else "soccer_club"
     _frame=apply_adaptive_layer(pd.DataFrame(rows),_family)
+    if international and not _frame.empty:
+        from .validation import load_validation_report, validation_summary
+        summary=validation_summary(load_validation_report())
+        revised=[]
+        for r in _frame.to_dict("records"):
+            # Adaptive calibration/coherence can move the displayed probability.
+            # Reprice every stress outcome on the same final probability scale.
+            delta=float(r['model_win_prob'])-float(r['pre_adaptive_model_win_prob'])
+            final_scenarios=[]
+            for w,p,label in soccer_scenarios(hl,al,lambda mm: price_from_matrix(mm,r["market"],_side_for_row(r),None if r["market"]=="h2h" else float(r["point"])),score_matrix):
+                for stress_weight in (.15,.25,.35):
+                    fw=stress_weight*w+(1-stress_weight)*float(r['consensus_prob'])*(1-p)
+                    final_scenarios.append((max(0.,min(1-p,fw+delta)),p,label))
+            forced=r.get('adaptive_gate') if r.get('adaptive_gate') not in {'','OK',None} else None
+            if r.get('sanity') in REVIEW_STATES: forced='원모델/시장 괴리 검토'
+            final=final_probability_assessment(
+                odds=float(r['best_odds']),final_win_prob=float(r['model_win_prob']),
+                final_push_prob=float(r['push_prob']),uncertainty_pp=0.,
+                scenario_probabilities=final_scenarios,data_ready=sample>=5,
+                lineup_required=True,lineup_confirmed=lineup_ok,forced_review_reason=forced)
+            r.update(final)
+            r['v3_decision_status']=final['robust_status']
+            scenario_evs=[float(r['best_odds'])*w+p-1 for w,p,_ in final_scenarios]
+            r['scenario_ev_min']=min(scenario_evs)
+            r['scenario_ev_max']=max(scenario_evs)
+            r['scenario_win_min']=min(w for w,p,_ in final_scenarios)
+            r['scenario_win_max']=max(w for w,p,_ in final_scenarios)
+            r['scenario_count']=len(final_scenarios)
+            if r['selection_status'] in {'SCENARIO_PASS','SENSITIVE','PASS'}:
+                r['selection_status']='PASS' if r['point_ev_roi']<=0 else 'SCENARIO_PASS' if r['scenario_ev_min']>0 else 'SENSITIVE'
+            r['model_validation_status']=summary['status']
+            revised.append(finalize_national(r))
+        _frame=pd.DataFrame(revised,index=_frame.index)
     return _frame,{
         "status":"ok","home":home,"away":away,
         "home_form":hf,"away_form":af,
