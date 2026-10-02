@@ -3,7 +3,7 @@ import math
 from itertools import product, combinations
 from sports_ev_engine.models.soccer_auto import score_matrix, price_from_matrix
 
-POLICY_ID = 'national-scenarios-v3.4.24'
+POLICY_ID = 'national-scenarios-v3.4.24-hotfix1'
 
 def scenario_matrices(hl, al):
     # Illustrative modelling assumptions, not estimated parameter errors.
@@ -41,8 +41,11 @@ def assess(row, matrices, side, line):
 
 def reference_pairs(frame):
     """Experimental pairs of distinct events; independence is an assumption."""
+    # Final combination eligibility is downstream from the 27-scenario diagnostic.
+    # Keep scenario/v3 flags intact and use the final national state as an extra gate.
     eligible=frame.scenario_parlay_eligible.fillna(False).map(truth)
-    if 'national_status' in frame: eligible &= frame.national_status.eq('FINAL_BET')
+    if 'national_status' in frame:
+        eligible &= frame.national_status.eq('FINAL_BET')
     rows=frame[eligible].sort_values('scenario_ev_min',ascending=False).head(20).to_dict('records')
     out=[]
     for a,b in combinations(rows,2):
@@ -86,7 +89,7 @@ def match_data_validation(row, now=None):
             'match_data_missing':' · '.join(missing)}
 
 def finalize_national(row, now=None):
-    """One downstream policy after calibration; profitability never gates picks."""
+    """Final A-match display state. Diagnostic scenario/v3 flags remain immutable."""
     out = dict(row)
     out.update(match_data_validation(row, now))
     ev = row.get('point_ev_roi', row.get('ev_roi'))
@@ -94,22 +97,41 @@ def finalize_national(row, now=None):
     if scenario is None:
         scenario='SCENARIO_PASS' if row.get('national_status') in {'FINAL_BET','PROVISIONAL'} else 'DATA_HOLD'
     robust = row.get('v3_decision_status')
+    counter_risk = str(row.get('counter_case_risk') or '').upper()
+
     if not finite(ev) or float(ev) <= 0 or scenario in {'PASS','DATA_HOLD'}:
         status = 'NO_BET'
-    elif (scenario in {'REVIEW','SENSITIVE'} or robust in {'FRAGILE','PASS','DATA_HOLD'}
+    # Hard exclusion/risk gates must be evaluated BEFORE missing-data provisional status.
+    # Otherwise REVIEW/HIGH-risk rows can be incorrectly promoted to PROVISIONAL.
+    elif (scenario in {'REVIEW','SENSITIVE'}
+          or robust in {'REVIEW','FRAGILE','PASS','DATA_HOLD'}
+          or counter_risk == 'HIGH'
           or str(row.get('adaptive_gate','OK')) not in {'','OK'}):
         status = 'COMBO_EXCLUDE'
     elif not out['match_data_verified']:
         status = 'PROVISIONAL'
-    elif robust != 'ROBUST' or row.get('counter_case_risk') == 'HIGH':
+    elif robust != 'ROBUST':
         status = 'COMBO_EXCLUDE'
     else:
         status = 'FINAL_BET'
+
     if status in {'FINAL_BET','PROVISIONAL'}:
         out['selection_reason']='가정 변화 통과 · ' + ('경기 데이터 검증 완료' if out['match_data_verified'] else '확인 필요: ' + out['match_data_missing'])
+
     out['national_status'] = status
     out['national_status_label'] = STATUS_LABELS[status]
-    out['scenario_candidate'] = out['v3_candidate'] = status in {'FINAL_BET','PROVISIONAL'}
-    out['scenario_parlay_eligible'] = out['v3_parlay_eligible'] = out['parlay_eligible'] = status == 'FINAL_BET'
+
+    # IMPORTANT: do not overwrite these diagnostic flags:
+    # scenario_candidate / scenario_parlay_eligible
+    # v3_candidate / v3_parlay_eligible / parlay_eligible
+    # They describe upstream diagnostics and are intentionally independent of the
+    # user-facing FINAL/PROVISIONAL/COMBO_EXCLUDE/NO_BET state.
+    out['national_candidate'] = status in {'FINAL_BET','PROVISIONAL'}
+    out['national_final_eligible'] = status == 'FINAL_BET'
+    out['national_combo_eligible'] = (
+        status == 'FINAL_BET'
+        and truth(row.get('scenario_parlay_eligible', False))
+        and truth(row.get('v3_parlay_eligible', False))
+    )
     out['model_validation_status'] = row.get('model_validation_status','장기 수익성 미검증')
     return out

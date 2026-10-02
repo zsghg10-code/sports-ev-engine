@@ -2,14 +2,47 @@
 import pandas as pd
 from sports_ev_engine.explanations import humanize_policy_reason
 
+def _pick_name(row):
+    try:
+        return str(row.display_pick).split(' | ',1)[-1]
+    except Exception:
+        return str(row.get('display_pick',''))
+
+def _event_candidate_summary(g):
+    """Expose all FINAL/PROVISIONAL options, including spreads hidden by the compact market summary."""
+    if 'national_status' not in g.columns:
+        return 0, ''
+    cand=g[g['national_status'].isin(['FINAL_BET','PROVISIONAL'])].copy()
+    if cand.empty:
+        return 0, ''
+    order={'FINAL_BET':0,'PROVISIONAL':1}
+    cand['_state_order']=cand['national_status'].map(order).fillna(9)
+    if 'point_ev_roi' in cand:
+        cand['_ev_sort']=pd.to_numeric(cand['point_ev_roi'],errors='coerce').fillna(-999)
+        cand=cand.sort_values(['_state_order','_ev_sort'],ascending=[True,False])
+    labels=[]
+    for _,r in cand.iterrows():
+        state='최종' if r.get('national_status')=='FINAL_BET' else '잠정'
+        label=_pick_name(r)
+        if label and f'{state}: {label}' not in labels:
+            labels.append(f'{state}: {label}')
+    return len(cand), ' / '.join(labels)
+
 def match_summary(frame):
     out=[]
     for eid,g in frame.groupby('event_id',sort=False):
         first=g.iloc[0]
+        event_candidate_count,event_candidate_names=_event_candidate_summary(g)
         for market in ('h2h','totals'):
             rows=g[g.market.eq(market)]
             if rows.empty:
-                out.append({'경기':f"{first.home_team} - {first.away_team}",'분석':'승무패' if market=='h2h' else '언더오버','판정':'해당 마켓 배당 미수집/미선택'})
+                out.append({
+                    '경기':f"{first.home_team} - {first.away_team}",
+                    '분석':'승무패' if market=='h2h' else '언더오버',
+                    '판정':'해당 마켓 배당 미수집/미선택',
+                    '경기 전체 최종/잠정 후보 수':event_candidate_count,
+                    '경기 전체 최종/잠정 후보':event_candidate_names,
+                })
                 continue
             if market=='totals':
                 # Main line: most book coverage, then closest to balanced market.
@@ -22,15 +55,17 @@ def match_summary(frame):
             direction=rows.sort_values('model_win_prob',ascending=False).iloc[0]
             value=rows.sort_values('point_ev_roi',ascending=False).iloc[0]
             item={'경기':f"{first.home_team} - {first.away_team}",'분석':'승무패' if market=='h2h' else '언더오버',
-                '확률이 가장 높은 선택':direction.display_pick.split(' | ',1)[-1],
+                '확률이 가장 높은 선택':_pick_name(direction),
                 '그 선택 추정 확률(%)':round(direction.model_win_prob*100,2),
-                '배당 대비 EV가 가장 높은 선택':value.display_pick.split(' | ',1)[-1],
+                '배당 대비 EV가 가장 높은 선택':_pick_name(value),
                 '배당':value.best_odds,'추정 확률(%)':round(value.model_win_prob*100,2),
                 'BE(%)':round(value.break_even*100,2),'Edge(%p)':round(value.edge_pp,2),
                 'EV(%)':round(value.point_ev_roi*100,2),
                 '가정 최저 EV(%)':round(value.scenario_ev_min*100,2),
                 '가정 최고 EV(%)':round(value.scenario_ev_max*100,2),
                 '판정':value.get('national_status_label', '모델상 양의 EV' if value.point_ev_roi>0 else '현재 배당에서 양의 EV 없음'),
+                '경기 전체 최종/잠정 후보 수':event_candidate_count,
+                '경기 전체 최종/잠정 후보':event_candidate_names,
                 '경기 데이터 검증':value.get('match_data_status',''),
                 '미확인 데이터':value.get('match_data_missing',''),
                 '모델 성능 검증':value.get('model_validation_status',''),
