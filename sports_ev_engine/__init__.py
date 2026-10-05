@@ -1,14 +1,21 @@
-__version__ = "3.6.0-autolearn"
+__version__ = "3.6.1-autolearn-kbo-starter-fix"
 
 # Preserve the v3.4.25 KBO safety hotfix.
 from .kbo_safety_patch import install as _install_v3425_kbo_safety
 _install_v3425_kbo_safety()
 del _install_v3425_kbo_safety
 
+# v3.6.1: a complete, game-matched Naver 1-9 lineup with both displayed
+# starters can override stale KBO GameCenter starter fields instead of leaving
+# every market permanently in STARTER CONFLICT / REVIEW.
+from .kbo_starter_authority_fix import install as _install_kbo_starter_authority
+_install_kbo_starter_authority()
+del _install_kbo_starter_authority
+
 from .providers import baseball_advanced as _baseball_advanced
 from .providers import live_baseball as _live_baseball
-_baseball_advanced.KBO_SAFETY_BUILD = "3.4.25-kbo-safety"
-_live_baseball.KBO_SAFETY_BUILD = "3.4.25-kbo-safety"
+_baseball_advanced.KBO_SAFETY_BUILD = "3.6.1-kbo-starter-authority"
+_live_baseball.KBO_SAFETY_BUILD = "3.6.1-kbo-starter-authority"
 _baseball_advanced.BASEBALL_ADVANCED_BUILD = "3.4.23"
 _live_baseball.LIVE_BASEBALL_BUILD = "3.4.20"
 del _baseball_advanced, _live_baseball
