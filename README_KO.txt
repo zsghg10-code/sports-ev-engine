@@ -1,34 +1,29 @@
-# Sports EV Engine v3.6.1 KBO starter-authority hotfix
+Sports EV Engine v3.6.2 — KBO Stability / Regression Control
 
-증상
-- 라인업 1~9가 모두 확정인데도 `starter_confirmed=False`
-- `STARTER_CONFLICT`
-- `robust_positive_ratio=0`, `robust_ev_p10=None`
-- 모든 KBO 선택지가 `검토 후보`
+핵심 원인
+- KBO 구조모델에서 최근 팀/라인업 폼을 이미 반영한 뒤 adaptive ensemble에서 recent_form을 다시 투표시키는 중복 경로가 있었습니다.
+- v3.4.25는 KBO 최근득점 확률 코어 자체도 바꿨습니다.
+- generic calibration은 KBO도 40개 표본부터 활성화될 수 있어 작은 표본에서 확률이 흔들릴 수 있었습니다.
+- counter_case_risk=HIGH인데 ROBUST가 표시될 수 있어 사용자가 과신하기 쉬웠습니다.
 
-원인
-- v3.4.25 안전패치가 KBO GameCenter의 오래된 선발명과 이미 확정된 Naver 라인업의 실제 선발명이 다르면
-  무조건 충돌로 막도록 되어 있었습니다.
-
-수정
-- 날짜/팀이 매칭된 Naver 경기 + source_game_id + 양 팀 1~9 완성 + 양 팀 선발명 존재 시 Naver를 당일 최신 권위 소스로 사용합니다.
-- GameCenter 선발명이 다르면 `stale official`로 기록하고 Naver 선발로 교체합니다.
-- `starter_confirmed=True`, `starter_verified=True`, `stage=FINAL` 경로를 복구합니다.
-- 기존 v3.4.25의 old pitcherId 폐기/이름 기준 재조회 로직을 그대로 활용하여 최근 선발/상대전적 데이터도 새 선발명으로 재조회합니다.
-- 부분 라인업/선발명 누락 때는 기존 안전게이트를 그대로 유지합니다.
+v3.6.2 수정
+1. KBO 최근득점 확률 코어를 pre-v3.4.25 방식으로 롤백.
+2. KBO adaptive ensemble의 recent_form 중복투표 제거.
+3. KBO calibration 활성 표본 40 -> 120 unique settled picks.
+4. 최근 선발 5경기 조기강판/대량실점 meltdown risk 감사필드 추가.
+5. counter HIGH면 ROBUST 금지.
+6. 시장 역이동 -2.0%p 이상이면 최대 SENSITIVE, -3.5%p 이상이면 REVIEW.
+7. UNDER + counter HIGH + 역이동/선발붕괴 위험이면 REVIEW.
+8. 결과를 보고 -1.5 마핸을 강제로 올리지는 않음. 기존 score distribution으로 독립 EV 계산.
 
 적용
-1. ZIP을 풀어 저장소 루트에 그대로 덮어씁니다.
-2. GitHub에 `sports_ev_engine/__init__.py`와 새 파일 `sports_ev_engine/kbo_starter_authority_fix.py`를 업로드/커밋합니다.
-3. Streamlit 앱을 Reboot합니다.
-4. `선택 종목 전체 자동분석`을 다시 실행합니다.
+- ZIP을 저장소 루트에 그대로 업로드/덮어쓰기
+- Commit changes
+- Streamlit Reboot
+- KBO 전체 자동분석 다시 실행
 
-정상 확인
-- 오늘 KBO 5경기에서 `STARTER_CONFLICT`가 사라져야 합니다.
-- `starter_confirmed`가 체크되어야 합니다.
-- 실제 선발명이 오늘 확정 라인업과 같아야 합니다.
-- `starter_vs_opponent_used`는 해당 선수의 상대전적 데이터가 실제 존재할 때만 체크됩니다. 비어 있어도 `starter_confirmed`를 다시 False로 만들면 안 됩니다.
-- FINAL/단일/조합 여부는 그 뒤 EV·강건성 게이트가 정상적으로 다시 판단합니다.
-
-주의
-이 패치는 FINAL 기준을 느슨하게 만든 것이 아니라, '완성된 당일 라인업 + 양쪽 선발명'을 오래된 GameCenter 선발 필드보다 최신 데이터로 취급하는 수정입니다.
+확인
+- model version: 3.6.2-kbo-stability
+- counter_case_risk=HIGH인 KBO 픽이 ROBUST로 남지 않음
+- 강한 역이동 픽 SENSITIVE/REVIEW
+- MLB/NPB/축구/NHL/NFL 확률 코어는 이번 패치에서 건드리지 않음
