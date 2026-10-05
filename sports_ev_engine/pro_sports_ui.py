@@ -1,4 +1,4 @@
-"""Streamlit UI helper for NHL/NFL v3.6.3 analysis tabs."""
+"""Streamlit UI helper for NHL/NFL v3.6.4 analysis tabs."""
 from __future__ import annotations
 import pandas as pd
 import streamlit as st
@@ -83,7 +83,7 @@ def render_pro_sport_analysis(*, sport_key, prefix, title, odds_key,
     st.markdown(f"### 상세 진단 · {cfg['label']} 전체 옵션")
     cols=[c for c in [
         "v3_decision_status","v3_candidate","v3_parlay_eligible","robust_positive_ratio","robust_ev_p10","robust_ev_min",
-        "counter_case_risk","signal_coverage","stage","data_quality","nhl_h2h_scope",
+        "counter_case_risk","signal_coverage","stage","data_quality","nhl_h2h_scope","context_collection_errors",
         "commence_time","home_team","away_team","market","selection","point","best_book","best_odds","books",
         "consensus_prob","raw_independent_prob","model_win_prob","push_prob","break_even","edge_pp","ev_roi",
         "conservative_ev_roi","kelly_scaled","uncertainty_pp","sanity",

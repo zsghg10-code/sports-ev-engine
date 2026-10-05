@@ -30,7 +30,7 @@ from .reasoning_engine import (
     final_probability_assessment,
 )
 
-PRO_SPORTS_BUILD = "3.6.3-nhl-integrity"
+PRO_SPORTS_BUILD = "3.6.4-nhl-espn-range-fix"
 
 SPORTS = {
     "americanfootball_nfl": {
@@ -157,32 +157,76 @@ class ESPNProContext:
         data = r.json()
         return data if isinstance(data, dict) else {}
 
-    def scoreboard(self, start: datetime, end: datetime) -> dict:
-        key = f"{start:%Y%m%d}-{end:%Y%m%d}"
+    def _scoreboard_token(self, token: str) -> dict:
+        """Fetch one ESPN scoreboard token and cache it.
+
+        ESPN Site scoreboard range tokens are unreliable for some team sports.
+        Long windows are therefore synthesized from YYYYMM month tokens.
+        """
+        key = f"token:{token}"
         if key not in self._score_cache:
             path = self.cfg["espn_path"]
             self._score_cache[key] = self._get(
-                f"{self.BASE}/{path}/scoreboard", {"dates": key, "limit": 500}
+                f"{self.BASE}/{path}/scoreboard", {"dates": token, "limit": 1000}
             )
         return self._score_cache[key]
 
-    def scoreboard_range(self, start: datetime, end: datetime) -> dict:
-        """Chunk long NHL ranges so ESPN's 500-event cap cannot truncate a season."""
-        if (end - start).days <= 65:
-            return self.scoreboard(start, end)
-        events: list[dict] = []
-        seen: set[str] = set()
-        cur = start
-        while cur < end:
-            nxt = min(end, cur + timedelta(days=60))
-            board = self.scoreboard(cur, nxt)
-            for event in board.get("events") or []:
+    @staticmethod
+    def _month_floor(v: datetime) -> datetime:
+        return v.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    @staticmethod
+    def _next_month(v: datetime) -> datetime:
+        return v.replace(year=v.year + 1, month=1, day=1) if v.month == 12 else v.replace(month=v.month + 1, day=1)
+
+    def scoreboard(self, start: datetime, end: datetime) -> dict:
+        """Synthesize arbitrary date windows from monthly ESPN requests.
+
+        If a monthly request errors, fall back to daily requests only for that
+        month.  Raw YYYYMMDD-YYYYMMDD requests are intentionally never used.
+        """
+        s = pd.to_datetime(start, utc=True, errors="coerce")
+        e = pd.to_datetime(end, utc=True, errors="coerce")
+        if pd.isna(s) or pd.isna(e):
+            return {"events": []}
+        if e < s:
+            s, e = e, s
+        cache_key = f"window:{s:%Y%m%d}-{e:%Y%m%d}"
+        if cache_key in self._score_cache:
+            return self._score_cache[cache_key]
+        events, seen = [], set()
+        cur = self._month_floor(s.to_pydatetime())
+        end_dt = e.to_pydatetime()
+        while cur <= end_dt:
+            try:
+                month_events = self._scoreboard_token(f"{cur:%Y%m}").get("events") or []
+            except Exception:
+                month_events = []
+                d = max(cur, s.to_pydatetime().replace(hour=0, minute=0, second=0, microsecond=0))
+                month_end = min(self._next_month(cur) - timedelta(days=1), end_dt)
+                while d.date() <= month_end.date():
+                    try:
+                        month_events.extend(self._scoreboard_token(f"{d:%Y%m%d}").get("events") or [])
+                    except Exception:
+                        pass
+                    d += timedelta(days=1)
+            for event in month_events:
+                ts = pd.to_datetime(event.get("date"), utc=True, errors="coerce")
+                if pd.isna(ts) or ts < s or ts > e:
+                    continue
                 eid = str(event.get("id") or "")
-                if eid and eid not in seen:
-                    seen.add(eid)
-                    events.append(event)
-            cur = nxt + timedelta(days=1)
-        return {"events": events}
+                dedupe = eid or f"{event.get('date')}|{event.get('name')}"
+                if dedupe in seen:
+                    continue
+                seen.add(dedupe); events.append(event)
+            cur = self._next_month(cur)
+        events.sort(key=lambda x: str(x.get("date") or ""))
+        out = {"events": events}
+        self._score_cache[cache_key] = out
+        return out
+
+    def scoreboard_range(self, start: datetime, end: datetime) -> dict:
+        return self.scoreboard(start, end)
 
     def summary(self, event_id: str) -> dict:
         eid = str(event_id or "")
@@ -640,8 +684,8 @@ def analyze_pro_event(market_rows: pd.DataFrame, sport_key: str,
             "REGULATION_3WAY" if has_draw else "OT_INCLUDED_2WAY"
         )
 
-    home, _ = provider.recent(home_name,kickoff,n=recent_n)
-    away, _ = provider.recent(away_name,kickoff,n=recent_n)
+    home, herr = provider.recent(home_name,kickoff,n=recent_n)
+    away, aerr = provider.recent(away_name,kickoff,n=recent_n)
     availability = provider.availability(home_name,away_name,kickoff)
     goalies = {"available":False,"home_confirmed":False,"away_confirmed":False,"home_goalie":"","away_goalie":"","source":""}
     if sport_key == "icehockey_nhl" and hasattr(provider,"goalie_status"):
@@ -650,6 +694,8 @@ def analyze_pro_event(market_rows: pd.DataFrame, sport_key: str,
         except Exception as e:
             goalies["errors"] = [f"goalie lookup failed: {type(e).__name__}"]
 
+    context_errors = list(herr or []) + list(aerr or []) + list(availability.get("errors") or []) + list(goalies.get("errors") or [])
+    context_errors = list(dict.fromkeys(str(x) for x in context_errors if x))
     ledger = _build_ledger(sport_key,home,away,availability,goalies)
     independent = _independent_event(sport_key,home_name,away_name,home,away,availability)
     min_games = min(home.games,away.games)
@@ -775,6 +821,7 @@ def analyze_pro_event(market_rows: pd.DataFrame, sport_key: str,
             "home_expected_goals":independent.get("home_goals"),"away_expected_goals":independent.get("away_goals"),
             "match_data_verified":core_ready,"match_data_status":stage if sport_key=="icehockey_nhl" else data_quality,
             "match_data_missing":", ".join(ledger.missing),
+            "context_collection_errors":" | ".join(context_errors),
             "model_validation_status":("잠정 후보 · 선발 골리/시즌초 컨텍스트 대기"
                                        if sport_key=="icehockey_nhl" and stage=="PROVISIONAL" and fields.get("v3_candidate")
                                        else "성능 검증 대기" if not fields.get("v3_candidate") else "실시간 후보 · 사후 정산 대상"),
@@ -855,6 +902,7 @@ def analyze_pro_board(odds_api, sport_key: str, *, region: str = "us",
                     "데이터":str(first.get("data_quality")),
                     "골리":f"{first.get('home_goalie','') or '미확정'} / {first.get('away_goalie','') or '미확정'}" if sport_key=="icehockey_nhl" else "-",
                     "MISSING":str(first.get("missing_signals") or "없음"),
+                    "수집오류":str(first.get("context_collection_errors") or "없음"),
                 })
             else:
                 status.append({"경기":label,"상태":"분석 결과 없음","데이터":"LOW","골리":"-","MISSING":"확률 산출 실패"})
