@@ -282,6 +282,11 @@ with tabs[0]:
     min_books=st.slider("컨센서스 최소 북메이커 수",2,6,3)
     deep_context_on=st.checkbox("🧠 v3 정밀 컨텍스트 (24시간 이내 xG·확정 라인업·결장·선수 영향·휴식일)",value=True,
         help="API-Football 추가 호출을 사용합니다. 실제 반환된 데이터만 반영하며 없는 항목은 MISSING으로 남깁니다.")
+    deep_max_events=st.slider(
+        "정밀 컨텍스트 최대 경기 수",2,8,4,key="club_deep_max_events",
+        help="전체 경기는 먼저 기본 모델로 분석하고, 후보 가능성이 높은 상위 경기만 API-Football 정밀 분석을 수행합니다."
+    )
+    st.caption("API-Football 쿼터 보호: 전체 1차 분석 → 상위 N경기만 정밀 컨텍스트")
     run=st.button("🚀 선택 종목 전체 자동분석",type="primary",disabled=not(ODDS_KEY and FOOTBALL_KEY and sport_key))
 
     if run:
@@ -313,7 +318,15 @@ with tabs[0]:
                 # The Odds API label is usually "Title — Description"; use the title part.
                 competition_name=label.split(" — ")[0].strip()
                 target_year=datetime.now(ZoneInfo("Asia/Seoul")).year
-                pool=build_competition_pool(foot,competition_name,target_year)
+                _club_pool_cache=st.session_state.setdefault("_club_pool_cache",{})
+                _club_pool_key=f"{competition_name}|{target_year}"
+                pool=_club_pool_cache.get(_club_pool_key)
+                if pool is None:
+                    pool=build_competition_pool(foot,competition_name,target_year)
+                    _club_pool_cache[_club_pool_key]=pool
+                    if len(_club_pool_cache)>8:
+                        for _old_key in list(_club_pool_cache.keys())[:-8]:
+                            _club_pool_cache.pop(_old_key,None)
                 st.write(
                     f"모델 데이터: API-Football {pool['league_name']} "
                     f"(league_id={pool['league_id']}, seasons={pool['seasons']}, fixtures={len(pool['fixtures'])})"
@@ -323,22 +336,98 @@ with tabs[0]:
                 event_meta=[]
                 total_events=market["event_id"].nunique() if not market.empty else 0
                 failures=[]
+                base_results={}
+                ordered_events=[]
+
+                # Stage 1: every priced match is analyzed without match-specific
+                # deep API-Football calls. This prevents 20+ games from each
+                # requesting xG, lineups, injuries and player pages.
                 for idx,(eid,g) in enumerate(market.groupby("event_id"),start=1):
                     home=g.iloc[0]["home_team"]; away=g.iloc[0]["away_team"]
-                    st.write(f"[{idx}/{total_events}] {match_label_kst(home,away,g.iloc[0]['commence_time'])}")
+                    st.write(f"[1차 {idx}/{total_events}] {match_label_kst(home,away,g.iloc[0]['commence_time'])}")
                     try:
-                        event_pool=dict(pool)
-                        if deep_context_on:
+                        base_pool=dict(pool)
+                        base_pool["event_context"]={
+                            "deep_context_attempted":False,
+                            "deep_context_reason":"quota-safe stage-1 screening",
+                            "lineup_confirmed":False,
+                            "lineup_status":"NOT_CHECKED",
+                        }
+                        base_frame,base_meta=analyze_event(g,base_pool,recent_n=recent_n)
+                        if base_frame.empty:
+                            failures.append({"경기":f"{home} - {away}","이유":base_meta.get("reason",base_meta.get("status","데이터 없음"))})
+                            continue
+                        base_results[eid]=(g,base_frame,base_meta)
+                        ordered_events.append(eid)
+                    except Exception as e:
+                        failures.append({"경기":f"{home} - {away}","이유":str(e)})
+
+                # Stage 2: choose only top-N near-term candidates for deep context.
+                deep_event_ids=set()
+                if deep_context_on and base_results:
+                    now_utc=pd.Timestamp.now(tz="UTC")
+                    scored=[]
+
+                    def _safe_max(frame,col,default=-999.0):
+                        if col not in frame.columns:
+                            return default
+                        vals=pd.to_numeric(frame[col],errors="coerce").dropna()
+                        return float(vals.max()) if not vals.empty else default
+
+                    for order,eid in enumerate(ordered_events):
+                        g,base_frame,_=base_results[eid]
+                        try:
+                            target=pd.Timestamp(g.iloc[0]["commence_time"])
+                            target=target.tz_convert("UTC") if target.tzinfo else target.tz_localize("UTC")
+                            hours=(target-now_utc).total_seconds()/3600
+                        except Exception:
+                            hours=999.0
+                        if hours<0 or hours>24:
+                            continue
+                        scored.append((
+                            _safe_max(base_frame,"conservative_ev_roi"),
+                            _safe_max(base_frame,"robust_ev_p10"),
+                            _safe_max(base_frame,"point_ev_roi"),
+                            _safe_max(base_frame,"edge_pp"),
+                            _safe_max(base_frame,"model_win_prob"),
+                            -order,
+                            eid,
+                        ))
+
+                    scored.sort(key=lambda x:x[:-1],reverse=True)
+                    deep_event_ids={row[-1] for row in scored[:int(deep_max_events)]}
+                    st.caption(
+                        f"API-Football 쿼터 보호: 1차 {len(base_results)}경기 완료 → "
+                        f"정밀 분석 {len(deep_event_ids)}경기"
+                    )
+
+                # Stage 3: rerun only selected games with deep context. Other
+                # games keep their stage-1 result instead of spending API calls.
+                deep_blocked=False
+                for idx,eid in enumerate(ordered_events,start=1):
+                    g,base_frame,base_meta=base_results[eid]
+                    home=g.iloc[0]["home_team"]; away=g.iloc[0]["away_team"]
+                    try:
+                        analyzed,meta=base_frame,base_meta
+
+                        if deep_context_on and eid in deep_event_ids and not deep_blocked:
+                            event_pool=dict(pool)
                             try:
                                 event_pool["event_context"]=collect_deep_context(
                                     foot,pool,home,away,g.iloc[0]["commence_time"],
                                     season=(pool.get("seasons") or [target_year])[0],horizon_hours=24
                                 )
+                                analyzed,meta=analyze_event(g,event_pool,recent_n=recent_n)
                             except Exception as deep_error:
-                                event_pool["event_context"]={"deep_context_attempted":True,"deep_context_reason":f"collector failed: {type(deep_error).__name__}: {deep_error}"}
-                        else:
-                            event_pool["event_context"]={"deep_context_attempted":False,"deep_context_reason":"disabled in UI"}
-                        analyzed,meta=analyze_event(g,event_pool,recent_n=recent_n)
+                                msg=str(deep_error)
+                                if any(token in msg.lower() for token in ("429","요청 제한","할당량","rate","limit")):
+                                    deep_blocked=True
+                                    st.warning(
+                                        "API-Football 요청 제한 감지: 남은 경기의 정밀 호출을 중단하고 "
+                                        "1차 분석 결과를 유지합니다."
+                                    )
+                                # Keep base_frame/base_meta for this game.
+
                         if not analyzed.empty:
                             analyzed["sport_key"]=sport_key
                             analyzed["kickoff_kst"]=format_kst(g.iloc[0]["commence_time"])
@@ -349,6 +438,7 @@ with tabs[0]:
                     except Exception as e:
                         failures.append({"경기":f"{home} - {away}","이유":str(e)})
                         event_meta.append({"status":"exception","home":home,"away":away,"reason":str(e)})
+
                 st.session_state["failures"]=failures
                 ranked=pd.concat(all_rows,ignore_index=True) if all_rows else pd.DataFrame()
                 if not ranked.empty:
