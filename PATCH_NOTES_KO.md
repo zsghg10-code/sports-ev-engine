@@ -1,55 +1,14 @@
-# v2.9.4
+# PATCH NOTES
 
-전체 경기 분석표와 후보/라인업/조합 숫자를 분리했습니다. ANALYSIS_V294_KO.md를 확인하세요. 아래는 이전 버전 기록입니다.
+- full-board zero-deep-call pre-screen
+- top-N deep collection (default 5, range 2~8)
+- competition fixture-pool xG reuse
+- lazy player-importance collection
+- endpoint-aware cache TTL
+- API-Football daily/minute quota tracking
+- request/cache diagnostics
+- HTTP 429 Retry-After backoff
+- stop remaining deep batch after quota/access hold
+- Streamlit competition-pool session cache
 
-# v2.9.3
-
-A매치 일괄 차감 선정을 27개 가정 시험으로 교체했습니다. 설치·판정 기준·검증 한계는 CANDIDATES_V293_KO.md를 확인하세요. 아래는 이전 버전 기록입니다.
-
-# v2.9.2 — 날짜순 검증·가정 차감 표시
-
-최신 안내는 VALIDATION_KO.md를 읽으세요. 2.9.1 기능을 포함합니다.
-
-# v2.9.1 — REVIEW 표시 및 국가대표 경로 수정
-
-최신 설치·변경 내용은 REVIEW_FIX_KO.md를 읽으세요. 2.9.0 기능을 포함한 전체 패키지입니다.
-
-아래는 이전 버전 안내입니다.
-
-# v2.9.0 무료 자동 수집
-
-기본 A매치 화면에서 CSV 업로드를 없애고 공개 대회 기록·가능한 선발 명단 조회를 연결했습니다.
-최근 표본·최신성 기준을 검사하고 부족한 경기는 보류합니다. 경기 상태와 소스 진단을 추가했습니다.
-전체 폴더 교체 후 Reboot하세요. 상세 범위/한계: AUTO_AMATCH_KO.md.
-
-# v2.8.0 무료 A매치 모드
-
-ZIP 전체 반영 후 Reboot하세요. 설치와 CSV 열 설명: FREE_AMATCH_KO.md.
-기본 A매치 기록 소스를 무료 공개 친선전 + CSV로 변경했습니다. API-Football 없이 실행할 수 있습니다.
-최근 기록 날짜/출처/표본 수 표시, 데이터 오류 검증, xG·사용자 결장 보정, 라인업 확인된 2폴 후보를 추가했습니다.
-기존 NPB·클럽 축구 기능을 포함한 전체 배포 패키지이며 무료 수집 모듈은 별도 파일입니다.
-아래는 이전 버전 변경 기록입니다.
-
-# v2.7.3 적용 안내
-
-1. 압축을 풀고 app.py와 sports_ev_engine 폴더 안의 파일까지 모두 저장소에 반영하세요.
-2. app.py만 교체하면 안 됩니다. 기존 Streamlit Secrets의 API 키는 유지하세요.
-3. 배포가 끝나면 Streamlit 관리 화면에서 Reboot app을 실행하세요.
-4. 화면 상단에 v2.7.3와 “수집 모듈 v2.7.3 확인 완료”가 보여야 합니다.
-
-## A매치 수집 수정
-- 무료 플랜의 last 파라미터 거절 시 팀/시즌별 조회로 전환합니다.
-- 해당 시즌 자체가 플랜에서 제한되면 중단하고 이유를 표시합니다. 패치로 유료 데이터 접근 권한을 추가할 수는 없습니다.
-- 요청 간격 6.2초, 성공 응답 재사용, 429 및 플랜 제한 시 남은 경기 반복 요청 중단.
-- Turkey/Türkiye 이름 통일. 클럽 챔피언스리그 예선을 A매치로 분류하던 조건 수정.
-- 배당 API 잔여 요청과 API-Football 기록 API의 한도는 별개입니다.
-
-## 수정
-- 경기 중 최신 오더를 미확정으로 표시하던 오류 수정. 최신 오더는 교체된 선수를 포함할 수 있습니다.
-- 시작 예정시간이 지난 경기의 배당은 사전 EV/다폴 분석에서 제외합니다. 경기 시작 자체가 확인되지 않은 경우를 고려해 “시작시간 경과”로 표시합니다.
-- A매치 전체 제공 대회와 활성/비활성 상태 표시, 전체 활성 대회 일괄 조회, 유로 예선 및 CONCACAF 네이션스리그 분류 보완.
-- 미지원 친선전은 미지원으로 안내합니다. 비활성 대회가 목록에 보인다고 실제 배당이 제공되는 것은 아닙니다.
-- 새 앱과 옛 수집 모듈이 섞이면 실행을 중단하고 재배포/Reboot 안내를 표시합니다.
-
-## 검증 범위
-모의 응답으로 라인업의 경기 전/중/후 표시, 경기 시작 후 사전 분석 제외, 대회 일괄 조회 및 옛 모듈 차단을 검증했습니다. 사용자 API 키를 이용한 실제 서버 수집 및 배포는 수행하지 않았습니다.
+형태: UPDATE/DEPLOY patch package (전체 저장소 스냅샷 아님)
